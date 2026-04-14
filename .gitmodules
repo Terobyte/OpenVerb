@@ -1,0 +1,6 @@
+[submodule "engine/third_party/llama.cpp"]
+	path = engine/third_party/llama.cpp
+	url = https://github.com/ggml-org/llama.cpp.git
+[submodule "engine/third_party/json"]
+	path = engine/third_party/json
+	url = https://github.com/nlohmann/json.git
