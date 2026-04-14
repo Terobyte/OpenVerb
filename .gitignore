@@ -1,0 +1,16 @@
+.superpowers/
+.g3/
+validation/models/
+validation/deps/
+
+.DS_Store
+__pycache__/
+
+engine/build*/
+engine/.cache/
+engine/third_party/llama.cpp/
+engine/third_party/whisper.cpp/
+engine/third_party/onnxruntime/
+engine/third_party/silero-vad/
+
+validation/results/mmproj-test.log

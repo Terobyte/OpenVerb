@@ -1,0 +1,12 @@
+model,filename,sentences,pairs_checked,pairs_flagged,repetition_rate,repetition_detected
+gemma-4-E2B-it-Q4_K_M.gguf,filler-en.wav,0,0,0,0.0000,0
+gemma-4-E2B-it-Q4_K_M.gguf,long-en-clean.wav,0,0,0,0.0000,0
+gemma-4-E2B-it-Q4_K_M.gguf,medium-en-clean.wav,0,0,0,0.0000,0
+gemma-4-E2B-it-Q4_K_M.gguf,repeat-en.wav,0,0,0,0.0000,0
+gemma-4-E2B-it-Q4_K_M.gguf,short-en-clean.wav,0,0,0,0.0000,0
+gemma-4-E2B-it-Q4_K_M.gguf,short-en-noisy.wav,0,0,0,0.0000,0
+gemma-4-E2B-it-Q4_K_M.gguf,short-fr-clean.wav,0,0,0,0.0000,0
+gemma-4-E2B-it-Q4_K_M.gguf,short-ru-clean.wav,0,0,0,0.0000,0
+gemma-4-E2B-it-Q4_K_M.gguf,short-zh-clean.wav,0,0,0,0.0000,0
+gemma-4-E2B-it-Q4_K_M.gguf,silence.wav,0,0,0,0.0000,0
+gemma-4-E2B-it-Q4_K_M.gguf,two-min-en-clean.wav,0,0,0,0.0000,0
