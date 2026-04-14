@@ -21,7 +21,7 @@ OpenVerb is an open-source, 100% local voice-to-text application for macOS (and 
 | App | Swift / SwiftUI | Native macOS + future iOS from same codebase |
 | Architecture | Client-server (IPC) | Engine reusable across projects, crash isolation |
 | UI | Minimal — center-screen waveform window | Spotlight-style, appears on hotkey |
-| Hotkey | ⌥Space (default), configurable | Hands-free dictation; best-effort registration at launch (no macOS API to pre-check conflicts — attempt registration, show re-bind prompt on failure) |
+| Hotkey | ⌥Space (default), configurable | Hands-free dictation; best-effort registration at launch (no macOS API to pre-check conflicts — attempt registration; on failure: show inline alert with a text field pre-filled with the conflicting hotkey so user can type an alternative immediately, without needing Preferences which ships in MVP5). MVP3 minimal fallback: `NSAlert` with an `NSTextField` accessory view — on confirm, retry registration with the new key combo. |
 | Privacy | 100% local processing | No cloud option, no telemetry. One-time model download at first launch |
 | Distribution | `brew install --cask openverb` | Cask for GUI app; model download at first launch |
 | Repository | Monorepo | Engine + app + homebrew in one repo |
@@ -81,6 +81,19 @@ Each phase uses a distinct framing; transitions are explicit and unambiguous.
 → {"type":"session.start","context":{...}}\n
 ← {"type":"session.ready"}\n
 
+# session.start context JSON schema:
+# {
+#   "app":      string   REQUIRED — bundle ID or app name (e.g. "com.apple.Terminal")
+#                        Use NSWorkspace.frontmostApplication.bundleIdentifier.
+#                        Fall back to localizedName if bundleIdentifier is nil.
+#   "window":   string   OPTIONAL — window title from AXUIElement (empty string if unavailable)
+#   "selection": string  OPTIONAL — selected text from AXUIElement (empty string if unavailable)
+#   "language": string   OPTIONAL — BCP-47 locale (e.g. "en-US", "ru-RU"). Defaults to system locale.
+# }
+# Engine behavior on unknown fields: ignore silently (forward compatible).
+# Engine behavior on missing "app": use "unknown" as app name, apply default style.
+# All fields are UTF-8 strings. No nesting beyond top-level context object.
+
 # ↑ After session.ready, both sides switch to Phase 2 (binary mode).
 
 # Phase 2 — Binary audio stream (length-prefixed frames)
@@ -108,6 +121,16 @@ Each phase uses a distinct framing; transitions are explicit and unambiguous.
 #   if first byte is '{' → read until '\n' (max 4096 bytes, timeout 5s) → parse JSON error
 #   otherwise → this violates the protocol invariant; treat as fatal error
 # After an error, engine resets to IDLE. Client must start a new session.
+#
+# CRITICAL CLIENT REQUIREMENT: The client MUST maintain a concurrent read path
+# during Phase 2. While the client write loop is sending binary frames, a separate
+# thread (or non-blocking poll) MUST read from the socket. If the client only writes
+# and never reads during Phase 2, an error JSON sent by the engine will sit in the
+# kernel socket buffer unread — by the time the client enters Phase 3 and reads it,
+# the error context is stale and recovery is unreliable.
+# Implementation: use a background thread that calls poll(fd, POLLIN, 100ms) in a
+# loop during Phase 2. On POLLIN: read and parse the error JSON, abort the write loop,
+# close the socket. The write loop signals the read thread on sentinel or disconnect.
 ← {"type":"error","code":"malformed_json","message":"..."}\n
 ← {"type":"error","code":"phase_violation","message":"..."}\n
 ← {"type":"error","code":"corrupt_audio","message":"..."}\n
@@ -139,9 +162,14 @@ Each phase uses a distinct framing; transitions are explicit and unambiguous.
 #   Escape (while recording)  = CANCEL  — Swift closes socket → engine resets to IDLE, window hides
 #   ⌥Space (while inferring)  = ABORT + restart — Swift closes+reconnects, starts new session
 #
-# Escape registered via NSEvent.addLocalMonitorForEvents during recording only.
-# RecordingWindow must be key window for local monitor to fire (NSPanel nonactivatingPanel
-# style means it may not always be key — ensure orderFrontRegardless + makeKey on show).
+# Escape must be registered via NSEvent.addGlobalMonitorForEvents (NOT local monitor)
+# during recording. Reason: NSPanel with nonactivatingPanel style does not reliably
+# become key window — a system notification, alert, or Space switch can remove key
+# status at any time. A local monitor fires only when the app has key window status;
+# a global monitor fires regardless. NSEvent.addGlobalMonitorForEvents for keyDown
+# does NOT require Input Monitoring permission for modifier-free keys (Escape = no modifier).
+# Register the global Escape monitor on IDLE→RECORDING transition; deregister on exit
+# from RECORDING state. Do not leave a global monitor active during IDLE or INFERRING.
 ```
 
 **Parser state machine (engine-side):**
@@ -199,9 +227,13 @@ SHUTDOWN
 
 **Hotkey debouncing:** Minimum 300ms between ⌥Space toggles. Presses within the debounce window are ignored. This prevents state corruption from rapid double-taps.
 
-**⌥Space during inference:** If user presses ⌥Space while engine is in INFERRING state, the current inference is **aborted** and a new recording session begins immediately. The aborted result is discarded. This feels natural — user is "starting over."
+**⌥Space during inference:** If user presses ⌥Space while engine is in INFERRING state, the current inference is **aborted** and a new recording session begins. The aborted result is discarded. This feels natural — user is "starting over."
+
+**Abort-and-restart latency:** After the client closes the socket, the IpcServer poll loop (1s timeout) may take up to 1s to detect the disconnect and return to `accept()`. Total reconnect window: up to ~1.5s (poll timeout + accept setup). During this window, AppState MUST show a "Reconnecting..." subtitle in RecordingWindow (not IDLE, not RECORDING) — UI must NOT go dark or appear hung. On reconnect success (ping/pong), transition to RECORDING and start streaming. The new session does NOT require a model reload — model stays loaded.
 
 **Empty/ultra-short audio:** If zero-length sentinel arrives with <210ms of audio (<7 VAD frames at 30ms each; frame-aligned threshold — see engine VAD spec), or VAD detected no speech, engine skips inference and returns `{"type":"result","text":"","command":null}`. App discards empty results silently — no error shown.
+
+**VAD-filtered-to-zero:** Even if >210ms of audio was received, if VAD processing filtered ALL frames as silence (ring_buffer.bytes_available() == 0 after sentinel), the engine MUST also return an empty result rather than attempting inference on a zero-byte buffer. Check: `if (ring_buffer_.bytes_available() == 0) → return empty result`. This is a separate check from the duration check and must happen after VAD processing is applied to the buffer.
 
 ### Prompt (Primary — Gemma 4 E2B audio-native)
 
@@ -238,13 +270,24 @@ Style: {style_from_template}
 </ApplicationContext>
 
 <ClipboardContext>
-{clipboard_content_max_10kb}
+{clipboard_content_dynamic_limit}
 </ClipboardContext>
 
 <SelectedText>
-{selected_text_if_any_max_10kb}
+{selected_text_dynamic_limit}
 </SelectedText>
 ```
+
+**Dynamic context token limits:** The flat 10KB limit for clipboard and selected text is unsafe when `ctx_size` is small. Use a dynamic ceiling instead:
+```
+max_context_chars = (ctx_size - 500 - estimated_audio_tokens) * 4
+estimated_audio_tokens = recording_duration_secs * 25  # Gemma audio encoder: ~25 tokens/sec
+max_clipboard_chars = max_context_chars / 2            # split budget equally
+max_selected_chars  = max_context_chars / 2
+```
+Hard ceiling: 10KB per field regardless of ctx_size (prevents unintended prompt flooding).
+Floor: at least 256 chars per field if context budget allows (never truncate to zero when ctx_size is adequate).
+`prompt_builder.cpp` MUST apply this calculation before inserting context fields. Log a WARN if either field is truncated.
 
 **XML escaping:** Before inserting clipboard or selected text into prompt tags, escape XML special characters:
 - `&` → `&amp;`
@@ -292,11 +335,11 @@ Style: {style_from_template}
 </ApplicationContext>
 
 <ClipboardContext>
-{clipboard_content_max_10kb}
+{clipboard_content_dynamic_limit}
 </ClipboardContext>
 
 <SelectedText>
-{selected_text_if_any_max_10kb}
+{selected_text_dynamic_limit}
 </SelectedText>
 
 <Transcription>
@@ -336,7 +379,7 @@ Punctuation ("period", "comma") — Gemma outputs `.` or `,` directly as part of
 
 | Failure | Handling |
 |---------|----------|
-| Engine crashes | App detects broken socket, shows error in menu bar, auto-restarts engine |
+| Engine crashes | App detects broken socket, shows error in menu bar, auto-restarts engine with exponential backoff (1s, 2s, 4s between attempts). Crash counter tracked per session: if engine crashes 3 times within 60s, stop auto-restarting and show persistent alert: "Engine keeps crashing — try reducing --ctx-size or closing memory-intensive apps." This prevents OOM crash loops where restart → OOM → crash → repeat until jetsam kills the app. |
 | Model fails to load (OOM, corrupt) | Engine returns error JSON, app shows "Model error — re-download?" |
 | IPC socket disconnects mid-session | App cancels recording, hides window, shows brief error |
 | Microphone access revoked | App detects on next toggle, shows "Microphone permission needed" |
@@ -360,16 +403,35 @@ Synchronization:
 │                        after the zero-length sentinel, then dispatches all data to
 │                        llama.cpp which handles its own internal parallelism (n_threads).
 │                        Multiple consumer threads reading the ring buffer would violate SPSC.
+│
+│                        reset() TIMING INVARIANT: ring_buffer_.reset() is safe to call ONLY
+│                        when the inference thread is suspended on infer_cv_.wait(). This is
+│                        guaranteed because reset() is called from the session thread only
+│                        after result_cv_ signals (inference complete) OR after abort_inference_
+│                        is set AND result_cv_ is waited on (abort path). Never call reset()
+│                        while the inference thread may be in process_stream().
+│
+│                        ABORT FREQUENCY: The inference thread MUST check abort_inference_ at
+│                        least every 32 generated tokens (one llama.cpp batch boundary is typical).
+│                        If abort_inference_ is not checked frequently enough, result_cv_.wait()
+│                        in the session thread can hang for seconds while the inference thread
+│                        finishes a long batch. 32-token check interval ≈ 0.5–1s max wait on M3 Pro.
 ├── Progress messages  — inference thread writes to a thread-safe queue;
 │                        main thread drains the queue and sends over IPC socket.
 │                        No direct socket writes from inference thread.
 └── Session state      — owned by main thread. Audio/inference threads signal via atomics.
 ```
 
-Default thread count: `max(1, min(4, perf_cores))` where `perf_cores` = P-core count only,
+**Inference thread count:** `max(1, min(4, perf_cores))` where `perf_cores` = P-core count only,
 obtained via `sysctlbyname("hw.perflevel0.physicalcpu")` (macOS 12+, falls back to
 `sysctlbyname("hw.physicalcpu") - 2` on older systems). E-cores slow llama.cpp inference
 on Apple Silicon — exclude them from the thread pool. Configurable via `--threads`.
+
+**Model load thread count:** Use ALL physical cores (P + E) during `llama_model_load_from_file`.
+Model loading is I/O-bound (disk reads + weight parsing), not compute-bound — E-cores help here.
+Set `n_threads_load = hw.physicalcpu` before `llama_model_load_from_file`, restore to inference
+thread count after. This can reduce cold-start time by ~30% on Apple Silicon by parallelizing
+weight decompression and memory mapping across all cores.
 
 ## Daemon Lifecycle
 
@@ -394,6 +456,7 @@ on Apple Silicon — exclude them from the thread pool. Configurable via `--thre
   Subsequent sessions within the idle timeout reuse the already-loaded model and get
   `session.ready` in <50ms.
 - Model unloads after 5 minutes of inactivity (no inference requests); configurable via `--model-idle-timeout` (seconds, default 300)
+- **Memory pressure:** Engine registers a `DISPATCH_SOURCE_TYPE_MEMORYPRESSURE` handler at startup (levels: `DISPATCH_MEMORYPRESSURE_WARN` and `DISPATCH_MEMORYPRESSURE_CRITICAL`). On WARN: log a warning and schedule immediate idle unload (override idle timer). On CRITICAL: call `unload_model()` immediately regardless of session state — if session is active, abort it first (same as SIGTERM path). A 2–3 GB loaded model will be killed by jetsam if not proactively unloaded under critical memory pressure. This is especially important on 8GB and 16GB unified-memory Macs.
 - On `NSWorkspace.willSleepNotification`: model unloaded immediately, socket closed
 - On wake: engine process stays alive (launchd already started it); model reloads on next inference request
 
@@ -405,6 +468,7 @@ Triggered from Preferences when the user changes from Path A (gemma_audio) to Pa
 1. Swift app checks: if recording is active, show alert "Stop recording before switching backend." Block switch.
 2. Swift sends `{"type":"session.shutdown"}` to cleanly exit the engine process.
 3. EngineManager waits up to 3s for socket to close (process exit confirmation). If timeout, sends SIGTERM.
+   **Partial write race:** If the engine is mid-result when SIGTERM arrives (writing `{"type":"result","text":"Hello wo`), the client may read a partial JSON frame. EngineClient MUST handle `JSONDecoder` parse errors during backend switch gracefully — treat a partial/corrupt final message as a cancelled session, not a fatal error. Do not surface a parse error to the user during an intentional backend switch.
 4. EngineManager starts a new engine process with `--backend whisper_gemma` (or `gemma_audio`).
 5. New engine responds to `{"type":"ping"}` with `{"type":"pong"}` → Swift shows "Backend ready" in status bar.
 
@@ -422,8 +486,24 @@ engine/
 ├── src/
 │   ├── main.cpp
 │   ├── engine.h/.cpp               # Unified public API
+│   │                               # Engine constructor does NOT load the model.
+│   │                               # BOTH call sites MUST call engine.ensure_loaded() explicitly:
+│   │                               #   (1) IPC daemon: Session calls ensure_loaded() in WAITING_READY
+│   │                               #   (2) CLI mode: main.cpp calls ensure_loaded() before process_file()
+│   │                               # Forgetting ensure_loaded() in the CLI path is a regression risk
+│   │                               # when the constructor load is removed (MVP2 step 21). ensure_loaded()
+│   │                               # is idempotent — safe to call multiple times.
 │   ├── backend/
-│   │   ├── backend.h                    # Abstract interface
+│   │   ├── backend.h                    # Abstract interface — TWO inference methods:
+│   │   │                                #   process_file(path, ctx_json) → InferenceResult
+│   │   │                                #     (CLI mode only; progress via std::function<void(float)>)
+│   │   │                                #   process_stream(pcm, sample_rate, ctx_json,
+│   │   │                                #                  abort_flag, progress_queue) → InferenceResult
+│   │   │                                #     (IPC daemon mode; progress via ProgressQueue&)
+│   │   │                                # These are ADDITIVE methods — process_file() is NOT replaced
+│   │   │                                # or unified with process_stream(). They serve different call
+│   │   │                                # sites with different progress delivery mechanisms. Avoid
+│   │   │                                # creating a third "unified" path — maintain both separately.
 │   │   ├── backend_gemma_audio.h/.cpp   # Primary: Gemma 4 E2B audio-native
 │   │   └── backend_whisper_gemma.h/.cpp # Fallback: Whisper + Gemma 4 E2B text
 │   ├── inference/
@@ -478,6 +558,16 @@ openverb-engine --file audio.wav --context '{"app":"Terminal"}'
 # For long recordings (>2 min), pass --ctx-size 8192 or higher. The 5-minute recording limit
 # consumes ~7500 audio tokens alone, requiring --ctx-size 8192 minimum.
 # Default 4096 is intentionally conservative for memory; increase for long dictation use cases.
+#
+# OVERFLOW PROTECTION (engine-side): The engine MUST check at every 30s boundary during
+# STREAMING_AUDIO whether the buffered audio would exceed the current ctx_size budget:
+#   max_audio_tokens = ctx_size - 500 - system_prompt_tokens
+#   max_recording_secs = max_audio_tokens / 25
+# If the recording duration crosses 80% of max_recording_secs, engine sends a warning:
+#   {"type":"warning","code":"approaching_context_limit","seconds_remaining":N}
+# If the recording duration hits 100%, engine sends duration_exceeded error and resets to IDLE.
+# This prevents silent data truncation — the user gets an explicit error rather than a
+# silently truncated or corrupted result.
 
 # CLI mode — live microphone capture (uses capture.h / CoreAudio)
 openverb-engine --mic --context '{"app":"Terminal"}'
@@ -526,6 +616,12 @@ app/OpenVerb/
 │                                    # Engine never sends audio data back. AudioSession calls
 │                                    # waveform callback(Data) → WaveformView computes RMS amplitude.
 │                                    # No IPC involvement — purely a tap on the local audio pipeline.
+│                                    # THREADING: AVAudioEngine tap callback fires on a background
+│                                    # audio thread. WaveformView @State/@Published updates MUST
+│                                    # be dispatched to the main thread:
+│                                    #   DispatchQueue.main.async { self.amplitude = rms }
+│                                    # Or mark the update method @MainActor. Direct @State mutation
+│                                    # from a background thread is undefined behavior in SwiftUI.
 │   ├── ProcessingView.swift         # Animated indicator during inference. Driven by progress
 │                                    # percent from engine {"type":"progress","percent":N}.
 │                                    # NOT a precise countdown (Path A progress is non-monotonic).
@@ -533,6 +629,18 @@ app/OpenVerb/
 │                                    # update display only if new value > current displayed value.
 │                                    # No numeric label. Falls back to spinner if no progress
 │                                    # message received within 2s of inference start.
+│                                    # RESET INVARIANT: displayedPercent MUST be reset to 0.0
+│                                    # on every IDLE→PREPARING transition (start of new session).
+│                                    # If not reset, the clamp variable retains 100 from the prior
+│                                    # session and the ring will never animate for the next result.
+│   │                                # WAVEFORM→PROCESSING TRANSITION: On RECORDING→INFERRING
+│   │                                # transition (sentinel sent), WaveformView fades out over
+│   │                                # 150ms while ProcessingView fades in over 150ms (crossfade).
+│   │                                # Use SwiftUI .transition(.opacity) with .animation(.easeInOut(
+│   │                                # duration: 0.15)) on a ZStack conditioned on AppState.
+│   │                                # Do NOT use .transition(.slide) — it causes layout jump.
+│   │                                # RecordingWindow height stays constant during transition
+│   │                                # (WaveformView and ProcessingView must have matching heights).
 │   ├── StatusBarItem.swift          # Menu bar icon
 │   ├── PreferencesView.swift        # Hotkey, backend, model path, language, clipboard toggle
 │   └── OnboardingView.swift         # First-launch permissions + model download
@@ -566,9 +674,11 @@ Primary: clipboard simulation — **STRICT OPERATION ORDER** (order is critical 
 2. Record `NSPasteboard.changeCount` and save current clipboard contents.
 3. Write result text to clipboard.
 4. `RecordingWindow.orderOut(nil)` — hide panel, release key window status.
-5. `targetApp.activate(options: [])` — bring target app to foreground. Focus transfer is async; proceed immediately (no sleep).
+5. `targetApp.activate(options: [])` — bring target app to foreground. Focus transfer is async (Mach message to Window Server) while CGEvent posts to the HID event stream — these are separate queues and order is not guaranteed at 0ms delay. Insert a **minimum 50ms delay** (`DispatchQueue.main.asyncAfter(deadline: .now() + 0.05)`) between `activate()` and the CGEvent post. This is the minimum that reliably covers focus transfer under load; 0ms works in benchmarks but fails intermittently when the system is under pressure.
 6. Simulate ⌘V via CGEvent (`kCGEventKeyDown`/`Up`, virtualKey `0x09`, flags `.maskCommand`) — posts to HID event stream, delivered to now-active target app.
 7. After 300ms (`DispatchQueue.main.asyncAfter`): restore original clipboard **only if** `NSPasteboard.general.changeCount == savedChangeCount` — if another process wrote during the window, skip restore.
+
+**Known edge case (acceptable):** If the user presses ⌘C in the target app BEFORE the ⌘V paste completes (within the first ~100ms), their new clipboard content overwrites OpenVerb's result text, changeCount increments, and the restore is skipped. Result: user's pre-recording clipboard is lost. This race requires sub-100ms user action concurrent with injection and is considered an acceptable edge case — documenting for awareness, not fixing in MVP3.
 
 Fallback: CGEvent keystroke per character (for fields where ⌘V is blocked).
 
@@ -619,6 +729,8 @@ brew install --cask openverb
 ```
 
 Model download source: HuggingFace. SHA256 checksum verified before use.
+
+**Checksum security:** SHA256 checksums MUST be hardcoded in the app bundle (in `ModelDownloader.swift` as compile-time constants), NOT downloaded from a server. If checksums are fetched over the network, a MITM can substitute both the model file and the matching checksum, defeating the verification entirely. The hardcoded values are updated at each release via the build process — `build-release.sh` pins the checksums before signing.
 
 **TODO (must be resolved before MVP 1 human testing):** Pin exact model source:
 - `gemma-4-E2B-it-Q4_K_M.gguf` — source repo TBD (ggml-org or unsloth). Record SHA256 in `scripts/download-model.sh`.
@@ -674,7 +786,8 @@ App listens for `NSWorkspace.willSleepNotification`:
   and a partial inference result produces worse UX than no result.
 - Send `{"type":"session.shutdown"}` IPC message; engine flushes logs, closes socket, exits.
   If socket is unresponsive within 1s, send SIGTERM as fallback.
-- On wake: EngineManager restarts engine process within 2 seconds. Model reloads lazily on next use.
+  **SIGTERM risk during inference:** If the engine is in INFERRING state and its session thread is blocked in process_stream(), it may not respond to SIGTERM within 1s. The engine MUST install a SIGTERM handler that sets a global `g_interrupted` atomic and calls `abort_inference_ = true` — inference thread checks this flag every N tokens (see ring_buffer reset timing). After SIGTERM, allow up to 500ms for the thread to exit gracefully before the OS reclaims the process.
+- On wake: EngineManager restarts engine process (≈2s). Model reloads lazily on next use (≈4s on cold load). **Total cold-start latency after wake: ≈6s.** EngineManager MUST show a "Loading model..." indicator in the status bar during this window so the user knows why the first post-wake hotkey press is slow. Subsequent presses within the idle timeout are <50ms.
 
 ## Logging
 
