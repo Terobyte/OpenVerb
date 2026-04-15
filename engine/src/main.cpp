@@ -6,15 +6,22 @@
 #include "config/config.h"
 #include "config/log.h"
 #include "engine.h"
+#include "ipc/server.h"
+#include "audio/capture.h"
+#include "audio/ring_buffer.h"
+#include "ipc/progress.h"
 
 #include <atomic>
+#include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <functional>
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 // ---------------------------------------------------------------------------
 // g_interrupted — declared extern in config/interrupts.h.
@@ -63,34 +70,118 @@ static std::string json_escape(const std::string& s) {
 // main
 // ---------------------------------------------------------------------------
 int main(int argc, char** argv) {
-    // ── Install signal handlers first — model load can take several seconds
-    //    and must be interruptible.
     std::signal(SIGINT,  handle_signal);
     std::signal(SIGTERM, handle_signal);
 
-    // ── Parse CLI args (pure, no I/O).
     Config cfg = parse_args(argc, argv);
 
-    // ── --version: print banner and exit before any I/O.
     if (cfg.version) {
         std::printf("openverb-engine %s\n", OPENVERB_VERSION);
         return 0;
     }
 
-    // ── --file is required.
+    resolve_config(cfg);
+    log_set_verbose(cfg.verbose);
+
+    // --- Daemon mode: --listen ---
+    if (cfg.listen) {
+        std::string home(getenv("HOME") ? getenv("HOME") : "");
+        std::filesystem::create_directories(home + "/.openverb");
+        std::filesystem::create_directories(home + "/.openverb/logs");
+        std::filesystem::create_directories(home + "/.openverb/models");
+
+        {
+            std::ifstream probe(cfg.model_path, std::ios::binary);
+            if (!probe.is_open()) {
+                std::fprintf(stderr, "error: cannot open model file: %s\n",
+                             cfg.model_path.c_str());
+                return 1;
+            }
+        }
+        {
+            std::ifstream probe(cfg.mmproj_path, std::ios::binary);
+            if (!probe.is_open()) {
+                std::fprintf(stderr, "error: cannot open mmproj file: %s\n",
+                             cfg.mmproj_path.c_str());
+                return 1;
+            }
+        }
+
+        try {
+            openverb::Engine engine(cfg);
+            openverb::IpcServer server(engine, cfg.model_idle_timeout_secs);
+            server.start(cfg.socket_path);
+        } catch (const std::exception& e) {
+            if (g_interrupted.load(std::memory_order_relaxed)) return 130;
+            std::fprintf(stderr, "error: %s\n", e.what());
+            return 1;
+        }
+        return g_interrupted.load() ? 130 : 0;
+    }
+
+    // --- Standalone mic mode: --mic without --listen ---
+    if (cfg.mic && !cfg.listen) {
+        std::ifstream probe_m(cfg.model_path, std::ios::binary);
+        if (!probe_m.is_open()) {
+            std::fprintf(stderr, "error: cannot open model file: %s\n",
+                         cfg.model_path.c_str());
+            return 1;
+        }
+        std::ifstream probe_mm(cfg.mmproj_path, std::ios::binary);
+        if (!probe_mm.is_open()) {
+            std::fprintf(stderr, "error: cannot open mmproj file: %s\n",
+                         cfg.mmproj_path.c_str());
+            return 1;
+        }
+
+        RingBuffer ring_buffer;
+
+        AudioCapture capture;
+        capture.start([&](const uint8_t* data, size_t len) {
+            size_t written = ring_buffer.write(data, len);
+            if (written < len) {
+                LOG_WARN("main: ring buffer full, dropped %zu bytes", len - written);
+            }
+        });
+
+        std::fprintf(stderr, "Recording... press Ctrl-C to stop\n");
+        while (!g_interrupted.load(std::memory_order_relaxed)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+
+        capture.stop();
+
+        auto pcm = ring_buffer.read_all();
+        if (pcm.empty()) {
+            std::fprintf(stderr, "No audio captured\n");
+            return 0;
+        }
+
+        try {
+            openverb::Engine engine(cfg);
+            static std::atomic<bool> never_abort{false};
+            ProgressQueue pq;
+            InferenceResult result = engine.process_stream(
+                pcm, SAMPLE_RATE, cfg.context_json, never_abort, pq);
+            if (!result.text.empty()) {
+                std::printf("%s\n", result.text.c_str());
+            } else if (!result.command.empty()) {
+                std::printf("{\"command\":\"%s\"}\n", json_escape(result.command).c_str());
+            }
+        } catch (const std::exception& e) {
+            if (g_interrupted.load(std::memory_order_relaxed)) return 130;
+            std::fprintf(stderr, "error: %s\n", e.what());
+            return 1;
+        }
+        return 0;
+    }
+
+    // --- CLI mode: --file required ---
     if (cfg.file_path.empty()) {
         std::fprintf(stderr, "error: --file required\n");
         return 1;
     }
 
-    // ── Resolve paths and auto-detect model files (I/O phase).
-    resolve_config(cfg);
-    log_set_verbose(cfg.verbose);
-
-    // ── Verify resolved model / mmproj paths are readable before the expensive
-    //    Metal compilation + weight load.  This gives a clean, instant error
-    //    rather than waiting several seconds for llama.cpp to discover the file
-    //    is missing and emit its own diagnostic lines before ours.
     {
         std::ifstream probe(cfg.model_path, std::ios::binary);
         if (!probe.is_open()) {
@@ -109,27 +200,16 @@ int main(int argc, char** argv) {
     }
 
     try {
-        // ── Construct Engine — loads model weights from disk.
-        //    On Apple Silicon this triggers Metal shader compilation which can
-        //    take 2-5 s; SIGINT during this window sets g_interrupted.
         openverb::Engine engine(cfg);
 
-        // Check (1): if SIGINT arrived during the multi-second model load,
-        // abort before the GPU context is initialised (LlamaContext ctor
-        // also checks this flag internally after llama_model_load_from_file).
+        // Constructor no longer loads model; ensure_loaded() triggers the
+        // ~4s load here so startup latency is visible before processing.
+        engine.ensure_loaded();
+
         if (g_interrupted.load(std::memory_order_relaxed)) {
             return 130;
         }
 
-        // ── Progress callback.
-        //    In --verbose mode: print in-place percentage updates to stderr
-        //    (carriage return keeps output on one line).
-        //    In non-verbose mode: no-op callable (never produces output).
-        //
-        //    The callback is wired to inference via Engine::process_file →
-        //    Backend::process.  Check (2) — the generation loop polls
-        //    g_interrupted each token and calls this callback with the
-        //    current fraction; aborting the loop stops further callbacks.
         std::function<void(float)> progress_cb;
         if (cfg.verbose) {
             progress_cb = [](float pct) {
@@ -139,31 +219,14 @@ int main(int argc, char** argv) {
             progress_cb = [](float) {};
         }
 
-        // ── Run the full audio → inference pipeline.
         InferenceResult result = engine.process_file(cfg.file_path,
                                                      cfg.context_json,
                                                      progress_cb);
 
-        // ── Verbose: print inference wall-clock time.
         if (cfg.verbose) {
             std::fprintf(stderr, "inference: %lldms\n",
                          static_cast<long long>(result.inference_time_ms));
         }
-
-        // ── Emit result.
-        //
-        //    Default mode:
-        //      text result    → raw string + \n  (stdout)
-        //      command result → {"command":"<action>"}\n  (first char '{' →
-        //                       caller can distinguish from plain text)
-        //      empty result   → nothing to stdout, exit 0
-        //
-        //    --json mode (uniform, unambiguous):
-        //      text result    → {"text":"<...>","command":null}\n
-        //      command result → {"text":null,"command":"<action>"}\n
-        //      empty result   → {"text":"","command":null}\n
-        //
-        //    Both modes always end with \n for clean terminal output.
 
         const bool has_text    = !result.text.empty();
         const bool has_command = !result.command.empty();
@@ -173,7 +236,6 @@ int main(int argc, char** argv) {
                 std::printf("{\"text\":null,\"command\":\"%s\"}\n",
                             json_escape(result.command).c_str());
             } else {
-                // covers both text result and empty result
                 std::printf("{\"text\":\"%s\",\"command\":null}\n",
                             json_escape(result.text).c_str());
             }
@@ -184,13 +246,9 @@ int main(int argc, char** argv) {
             } else if (has_text) {
                 std::printf("%s\n", result.text.c_str());
             }
-            // empty result: output nothing, fall through to return 0
         }
 
     } catch (const std::exception& e) {
-        // If SIGINT arrived during the model-load window, LlamaContext::Impl
-        // throws to unwind — honour the convention (128 + SIGINT = 130) rather
-        // than treating it as an error exit (1).
         if (g_interrupted.load(std::memory_order_relaxed)) {
             return 130;
         }
@@ -198,9 +256,6 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // ── On SIGINT received at any point after the try block (e.g. during
-    //    output flushing): exit 130 (128 + SIGINT signal number, standard
-    //    shell convention for interrupted processes).
     if (g_interrupted.load(std::memory_order_relaxed)) {
         return 130;
     }
