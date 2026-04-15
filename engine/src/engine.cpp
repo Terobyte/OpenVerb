@@ -14,7 +14,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
-#include <cstdlib>
+#include <stdexcept>
 #include <functional>
 #include <string>
 #include <vector>
@@ -60,14 +60,15 @@ static double rms_energy(const std::vector<int16_t>& samples) {
 // Engine — constructor
 // ===========================================================================
 
+// Constructor defers model loading — call ensure_loaded() before the first
+// inference (or process_file() will do it automatically).
 Engine::Engine(Config cfg) : cfg_(std::move(cfg)) {
-    backend_ = create_backend(cfg_.backend,
-                              cfg_.model_path,
-                              cfg_.mmproj_path,
-                              cfg_.threads,
-                              cfg_.ctx_size,
-                              cfg_.vad_enabled);
+    backend_ = nullptr;
+    loaded_  = false;
 }
+
+Engine::Engine(Config cfg, std::unique_ptr<Backend> backend)
+    : cfg_(std::move(cfg)), backend_(std::move(backend)), loaded_(true) {}
 
 // ===========================================================================
 // Engine::process_file
@@ -85,10 +86,9 @@ InferenceResult Engine::process_file(const std::string&         file_path,
         // ── WAV: peek header first to avoid allocating memory for oversized files.
         double dur = peek_wav_duration_secs(file_path);
         if (dur > MAX_RECORDING_SECS) {
-            std::fprintf(stderr,
-                         "error: audio too long: %.0fs, max %ds\n",
-                         dur, MAX_RECORDING_SECS);
-            std::exit(1);
+            throw std::runtime_error("audio too long: " +
+                std::to_string(static_cast<int>(dur)) + "s, max " +
+                std::to_string(MAX_RECORDING_SECS) + "s");
         }
         audio = read_wav(file_path);
 
@@ -100,17 +100,13 @@ InferenceResult Engine::process_file(const std::string&         file_path,
         double dur = static_cast<double>(audio.samples.size()) /
                      static_cast<double>(audio.sample_rate);
         if (dur > MAX_RECORDING_SECS) {
-            std::fprintf(stderr,
-                         "error: audio too long: %.0fs, max %ds\n",
-                         dur, MAX_RECORDING_SECS);
-            std::exit(1);
+            throw std::runtime_error("audio too long: " +
+                std::to_string(static_cast<int>(dur)) + "s, max " +
+                std::to_string(MAX_RECORDING_SECS) + "s");
         }
 
     } else {
-        std::fprintf(stderr,
-                     "error: unsupported audio file extension: %s\n",
-                     file_path.c_str());
-        std::exit(1);
+        throw std::runtime_error("unsupported audio extension: " + file_path);
     }
 
     // ── Silence gate: skip inference on near-silent audio.
@@ -126,11 +122,63 @@ InferenceResult Engine::process_file(const std::string&         file_path,
     // ── Resample to 16 kHz mono (no-op if already at target).
     AudioData pcm16k = resample(audio, SAMPLE_RATE);
 
-    // ── Run inference.
+    // ── Run inference — hold the mutex across load + process to prevent a
+    // concurrent unload_model() from destroying backend_ between the two.
+    std::lock_guard<std::mutex> lk(engine_mutex_);
+    if (!loaded_.load(std::memory_order_acquire) || !backend_) {
+        backend_ = create_backend(cfg_.backend,
+                                  cfg_.model_path,
+                                  cfg_.mmproj_path,
+                                  cfg_.threads,
+                                  cfg_.ctx_size,
+                                  cfg_.vad_enabled);
+        loaded_.store(true, std::memory_order_release);
+    }
     return backend_->process(pcm16k.samples,
                              pcm16k.sample_rate,
                              context_json,
                              progress);
+}
+
+void Engine::ensure_loaded() {
+    std::lock_guard<std::mutex> lk(engine_mutex_);
+    if (loaded_.load(std::memory_order_acquire) && backend_) return;
+    backend_ = create_backend(cfg_.backend,
+                              cfg_.model_path,
+                              cfg_.mmproj_path,
+                              cfg_.threads,
+                              cfg_.ctx_size,
+                              cfg_.vad_enabled);
+    loaded_.store(true, std::memory_order_release);
+}
+
+void Engine::unload_model() {
+    std::lock_guard<std::mutex> lk(engine_mutex_);
+    if (backend_) {
+        backend_->unload_model();
+    }
+    loaded_.store(false, std::memory_order_release);
+}
+
+InferenceResult Engine::process_stream(
+    const std::vector<int16_t>& pcm,
+    int                         sample_rate,
+    const std::string&          context_json,
+    const std::atomic<bool>&    abort_flag,
+    ProgressQueue&              progress_queue)
+{
+    std::lock_guard<std::mutex> lk(engine_mutex_);
+    if (!loaded_.load(std::memory_order_acquire) || !backend_) {
+        backend_ = create_backend(cfg_.backend,
+                                  cfg_.model_path,
+                                  cfg_.mmproj_path,
+                                  cfg_.threads,
+                                  cfg_.ctx_size,
+                                  cfg_.vad_enabled);
+        loaded_.store(true, std::memory_order_release);
+    }
+    return backend_->process_stream(pcm, sample_rate, context_json,
+                                    abort_flag, progress_queue);
 }
 
 }  // namespace openverb
