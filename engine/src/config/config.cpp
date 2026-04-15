@@ -87,20 +87,32 @@ void print_help(const char* prog) {
     std::fprintf(stderr,
         "Usage: %s [OPTIONS]\n"
         "\n"
-        "Options:\n"
-        "  --file <path>       Audio file to transcribe\n"
-        "  --model <path>      Path to GGUF model file\n"
-        "  --mmproj <path>     Path to mmproj GGUF file\n"
-        "  --context <json>    Context JSON string\n"
-        "  --backend <name>    Inference backend (default: %s)\n"
-        "  --threads <n>       CPU threads, -1 = auto (default: -1)\n"
-        "  --ctx-size <n>      KV-cache context tokens (default: 4096)\n"
-        "  --vad               Enable voice activity detection\n"
-        "  --no-vad            Disable voice activity detection\n"
-        "  --json              Emit JSON output\n"
-        "  --verbose           Enable INFO/DEBUG log output\n"
-        "  --version           Print version and exit\n"
-        "  --help              Show this help\n",
+        "File mode (default):\n"
+        "  --file <path>              Audio file to transcribe\n"
+        "\n"
+        "Daemon mode:\n"
+        "  --listen                   Start in daemon mode (listen on Unix socket)\n"
+        "  --socket <path>            Unix socket path (default: ~/.openverb/engine.sock)\n"
+        "  --model-idle-timeout <n>   Unload model after N idle seconds (0 = never)\n"
+        "  --mic                      Use microphone as audio input source\n"
+        "\n"
+        "Model options:\n"
+        "  --model <path>             Path to GGUF model file\n"
+        "  --mmproj <path>            Path to mmproj GGUF file\n"
+        "  --backend <name>           Inference backend (default: %s)\n"
+        "  --threads <n>              CPU threads, -1 = auto (default: -1)\n"
+        "  --ctx-size <n>             KV-cache context tokens (default: 4096)\n"
+        "\n"
+        "Audio options:\n"
+        "  --context <json>           Context JSON string\n"
+        "  --vad                      Enable voice activity detection\n"
+        "  --no-vad                   Disable voice activity detection\n"
+        "\n"
+        "Output options:\n"
+        "  --json                     Emit JSON output\n"
+        "  --verbose                  Enable INFO/DEBUG log output\n"
+        "  --version                  Print version and exit\n"
+        "  --help                     Show this help\n",
         prog, DEFAULT_BACKEND
     );
 }
@@ -129,6 +141,10 @@ Config parse_args(int argc, char** argv) {
         { "verbose",  no_argument,       nullptr, 'v' },
         { "version",  no_argument,       nullptr, 'r' },
         { "help",     no_argument,       nullptr, 'h' },
+        { "listen",   no_argument,       nullptr, 'L' },
+        { "socket",   required_argument, nullptr, 'S' },
+        { "model-idle-timeout", required_argument, nullptr, 'T' },
+        { "mic",      no_argument,       nullptr, 'M' },
         { nullptr,    0,                 nullptr,  0  }
     };
 
@@ -188,6 +204,24 @@ Config parse_args(int argc, char** argv) {
             case 'j': cfg.json_output  = true;               break;
             case 'v': cfg.verbose      = true;               break;
             case 'r': cfg.version      = true;               break;
+            case 'L': cfg.listen       = true;               break;
+            case 'S': cfg.socket_path  = optarg;             break;
+            case 'M': cfg.mic          = true;               break;
+            case 'T':
+                try {
+                    cfg.model_idle_timeout_secs = std::stoi(optarg);
+                } catch (const std::exception&) {
+                    std::fprintf(stderr,
+                        "error: --model-idle-timeout requires an integer, got '%s'\n", optarg);
+                    std::exit(1);
+                }
+                if (cfg.model_idle_timeout_secs < 0) {
+                    std::fprintf(stderr,
+                        "error: --model-idle-timeout must be >= 0, got %d\n",
+                        cfg.model_idle_timeout_secs);
+                    std::exit(1);
+                }
+                break;
             case 'h':
                 print_help(argv[0]);
                 std::exit(0);
@@ -204,6 +238,19 @@ Config parse_args(int argc, char** argv) {
 // resolve_config — I/O and validation (call after parse_args)
 // ---------------------------------------------------------------------------
 void resolve_config(Config& cfg) {
+    if (cfg.listen && !cfg.file_path.empty()) {
+        std::fprintf(stderr, "error: --listen and --file are mutually exclusive\n");
+        std::exit(1);
+    }
+    if (cfg.mic && !cfg.file_path.empty()) {
+        std::fprintf(stderr, "error: --mic and --file are mutually exclusive\n");
+        std::exit(1);
+    }
+
+    if (cfg.socket_path.empty() && cfg.listen) {
+        cfg.socket_path = DEFAULT_SOCKET_PATH;
+    }
+
     // ---- Validate context JSON if provided -----------------------------
     // The documented schema is a JSON object with optional string fields
     // "app", "window", "clipboard", "selected".  Arrays, scalars, and any
@@ -228,6 +275,7 @@ void resolve_config(Config& cfg) {
     if (!cfg.model_path.empty())  cfg.model_path  = expand_tilde(cfg.model_path);
     if (!cfg.mmproj_path.empty()) cfg.mmproj_path = expand_tilde(cfg.mmproj_path);
     if (!cfg.file_path.empty())   cfg.file_path   = expand_tilde(cfg.file_path);
+    if (!cfg.socket_path.empty()) cfg.socket_path  = expand_tilde(cfg.socket_path);
 
     // ---- Early existence checks (fail before expensive model scan/load) -
     // Audio file: validate immediately so we don't waste the 4–10 s model
