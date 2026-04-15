@@ -58,6 +58,12 @@ bool Vad::is_speech(const int16_t* samples, int num_samples) const {
 std::vector<int16_t> Vad::filter(const AudioData& audio,
                                   int              sample_rate,
                                   int              silence_ms) const {
+    if (sample_rate != sample_rate_) {
+        throw std::invalid_argument(
+            "Vad::filter: sample_rate (" + std::to_string(sample_rate) +
+            ") != constructor rate (" + std::to_string(sample_rate_) + ")");
+    }
+
     // Compute frame size and silence limit in frames.
     const int frame_size          = sample_rate * kFrameMs / 1000;
     const int silence_frame_limit = silence_ms / kFrameMs;
@@ -103,7 +109,7 @@ std::vector<int16_t> Vad::filter(const AudioData& audio,
     //                  if silence exceeds limit → close region, discard buffer.
     // -----------------------------------------------------------------------
     std::vector<int16_t> out;
-    out.reserve(static_cast<size_t>(total_speech * frame_size));
+    out.reserve(static_cast<size_t>(num_frames * frame_size));
 
     bool              in_speech    = false;
     int               silence_cnt  = 0;
