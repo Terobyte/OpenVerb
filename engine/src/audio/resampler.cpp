@@ -158,10 +158,10 @@ std::vector<int16_t> resample_channel(const std::vector<int16_t>& src,
     if (src.empty()) return {};
 
     const std::size_t n_in  = src.size();
-    // Compute output length: floor(n_in * dst_rate / src_rate).
+    // Compute output length: ceil(n_in * dst_rate / src_rate).
     const std::size_t n_out = static_cast<std::size_t>(
-        static_cast<double>(n_in) * static_cast<double>(dst_rate)
-        / static_cast<double>(src_rate));
+        std::ceil(static_cast<double>(n_in) * static_cast<double>(dst_rate)
+        / static_cast<double>(src_rate)));
 
     if (n_out == 0) return {};
 
@@ -213,7 +213,9 @@ AudioData to_mono(const AudioData& input)
     }
 
     const int ch        = input.channels;
-    const std::size_t frames = input.samples.size() / static_cast<std::size_t>(ch);
+    const std::size_t frames =
+        (input.samples.size() + static_cast<std::size_t>(ch) - 1)
+        / static_cast<std::size_t>(ch);
 
     std::vector<int16_t> mono(frames);
 

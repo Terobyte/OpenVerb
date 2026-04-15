@@ -5,6 +5,7 @@
 #include "config/defaults.h"
 #include "config/log.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <future>
@@ -71,8 +72,11 @@ void Session::run(int fd, Engine& engine, const SessionConfig& cfg) {
     auto last_frame_time  = std::chrono::steady_clock::now();
     bool first_frame_seen = false;
 
-    // Compute max audio seconds allowed by context budget
-    const int effective_ctx = (cfg.ctx_size > 0) ? cfg.ctx_size : DEFAULT_CTX_SIZE;
+    // Compute max audio seconds allowed by context budget.
+    // Clamp effective_ctx so the difference never goes negative (e.g. --ctx-size 100).
+    const int effective_ctx = std::max(
+        (cfg.ctx_size > 0) ? cfg.ctx_size : DEFAULT_CTX_SIZE,
+        SYSTEM_PROMPT_TOKENS_RESERVED + 1);
     const double max_audio_secs =
         static_cast<double>(effective_ctx - SYSTEM_PROMPT_TOKENS_RESERVED)
         / static_cast<double>(AUDIO_TOKENS_PER_SEC);
@@ -312,6 +316,8 @@ void Session::run(int fd, Engine& engine, const SessionConfig& cfg) {
                             stop_requested_.store(true, std::memory_order_relaxed);
                         } catch (...) {
                             LOG_WARN("session: inference threw non-std exception");
+                            std::lock_guard<std::mutex> lk(infer_mutex_);
+                            inference_error_ = "non-std exception during inference";
                             stop_requested_.store(true, std::memory_order_relaxed);
                         }
                         result_cv_.notify_one();

@@ -132,7 +132,7 @@ void IpcServer::start(const std::string& socket_path) {
 
                 if (pressure & DISPATCH_MEMORYPRESSURE_CRITICAL) {
                     LOG_WARN("ipc: CRITICAL memory pressure — aborting session + unloading model");
-                    if (self->pressure_critical_active_.load(std::memory_order_relaxed)) {
+                    if (self->pressure_critical_active_.load(std::memory_order_acquire)) {
                         // Session is active: calling unload_model() while inference
                         // is running is a use-after-free.  Set g_interrupted to abort
                         // the session and exit the main poll loop; the process will
@@ -238,8 +238,8 @@ void IpcServer::start(const std::string& socket_path) {
         }
 
         idle_unloaded = false;
-        pressure_critical_active_.store(true, std::memory_order_relaxed);
-        session_active_.store(true, std::memory_order_relaxed);
+        pressure_critical_active_.store(true, std::memory_order_release);
+        session_active_.store(true, std::memory_order_release);
         LOG_INFO("ipc: session started");
 
         session_thread_ = std::thread([this, client_fd, now_sec]() {

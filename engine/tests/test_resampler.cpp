@@ -22,6 +22,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <cstdint>
 #include <stdexcept>
 #include <vector>
@@ -168,10 +169,12 @@ TEST(Resample, SameMonoRateReturnsCopy) {
 // ===========================================================================
 
 TEST(Resample, DownsampleOutputLength) {
-    // Expected frames = floor(n_in * dst / src) = floor(1024 * 16000 / 44100)
+    // Expected frames = ceil(n_in * dst / src) = ceil(1024 * 16000 / 44100)
+    // Using ceiling ensures the output sample corresponding to the last input
+    // sample is always included (bug #39 fix: floor dropped the last sample).
     constexpr int N_IN   = 1024;
     const     int N_OUT  = static_cast<int>(
-        static_cast<double>(N_IN) * 16000.0 / 44100.0);
+        std::ceil(static_cast<double>(N_IN) * 16000.0 / 44100.0));
 
     AudioData mono = make_mono(44100, N_IN);
     AudioData out  = resample(mono, 16000);

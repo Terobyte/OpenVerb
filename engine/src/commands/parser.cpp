@@ -66,6 +66,7 @@ ParsedOutput parse_command(const std::string& raw_output) {
 
     trim_whitespace(normalised);
     strip_trailing_punct(normalised);
+    trim_whitespace(normalised);
     to_lower(normalised);
 
     // Exact whole-string lookup.

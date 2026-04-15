@@ -143,7 +143,8 @@ WavFmt scan_wav_header(std::ifstream& f) {
         } else {
             // ── unknown chunk (LIST, INFO, fact, JUNK, …) ───────────────────
             // WAV spec: chunk payloads are padded to an even byte boundary.
-            uint32_t skip = chunk_size + (chunk_size & 1u);
+            // Use uint64_t to prevent overflow when chunk_size == 0xFFFFFFFF.
+            uint64_t skip = static_cast<uint64_t>(chunk_size) + (chunk_size & 1u);
             f.seekg(static_cast<std::streamoff>(skip), std::ios::cur);
         }
     }

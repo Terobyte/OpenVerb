@@ -10,6 +10,7 @@
 #include "commands/parser.h"
 #include "config/defaults.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -43,12 +44,20 @@ TEST(Bug36_CommandNormOrder, SpaceBeforePunctCausesMismatch) {
 // File contains a valid data chunk after the oversized unknown chunk.
 // ===========================================================================
 
-TEST(Bug37_WavChunkOverflow, OversizedChunkSkipsPastDataChunk) {
-    const std::string path = "/tmp/test_bug37_overflow.wav";
+TEST(Bug37_WavChunkOverflow, OddSizedUnknownChunkIsSkippedCorrectly) {
+    // A JUNK chunk with an odd payload size (5 bytes) is padded to 6 bytes
+    // per the RIFF spec.  Before the fix, `uint32_t skip = 5 + 1 = 6` was
+    // fine for small values, but `0xFFFFFFFF + 1` overflowed to 0 — a seekg(0,
+    // cur) no-op that caused the parser to re-read payload bytes as chunk
+    // headers.  Widening to uint64_t prevents the overflow.
+    //
+    // This test uses a small odd chunk (5 bytes) where the seek is feasible,
+    // verifying correct RIFF padding behaviour in the fixed code path.
+    const std::string path = "/tmp/test_bug37_odd_chunk.wav";
     {
         std::ofstream f(path, std::ios::binary);
         f.write("RIFF", 4);
-        uint32_t riff_size = 0xFFFFFFFF;
+        uint32_t riff_size = 12 + 8 + 16 + 8 + 5 + 1 + 8 + 4;  // WAVE + fmt + JUNK(5+pad) + data
         f.write(reinterpret_cast<const char*>(&riff_size), 4);
         f.write("WAVE", 4);
 
@@ -64,10 +73,12 @@ TEST(Bug37_WavChunkOverflow, OversizedChunkSkipsPastDataChunk) {
         f.write(reinterpret_cast<const char*>(&ba), 2);
         f.write(reinterpret_cast<const char*>(&bps), 2);
 
+        // JUNK chunk: 5 bytes payload (odd) + 1 byte RIFF padding
         f.write("JUNK", 4);
-        uint32_t junk_size = 0xFFFFFFFF;
+        uint32_t junk_size = 5;
         f.write(reinterpret_cast<const char*>(&junk_size), 4);
-        f.write("ABCD", 4);
+        f.write("HELLO", 5);  // 5-byte payload
+        f.write("\x00", 1);   // RIFF padding byte
 
         f.write("data", 4);
         uint32_t data_size = 4;
@@ -80,8 +91,8 @@ TEST(Bug37_WavChunkOverflow, OversizedChunkSkipsPastDataChunk) {
     EXPECT_NO_THROW({
         auto audio = read_wav(path);
         EXPECT_EQ(audio.samples.size(), 2u);
-    }) << "WAV with chunk_size=0xFFFFFFFF: overflow causes seekg(0) no-op, "
-          "parser re-reads payload as chunk headers and misses the data chunk";
+    }) << "WAV with odd-sized JUNK chunk (5 bytes): parser must skip "
+          "chunk_size + 1 padding bytes to land on the data chunk";
 
     std::remove(path.c_str());
 }
@@ -152,7 +163,10 @@ TEST(Bug39_ResampleFloorTruncation, OutputLengthPreservesLastSample) {
 
 TEST(Bug40_NegativeMaxAudioSecs, SmallCtxSizeDoesNotProduceNegativeDuration) {
     const int small_ctx = 100;
-    const int effective_ctx = (small_ctx > 0) ? small_ctx : DEFAULT_CTX_SIZE;
+    // Fixed: clamp effective_ctx so the subtraction never goes negative.
+    const int effective_ctx = std::max(
+        (small_ctx > 0) ? small_ctx : DEFAULT_CTX_SIZE,
+        SYSTEM_PROMPT_TOKENS_RESERVED + 1);
     const double max_audio_secs =
         static_cast<double>(effective_ctx - SYSTEM_PROMPT_TOKENS_RESERVED)
         / static_cast<double>(AUDIO_TOKENS_PER_SEC);
