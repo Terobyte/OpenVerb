@@ -13,8 +13,6 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
-#include <cstdio>
-#include <stdexcept>
 #include <functional>
 #include <string>
 #include <vector>
@@ -67,7 +65,7 @@ Engine::Engine(Config cfg) : cfg_(std::move(cfg)) {
     loaded_  = false;
 }
 
-Engine::Engine(Config cfg, std::unique_ptr<Backend> backend)
+Engine::Engine(Config cfg, std::shared_ptr<Backend> backend)
     : cfg_(std::move(cfg)), backend_(std::move(backend)), loaded_(true) {}
 
 // ===========================================================================
@@ -122,22 +120,27 @@ InferenceResult Engine::process_file(const std::string&         file_path,
     // ── Resample to 16 kHz mono (no-op if already at target).
     AudioData pcm16k = resample(audio, SAMPLE_RATE);
 
-    // ── Run inference — hold the mutex across load + process to prevent a
-    // concurrent unload_model() from destroying backend_ between the two.
-    std::lock_guard<std::mutex> lk(engine_mutex_);
-    if (!loaded_.load(std::memory_order_acquire) || !backend_) {
-        backend_ = create_backend(cfg_.backend,
-                                  cfg_.model_path,
-                                  cfg_.mmproj_path,
-                                  cfg_.threads,
-                                  cfg_.ctx_size,
-                                  cfg_.vad_enabled);
-        loaded_.store(true, std::memory_order_release);
+    // ── Run inference — grab a shared_ptr to the backend under the mutex,
+    // then release the mutex so unload_model() isn't blocked during the
+    // (potentially 30+ second) inference call.
+    std::shared_ptr<Backend> be;
+    {
+        std::lock_guard<std::mutex> lk(engine_mutex_);
+        if (!loaded_.load(std::memory_order_acquire) || !backend_) {
+            backend_ = create_backend(cfg_.backend,
+                                      cfg_.model_path,
+                                      cfg_.mmproj_path,
+                                      cfg_.threads,
+                                      cfg_.ctx_size,
+                                      cfg_.vad_enabled);
+            loaded_.store(true, std::memory_order_release);
+        }
+        be = backend_;
     }
-    return backend_->process(pcm16k.samples,
-                             pcm16k.sample_rate,
-                             context_json,
-                             progress);
+    return be->process(pcm16k.samples,
+                       pcm16k.sample_rate,
+                       context_json,
+                       progress);
 }
 
 void Engine::ensure_loaded() {
@@ -167,18 +170,22 @@ InferenceResult Engine::process_stream(
     const std::atomic<bool>&    abort_flag,
     ProgressQueue&              progress_queue)
 {
-    std::lock_guard<std::mutex> lk(engine_mutex_);
-    if (!loaded_.load(std::memory_order_acquire) || !backend_) {
-        backend_ = create_backend(cfg_.backend,
-                                  cfg_.model_path,
-                                  cfg_.mmproj_path,
-                                  cfg_.threads,
-                                  cfg_.ctx_size,
-                                  cfg_.vad_enabled);
-        loaded_.store(true, std::memory_order_release);
+    std::shared_ptr<Backend> be;
+    {
+        std::lock_guard<std::mutex> lk(engine_mutex_);
+        if (!loaded_.load(std::memory_order_acquire) || !backend_) {
+            backend_ = create_backend(cfg_.backend,
+                                      cfg_.model_path,
+                                      cfg_.mmproj_path,
+                                      cfg_.threads,
+                                      cfg_.ctx_size,
+                                      cfg_.vad_enabled);
+            loaded_.store(true, std::memory_order_release);
+        }
+        be = backend_;
     }
-    return backend_->process_stream(pcm, sample_rate, context_json,
-                                    abort_flag, progress_queue);
+    return be->process_stream(pcm, sample_rate, context_json,
+                              abort_flag, progress_queue);
 }
 
 }  // namespace openverb
