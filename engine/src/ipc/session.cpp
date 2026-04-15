@@ -344,9 +344,14 @@ void Session::run(int fd, Engine& engine, const SessionConfig& cfg) {
 
                     // Drain and forward progress updates.
                     for (float pct : progress_queue_.drain()) {
-                        send_json(fd, nlohmann::json{
-                            {"type", "progress"}, {"percent", pct}
-                        });
+                        try {
+                            send_json(fd, nlohmann::json{
+                                {"type", "progress"}, {"percent", pct}
+                            });
+                        } catch (const ConnectionClosed&) {
+                            stop_requested_.store(true, std::memory_order_relaxed);
+                            break;
+                        }
                     }
 
                     // Inference timeout.
@@ -412,9 +417,14 @@ void Session::run(int fd, Engine& engine, const SessionConfig& cfg) {
                 if (state == State::INFERRING) {
                     // Drain any remaining progress.
                     for (float pct : progress_queue_.drain()) {
-                        send_json(fd, nlohmann::json{
-                            {"type", "progress"}, {"percent", pct}
-                        });
+                        try {
+                            send_json(fd, nlohmann::json{
+                                {"type", "progress"}, {"percent", pct}
+                            });
+                        } catch (const ConnectionClosed&) {
+                            stop_requested_.store(true, std::memory_order_relaxed);
+                            break;
+                        }
                     }
 
                     if (!inference_result_.has_value()) {
