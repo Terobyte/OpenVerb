@@ -205,9 +205,12 @@ AudioData read_pcm(const std::string& path) {
     std::size_t num_samples = file_size / sizeof(int16_t);
     std::vector<int16_t> samples(num_samples);
 
-    if (num_samples > 0)
+    if (num_samples > 0) {
         f.read(reinterpret_cast<char*>(samples.data()),
                static_cast<std::streamsize>(num_samples * sizeof(int16_t)));
+        if (f.fail())
+            throw std::runtime_error("PCM read error: unexpected I/O failure: " + path);
+    }
 
     AudioData out;
     out.samples         = std::move(samples);
