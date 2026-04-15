@@ -174,7 +174,7 @@ void Session::run(int fd, Engine& engine, const SessionConfig& cfg) {
                 send_error(fd, ErrorCode::timeout, "model load timeout");
                 state = State::IDLE;
             } else if (!load_ok) {
-                send_error(fd, ErrorCode::inference_failed, load_err.c_str());
+                send_error(fd, ErrorCode::model_load_failed, load_err.c_str());
                 state = State::IDLE;
             } else {
                 send_json(fd, nlohmann::json{{"type", "session.ready"}});
@@ -318,6 +318,7 @@ void Session::run(int fd, Engine& engine, const SessionConfig& cfg) {
                     });
 
                 auto infer_start = std::chrono::steady_clock::now();
+                auto last_client_msg_tp = std::chrono::steady_clock::now();
                 bool infer_done  = false;
 
                 while (!infer_done &&
@@ -343,14 +344,36 @@ void Session::run(int fd, Engine& engine, const SessionConfig& cfg) {
                     }
 
                     // Drain and forward progress updates.
-                    for (float pct : progress_queue_.drain()) {
+                    auto progresses = progress_queue_.drain();
+                    for (float pct : progresses) {
                         try {
                             send_json(fd, nlohmann::json{
                                 {"type", "progress"}, {"percent", pct}
                             });
+                            last_client_msg_tp = std::chrono::steady_clock::now();
                         } catch (const ConnectionClosed&) {
                             stop_requested_.store(true, std::memory_order_relaxed);
                             break;
+                        }
+                    }
+
+                    // Heartbeat: during the audio-encoding phase the model produces
+                    // no progress updates (generation hasn't started yet).  Without a
+                    // periodic message the Swift client times out after 30 s.  Send a
+                    // synthetic 0 % progress every 5 s to keep the connection alive.
+                    if (progresses.empty()) {
+                        auto silent_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - last_client_msg_tp).count();
+                        if (silent_ms >= 5000) {
+                            try {
+                                send_json(fd, nlohmann::json{
+                                    {"type", "progress"}, {"percent", 0.0f}
+                                });
+                                last_client_msg_tp = std::chrono::steady_clock::now();
+                            } catch (const ConnectionClosed&) {
+                                stop_requested_.store(true, std::memory_order_relaxed);
+                                break;
+                            }
                         }
                     }
 

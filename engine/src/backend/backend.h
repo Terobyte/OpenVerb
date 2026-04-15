@@ -1,10 +1,13 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
 #include <vector>
+
+class ProgressQueue;
 
 // ---------------------------------------------------------------------------
 // InferenceResult — output of one Backend::process() call.
@@ -52,6 +55,15 @@ public:
         int                          sample_rate,
         const std::string&           context_json,
         std::function<void(float)>   progress) = 0;
+
+    virtual void unload_model() = 0;
+
+    virtual InferenceResult process_stream(
+        const std::vector<int16_t>&  audio_pcm,
+        int                          sample_rate,
+        const std::string&           context_json,
+        const std::atomic<bool>&     abort_flag,
+        ProgressQueue&               progress_queue) = 0;
 
     // -----------------------------------------------------------------------
     // name — short identifier for this backend (e.g. "gemma_audio").

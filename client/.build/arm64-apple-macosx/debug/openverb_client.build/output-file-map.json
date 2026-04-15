@@ -1,0 +1,12 @@
+{
+  "": {
+    "swift-dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/arm64-apple-macosx/debug/openverb_client.build/master.swiftdeps"
+  },
+  "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Sources/main.swift": {
+    "dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/arm64-apple-macosx/debug/openverb_client.build/main.d",
+    "object": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/arm64-apple-macosx/debug/openverb_client.build/main.swift.o",
+    "swiftmodule": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/arm64-apple-macosx/debug/openverb_client.build/main~partial.swiftmodule",
+    "swift-dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/arm64-apple-macosx/debug/openverb_client.build/main.swiftdeps",
+    "diagnostics": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/arm64-apple-macosx/debug/openverb_client.build/main.dia"
+  }
+}

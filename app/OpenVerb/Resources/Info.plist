@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Menu bar app: no Dock icon, no app window at launch. -->
+    <key>LSUIElement</key>
+    <true/>
+
+    <!-- Microphone access (required by App Store + notarization). -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>OpenVerb needs microphone access to record your voice for transcription.</string>
+
+    <!-- Input Monitoring access — required for CGEvent tap (global ⌥Space hotkey). -->
+    <key>NSInputMonitoringUsageDescription</key>
+    <string>OpenVerb needs Input Monitoring access to detect the global ⌥Space hotkey from any app.</string>
+
+    <key>CFBundleName</key>
+    <string>OpenVerb</string>
+
+    <key>CFBundleIdentifier</key>
+    <string>io.openverb.app</string>
+
+    <key>CFBundleVersion</key>
+    <string>1</string>
+
+    <key>CFBundleShortVersionString</key>
+    <string>0.3.0</string>
+
+    <key>CFBundleExecutable</key>
+    <string>OpenVerb</string>
+
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+</dict>
+</plist>

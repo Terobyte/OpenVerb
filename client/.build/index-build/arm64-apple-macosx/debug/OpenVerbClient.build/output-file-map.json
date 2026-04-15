@@ -1,0 +1,33 @@
+{
+  "": {
+    "swift-dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/master.swiftdeps"
+  },
+  "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Sources/AudioSession.swift": {
+    "dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/AudioSession.d",
+    "object": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/AudioSession.swift.o",
+    "swiftmodule": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/AudioSession~partial.swiftmodule",
+    "swift-dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/AudioSession.swiftdeps",
+    "diagnostics": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/AudioSession.dia"
+  },
+  "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Sources/EngineClient.swift": {
+    "dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/EngineClient.d",
+    "object": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/EngineClient.swift.o",
+    "swiftmodule": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/EngineClient~partial.swiftmodule",
+    "swift-dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/EngineClient.swiftdeps",
+    "diagnostics": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/EngineClient.dia"
+  },
+  "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Sources/EngineManager.swift": {
+    "dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/EngineManager.d",
+    "object": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/EngineManager.swift.o",
+    "swiftmodule": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/EngineManager~partial.swiftmodule",
+    "swift-dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/EngineManager.swiftdeps",
+    "diagnostics": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/EngineManager.dia"
+  },
+  "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Sources/EngineProtocol.swift": {
+    "dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/EngineProtocol.d",
+    "object": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/EngineProtocol.swift.o",
+    "swiftmodule": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/EngineProtocol~partial.swiftmodule",
+    "swift-dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/EngineProtocol.swiftdeps",
+    "diagnostics": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/EngineProtocol.dia"
+  }
+}

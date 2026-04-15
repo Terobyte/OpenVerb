@@ -218,17 +218,16 @@ AudioData to_mono(const AudioData& input)
     std::vector<int16_t> mono(frames);
 
     for (std::size_t f = 0; f < frames; ++f) {
-        int32_t sum = 0;
+        int64_t sum = 0;
         for (int c = 0; c < ch; ++c) {
-            sum += static_cast<int32_t>(
+            sum += static_cast<int64_t>(
                 input.samples[f * static_cast<std::size_t>(ch)
                               + static_cast<std::size_t>(c)]);
         }
-        // Average and clamp.
-        const int32_t avg = sum / ch;
+        const int64_t avg = sum / ch;
         mono[f] = static_cast<int16_t>(
-            std::max(static_cast<int32_t>(-32768),
-                     std::min(static_cast<int32_t>(32767), avg)));
+            std::max(static_cast<int64_t>(-32768),
+                     std::min(static_cast<int64_t>(32767), avg)));
     }
 
     AudioData out;

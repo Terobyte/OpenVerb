@@ -4,10 +4,13 @@
 #include "audio/vad.h"
 #include "inference/llama_context.h"
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <string>
 #include <vector>
+
+class ProgressQueue;
 
 // ---------------------------------------------------------------------------
 // GemmaAudioBackend — Backend implementation for Gemma 4 E2B (audio-native).
@@ -68,9 +71,27 @@ public:
         const std::string&           context_json,
         std::function<void(float)>   progress) override;
 
+    void unload_model() override;
+
+    InferenceResult process_stream(
+        const std::vector<int16_t>&  audio_pcm,
+        int                          sample_rate,
+        const std::string&           context_json,
+        const std::atomic<bool>&     abort_flag,
+        ProgressQueue&               progress_queue) override;
+
     std::string name() const override { return "gemma_audio"; }
 
 private:
+    // Core inference logic shared by process() and process_stream().
+    // abort_flag: when non-null, the generation loop exits early if set.
+    InferenceResult process_impl(
+        const std::vector<int16_t>&  audio_pcm,
+        int                          sample_rate,
+        const std::string&           context_json,
+        std::function<void(float)>   progress,
+        const std::atomic<bool>*     abort_flag);
+
     std::unique_ptr<LlamaContext> llama_;
     Vad                           vad_;
     bool                          vad_enabled_;

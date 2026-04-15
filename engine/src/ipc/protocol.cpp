@@ -15,6 +15,7 @@ const char* error_code_string(ErrorCode code) {
         case ErrorCode::phase_violation:   return "phase_violation";
         case ErrorCode::corrupt_audio:     return "corrupt_audio";
         case ErrorCode::inference_failed:  return "inference_failed";
+        case ErrorCode::model_load_failed: return "model_load_failed";
         case ErrorCode::session_limit:     return "session_limit";
         case ErrorCode::timeout:           return "timeout";
         case ErrorCode::duration_exceeded: return "duration_exceeded";

@@ -19,6 +19,7 @@ struct Config {
     std::string mmproj_path;      // path to multimodal projector .gguf (required after resolve)
     std::string file_path;        // audio file to transcribe (--file)
     std::string context_json;     // caller-supplied context JSON (--context)
+    std::string socket_path;      // Unix socket path for daemon mode
 
     // --- inference ---
     std::string backend  = DEFAULT_BACKEND;   // inference backend identifier
@@ -32,6 +33,11 @@ struct Config {
     bool json_output = false;     // emit JSON instead of plain text
     bool verbose     = false;     // enable INFO / DEBUG log output
     bool version     = false;     // caller should print version string then exit
+
+    // --- daemon / IPC ---
+    bool listen      = false;     // --listen: start IPC daemon
+    bool mic         = false;     // --mic: microphone input mode
+    int  model_idle_timeout_secs = DEFAULT_IDLE_TIMEOUT_SECS;
 };
 
 // ---------------------------------------------------------------------------

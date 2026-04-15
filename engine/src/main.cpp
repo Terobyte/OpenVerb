@@ -44,23 +44,54 @@ static void handle_signal(int /*sig*/) {
 static std::string json_escape(const std::string& s) {
     std::string out;
     out.reserve(s.size() + 8);
-    for (unsigned char c : s) {
-        switch (c) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n";  break;
-            case '\r': out += "\\r";  break;
-            case '\t': out += "\\t";  break;
-            default:
-                if (c < 0x20) {
-                    char buf[8];
-                    std::snprintf(buf, sizeof(buf), "\\u%04x",
-                                  static_cast<unsigned>(c));
-                    out += buf;
-                } else {
-                    out += static_cast<char>(c);
-                }
-                break;
+    size_t i = 0;
+    const size_t n = s.size();
+    while (i < n) {
+        unsigned char c = static_cast<unsigned char>(s[i]);
+        if (c < 0x80) {
+            switch (c) {
+                case '"':  out += "\\\""; break;
+                case '\\': out += "\\\\"; break;
+                case '\n': out += "\\n";  break;
+                case '\r': out += "\\r";  break;
+                case '\t': out += "\\t";  break;
+                default:
+                    if (c < 0x20) {
+                        char buf[8];
+                        std::snprintf(buf, sizeof(buf), "\\u%04x",
+                                      static_cast<unsigned>(c));
+                        out += buf;
+                    } else {
+                        out += static_cast<char>(c);
+                    }
+                    break;
+            }
+            ++i;
+            continue;
+        }
+        // Determine expected UTF-8 sequence length from lead byte.
+        int seq_len = 0;
+        if      ((c & 0xE0) == 0xC0) seq_len = 2;
+        else if ((c & 0xF0) == 0xE0) seq_len = 3;
+        else if ((c & 0xF8) == 0xF0) seq_len = 4;
+
+        bool valid = (seq_len > 0);
+        for (int j = 1; j < seq_len && valid; ++j) {
+            if (i + static_cast<size_t>(j) >= n) { valid = false; break; }
+            unsigned char cont = static_cast<unsigned char>(s[i + j]);
+            if ((cont & 0xC0) != 0x80) valid = false;
+        }
+
+        if (valid) {
+            for (int j = 0; j < seq_len; ++j)
+                out += s[i + j];
+            i += seq_len;
+        } else {
+            // Invalid or orphaned byte — escape as \uXXXX.
+            char buf[8];
+            std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned>(c));
+            out += buf;
+            ++i;
         }
     }
     return out;

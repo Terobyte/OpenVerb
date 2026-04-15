@@ -1,35 +1,15 @@
 #pragma once
 
-// ---------------------------------------------------------------------------
-// Logging — MVP1 scope
-//
-// All output goes to stderr. No file logging or rotation in MVP1.
-//
-// Levels:
-//   LOG_ERROR  — always emitted (fatal / non-fatal errors)
-//   LOG_WARN   — always emitted (degraded operation warnings)
-//   LOG_INFO   — emitted only when verbose mode is enabled
-//   LOG_DEBUG  — emitted only when verbose mode is enabled
-//
-// Format:  [YYYY-MM-DD HH:MM:SS] [LEVEL] message\n
-//
-// Activate verbose output by calling log_set_verbose(true) after
-// resolve_config() sets cfg.verbose.
-// ---------------------------------------------------------------------------
+#include <cstdio>
 
-/// Enable / disable INFO and DEBUG output.  Call once after resolve_config().
 void log_set_verbose(bool verbose);
+void log_set_log_file(const char* path);
 
-// Internal implementation helpers — not part of the public API.
 namespace log_detail {
     bool is_verbose();
     void write(const char* level, const char* fmt, ...)
-        __attribute__((format(printf, 2, 3)));  // enables -Wformat checks
+        __attribute__((format(printf, 2, 3)));
 }
-
-// ---------------------------------------------------------------------------
-// Public macros
-// ---------------------------------------------------------------------------
 
 #define LOG_ERROR(fmt, ...) \
     ::log_detail::write("ERROR", fmt, ##__VA_ARGS__)

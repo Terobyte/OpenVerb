@@ -26,7 +26,7 @@ size_t RingBuffer::write(const void* data, size_t len) {
 std::vector<int16_t> RingBuffer::read_all() {
     size_t r       = read_idx_.load(std::memory_order_relaxed);
     size_t w       = write_idx_.load(std::memory_order_acquire);
-    size_t avail   = w - r;
+    size_t avail   = (w >= r) ? w - r : 0;  // guard against reset() race underflow
     avail &= ~size_t(1);          // mask to even byte count
     size_t samples = avail / 2;
     std::vector<int16_t> result(samples);
@@ -51,7 +51,7 @@ void RingBuffer::reset() {
 size_t RingBuffer::bytes_available() const {
     size_t w = write_idx_.load(std::memory_order_acquire);
     size_t r = read_idx_.load(std::memory_order_acquire);
-    return w - r;
+    return (w >= r) ? w - r : 0;  // guard against reset() race underflow
 }
 
 double RingBuffer::duration_secs() const {

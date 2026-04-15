@@ -91,7 +91,26 @@ void IpcServer::start(const std::string& socket_path) {
     write_pid_file(pid_path_);
     running_.store(true, std::memory_order_release);
 
+    // Do NOT reset g_interrupted here.  If a signal arrived before start()
+    // was called (e.g. during Engine construction) the flag must remain set
+    // so the loop below exits immediately rather than silently swallowing it.
+
     LOG_INFO("ipc: listening on %s", expanded.c_str());
+
+    // Preload the model in a background thread so the first session doesn't
+    // pay the load cost.  The socket is already listening when this starts, so
+    // ensureRunning() pings succeed immediately while the model loads.
+    // If a session arrives before preload finishes, ensure_loaded() blocks on
+    // engine_mutex_ until the background thread releases it — correct behaviour.
+    preload_thread_ = std::thread([this]() {
+        try {
+            LOG_INFO("ipc: preloading model...");
+            engine_.ensure_loaded();
+            LOG_INFO("ipc: model preloaded");
+        } catch (const std::exception& e) {
+            LOG_WARN("ipc: preload failed (will retry on first session): %s", e.what());
+        }
+    });
 
 #if defined(__APPLE__)
     // Register a GCD memory pressure source.  On WARN we schedule a lazy
@@ -145,8 +164,6 @@ void IpcServer::start(const std::string& socket_path) {
     };
     last_inference_sec_.store(now_sec(), std::memory_order_relaxed);
     bool idle_unloaded = false;
-
-    g_interrupted.store(false, std::memory_order_relaxed);
 
     while (running_.load(std::memory_order_relaxed) &&
            !g_interrupted.load(std::memory_order_relaxed)) {
@@ -212,19 +229,12 @@ void IpcServer::start(const std::string& socket_path) {
             continue;
         }
 
+        // Join the previous session thread.  The thread resets session_active_
+        // before it exits, so after join() it is always false.  Any second
+        // client that arrived while the session was still running was queued by
+        // the kernel (backlog=1) and will be served here without rejection.
         if (session_thread_.joinable()) {
             session_thread_.join();
-        }
-
-        if (session_active_.load(std::memory_order_acquire)) {
-            send_json(client_fd, nlohmann::json{
-                {"type", "error"},
-                {"code", "session_limit"},
-                {"message", "engine busy"}
-            });
-            ::close(client_fd);
-            LOG_INFO("ipc: rejected second client (session_limit)");
-            continue;
         }
 
         idle_unloaded = false;
@@ -253,6 +263,10 @@ void IpcServer::stop() {
     if (!running_.load(std::memory_order_relaxed)) return;
     running_.store(false, std::memory_order_release);
     g_interrupted.store(true, std::memory_order_relaxed);
+
+    if (preload_thread_.joinable()) {
+        preload_thread_.join();
+    }
 
     if (session_thread_.joinable()) {
         session_thread_.join();

@@ -1,0 +1,103 @@
+{
+  "": {
+    "swift-dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/master.swiftdeps"
+  },
+  "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/OpenVerb/Context/ContextBuilder.swift": {
+    "dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/ContextBuilder.d",
+    "object": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/ContextBuilder.swift.o",
+    "swiftmodule": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/ContextBuilder~partial.swiftmodule",
+    "swift-dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/ContextBuilder.swiftdeps",
+    "diagnostics": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/ContextBuilder.dia"
+  },
+  "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/OpenVerb/Engine/Constants.swift": {
+    "dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/Constants.d",
+    "object": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/Constants.swift.o",
+    "swiftmodule": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/Constants~partial.swiftmodule",
+    "swift-dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/Constants.swiftdeps",
+    "diagnostics": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/Constants.dia"
+  },
+  "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/OpenVerb/Engine/EngineClient.swift": {
+    "dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/EngineClient.d",
+    "object": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/EngineClient.swift.o",
+    "swiftmodule": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/EngineClient~partial.swiftmodule",
+    "swift-dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/EngineClient.swiftdeps",
+    "diagnostics": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/EngineClient.dia"
+  },
+  "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/OpenVerb/Engine/EngineManager.swift": {
+    "dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/EngineManager.d",
+    "object": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/EngineManager.swift.o",
+    "swiftmodule": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/EngineManager~partial.swiftmodule",
+    "swift-dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/EngineManager.swiftdeps",
+    "diagnostics": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/EngineManager.dia"
+  },
+  "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/OpenVerb/Engine/EngineProtocol.swift": {
+    "dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/EngineProtocol.d",
+    "object": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/EngineProtocol.swift.o",
+    "swiftmodule": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/EngineProtocol~partial.swiftmodule",
+    "swift-dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/EngineProtocol.swiftdeps",
+    "diagnostics": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/EngineProtocol.dia"
+  },
+  "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/OpenVerb/Input/AudioSession.swift": {
+    "dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/AudioSession.d",
+    "object": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/AudioSession.swift.o",
+    "swiftmodule": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/AudioSession~partial.swiftmodule",
+    "swift-dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/AudioSession.swiftdeps",
+    "diagnostics": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/AudioSession.dia"
+  },
+  "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/OpenVerb/Input/HotkeyManager.swift": {
+    "dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/HotkeyManager.d",
+    "object": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/HotkeyManager.swift.o",
+    "swiftmodule": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/HotkeyManager~partial.swiftmodule",
+    "swift-dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/HotkeyManager.swiftdeps",
+    "diagnostics": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/HotkeyManager.dia"
+  },
+  "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/OpenVerb/Output/CommandExecutor.swift": {
+    "dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/CommandExecutor.d",
+    "object": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/CommandExecutor.swift.o",
+    "swiftmodule": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/CommandExecutor~partial.swiftmodule",
+    "swift-dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/CommandExecutor.swiftdeps",
+    "diagnostics": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/CommandExecutor.dia"
+  },
+  "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/OpenVerb/Output/TextInjector.swift": {
+    "dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/TextInjector.d",
+    "object": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/TextInjector.swift.o",
+    "swiftmodule": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/TextInjector~partial.swiftmodule",
+    "swift-dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/TextInjector.swiftdeps",
+    "diagnostics": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/TextInjector.dia"
+  },
+  "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/OpenVerb/State/AppState.swift": {
+    "dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/AppState.d",
+    "object": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/AppState.swift.o",
+    "swiftmodule": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/AppState~partial.swiftmodule",
+    "swift-dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/AppState.swiftdeps",
+    "diagnostics": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/AppState.dia"
+  },
+  "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/OpenVerb/UI/ProcessingView.swift": {
+    "dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/ProcessingView.d",
+    "object": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/ProcessingView.swift.o",
+    "swiftmodule": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/ProcessingView~partial.swiftmodule",
+    "swift-dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/ProcessingView.swiftdeps",
+    "diagnostics": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/ProcessingView.dia"
+  },
+  "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/OpenVerb/UI/RecordingWindow.swift": {
+    "dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/RecordingWindow.d",
+    "object": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/RecordingWindow.swift.o",
+    "swiftmodule": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/RecordingWindow~partial.swiftmodule",
+    "swift-dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/RecordingWindow.swiftdeps",
+    "diagnostics": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/RecordingWindow.dia"
+  },
+  "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/OpenVerb/UI/StatusBarItem.swift": {
+    "dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/StatusBarItem.d",
+    "object": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/StatusBarItem.swift.o",
+    "swiftmodule": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/StatusBarItem~partial.swiftmodule",
+    "swift-dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/StatusBarItem.swiftdeps",
+    "diagnostics": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/StatusBarItem.dia"
+  },
+  "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/OpenVerb/UI/WaveformView.swift": {
+    "dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/WaveformView.d",
+    "object": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/WaveformView.swift.o",
+    "swiftmodule": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/WaveformView~partial.swiftmodule",
+    "swift-dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/WaveformView.swiftdeps",
+    "diagnostics": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/.build/arm64-apple-macosx/debug/OpenVerb.build/WaveformView.dia"
+  }
+}

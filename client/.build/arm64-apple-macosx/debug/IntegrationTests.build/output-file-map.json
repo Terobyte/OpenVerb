@@ -1,0 +1,12 @@
+{
+  "": {
+    "swift-dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/arm64-apple-macosx/debug/IntegrationTests.build/master.swiftdeps"
+  },
+  "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Tests/IntegrationTests.swift": {
+    "dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/arm64-apple-macosx/debug/IntegrationTests.build/IntegrationTests.d",
+    "object": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/arm64-apple-macosx/debug/IntegrationTests.build/IntegrationTests.swift.o",
+    "swiftmodule": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/arm64-apple-macosx/debug/IntegrationTests.build/IntegrationTests~partial.swiftmodule",
+    "swift-dependencies": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/arm64-apple-macosx/debug/IntegrationTests.build/IntegrationTests.swiftdeps",
+    "diagnostics": "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/arm64-apple-macosx/debug/IntegrationTests.build/IntegrationTests.dia"
+  }
+}

@@ -108,13 +108,15 @@ target_link_libraries(openverb-engine-lib PUBLIC
     webrtc_vad_lib
 )
 
-# macOS frameworks (needed for Metal / Accelerate)
+# macOS frameworks (needed for Metal / Accelerate / Audio)
 if(APPLE)
     target_link_libraries(openverb-engine-lib PUBLIC
         "-framework Foundation"
         "-framework Accelerate"
         "-framework Metal"
         "-framework MetalKit"
+        "-framework CoreAudio"
+        "-framework AudioToolbox"
     )
 endif()
 

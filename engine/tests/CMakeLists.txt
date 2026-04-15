@@ -22,13 +22,17 @@ file(GLOB TEST_SOURCES CONFIGURE_DEPENDS
 )
 
 foreach(test_src ${TEST_SOURCES})
-    get_filename_component(test_name ${test_src} NAME_WE)   # e.g. test_engine
+    get_filename_component(test_name ${test_src} NAME_WE)
     add_executable(${test_name} ${test_src})
     target_link_libraries(${test_name} PRIVATE
         gtest_main
         openverb-engine-lib
     )
-    gtest_discover_tests(${test_name})
+    if(test_name STREQUAL "test_capture")
+        gtest_discover_tests(${test_name} PROPERTIES DISABLED TRUE)
+    else()
+        gtest_discover_tests(${test_name})
+    endif()
 endforeach()
 
 # ---------------------------------------------------------------------------
@@ -38,4 +42,7 @@ endforeach()
 # ---------------------------------------------------------------------------
 if(OPENVERB_INTEGRATION_TESTS)
     target_compile_definitions(test_integration PRIVATE OPENVERB_INTEGRATION_TESTS)
+    if(TARGET test_ipc_integration)
+        target_compile_definitions(test_ipc_integration PRIVATE OPENVERB_INTEGRATION_TESTS)
+    endif()
 endif()

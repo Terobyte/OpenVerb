@@ -4,6 +4,7 @@
 #include "commands/parser.h"
 #include "context/prompt_builder.h"
 #include "audio/reader.h"
+#include "ipc/progress.h"
 
 #include <chrono>
 #include <cstring>
@@ -26,14 +27,15 @@ GemmaAudioBackend::GemmaAudioBackend(const std::string& model_path,
 {}
 
 // ---------------------------------------------------------------------------
-// process
+// process_impl — core inference logic shared by process() and process_stream()
 // ---------------------------------------------------------------------------
 
-InferenceResult GemmaAudioBackend::process(
+InferenceResult GemmaAudioBackend::process_impl(
     const std::vector<int16_t>&  audio_pcm,
     int                          sample_rate,
     const std::string&           context_json,
-    std::function<void(float)>   progress)
+    std::function<void(float)>   progress,
+    const std::atomic<bool>*     abort_flag)
 {
     const auto t_start = std::chrono::steady_clock::now();
 
@@ -76,7 +78,8 @@ InferenceResult GemmaAudioBackend::process(
         audio_pcm,
         sample_rate,
         suffix,
-        progress
+        progress,
+        abort_flag
     );
 
     // -----------------------------------------------------------------------
@@ -98,4 +101,44 @@ InferenceResult GemmaAudioBackend::process(
         t_end - t_start);
 
     return InferenceResult{parsed.text, parsed.command, elapsed.count()};
+}
+
+// ---------------------------------------------------------------------------
+// process — public API, delegates to process_impl (no abort flag)
+// ---------------------------------------------------------------------------
+
+InferenceResult GemmaAudioBackend::process(
+    const std::vector<int16_t>&  audio_pcm,
+    int                          sample_rate,
+    const std::string&           context_json,
+    std::function<void(float)>   progress)
+{
+    return process_impl(audio_pcm, sample_rate, context_json, progress, nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// unload_model — releases model weights to free memory
+// ---------------------------------------------------------------------------
+
+void GemmaAudioBackend::unload_model()
+{
+    llama_.reset();
+}
+
+// ---------------------------------------------------------------------------
+// process_stream — like process() but with abort support and ProgressQueue
+// ---------------------------------------------------------------------------
+
+InferenceResult GemmaAudioBackend::process_stream(
+    const std::vector<int16_t>&  audio_pcm,
+    int                          sample_rate,
+    const std::string&           context_json,
+    const std::atomic<bool>&     abort_flag,
+    ProgressQueue&               progress_queue)
+{
+    auto progress_cb = [&progress_queue](float frac) {
+        progress_queue.push(frac * 100.0f);
+    };
+    return process_impl(audio_pcm, sample_rate, context_json,
+                        progress_cb, &abort_flag);
 }

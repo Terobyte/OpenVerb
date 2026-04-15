@@ -447,7 +447,7 @@ std::string LlamaContext::infer(const std::string&         text_prompt,
     // -----------------------------------------------------------------------
     // Step 6: Autoregressive generation loop
     // -----------------------------------------------------------------------
-    constexpr int MAX_NEW_TOKENS = 2048;
+    constexpr int MAX_NEW_TOKENS = 512;
 
     // Pre-allocate a single-token batch for the decode loop
     llama_batch batch = llama_batch_init(1, 0, 1);

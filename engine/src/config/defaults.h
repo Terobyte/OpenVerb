@@ -30,7 +30,22 @@
 ///   • Lower if quiet speech is incorrectly suppressed.
 #define SILENCE_RMS_THRESHOLD  50.0
 
-// CHUNK_BYTES (IPC pipe) is deferred to MVP2.
+// ---------------------------------------------------------------------------
+// IPC / daemon constants
+// ---------------------------------------------------------------------------
+
+#define CHUNK_BYTES               4096
+#define DEFAULT_SOCKET_PATH       "~/.openverb/engine.sock"
+#define DEFAULT_PID_PATH          "~/.openverb/engine.pid"
+#define DEFAULT_IDLE_TIMEOUT_SECS 0
+#define DEFAULT_SESSION_TIMEOUT_SECS 15
+#define DEFAULT_STREAM_STALL_SECS 30
+#define DEFAULT_INFERENCE_TIMEOUT_SECS 30
+#define DEFAULT_MAX_JSON_SIZE     65536
+#define RING_BUFFER_SIZE          16777216
+#define AUDIO_TOKENS_PER_SEC      25
+#define SYSTEM_PROMPT_TOKENS_RESERVED 500
+#define DEFAULT_CTX_SIZE          4096
 
 // ---------------------------------------------------------------------------
 // User-facing defaults (DEFAULT_ prefix — can vary per workflow / user pref)

@@ -76,7 +76,8 @@ public:
                       const std::vector<int16_t>& audio_pcm,
                       int                         sample_rate,
                       const std::string&          generation_suffix,
-                      ProgressCallback            progress = nullptr);
+                      ProgressCallback            progress   = nullptr,
+                      const std::atomic<bool>*    abort_flag = nullptr);
 
     // ------------------------------------------------------------------------
     // has_audio_support — true if the loaded mmproj supports audio input.

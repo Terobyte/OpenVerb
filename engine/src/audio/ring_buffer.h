@@ -1,0 +1,26 @@
+#pragma once
+
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <vector>
+
+class RingBuffer {
+public:
+    RingBuffer();
+
+    size_t write(const void* data, size_t len);
+    std::vector<int16_t> read_all();
+    void   reset();
+    size_t bytes_available() const;
+    double duration_secs() const;
+
+private:
+    static constexpr size_t BUF_SIZE = 16777216; // 16 MB, power of two
+    static constexpr size_t MASK     = BUF_SIZE - 1;
+
+    std::vector<uint8_t>       buf_;
+    std::atomic<size_t>        write_idx_{0};
+    std::atomic<size_t>        read_idx_{0};
+};

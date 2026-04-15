@@ -1,0 +1,855 @@
+{
+  "builtTestProducts" : [
+    {
+      "binaryPath" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/openverb-clientPackageTests.xctest/Contents/MacOS/openverb-clientPackageTests",
+      "packagePath" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client",
+      "productName" : "openverb-clientPackageTests"
+    }
+  ],
+  "copyCommands" : {
+
+  },
+  "explicitTargetDependencyImportCheckingMode" : {
+    "none" : {
+
+    }
+  },
+  "generatedSourceTargetSet" : [
+
+  ],
+  "pluginDescriptions" : [
+
+  ],
+  "swiftCommands" : {
+    "C.IntegrationTests-arm64-apple-macosx15.0-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/IntegrationTests.build/sources",
+      "importPath" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Tests/IntegrationTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/Modules/OpenVerbClient.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/IntegrationTests.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "IntegrationTests",
+      "moduleOutputPath" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/Modules/IntegrationTests.swiftmodule",
+      "objects" : [
+        "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/IntegrationTests.build/IntegrationTests.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx14.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-Onone",
+        "-enable-testing",
+        "-Xfrontend",
+        "-enable-cross-import-overlays",
+        "-j10",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-swift-version",
+        "5",
+        "-Xfrontend",
+        "-experimental-lazy-typecheck",
+        "-Xfrontend",
+        "-experimental-skip-all-function-bodies",
+        "-Xfrontend",
+        "-experimental-allow-module-with-compiler-errors",
+        "-Xfrontend",
+        "-empty-abi-descriptor",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "client"
+      ],
+      "outputFileMapPath" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/IntegrationTests.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/Modules/IntegrationTests.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : true,
+      "sources" : [
+        "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Tests/IntegrationTests.swift"
+      ],
+      "tempsPath" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/IntegrationTests.build",
+      "wholeModuleOptimization" : false
+    },
+    "C.OpenVerbClient-arm64-apple-macosx15.0-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/sources",
+      "importPath" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Sources/AudioSession.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Sources/EngineClient.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Sources/EngineManager.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Sources/EngineProtocol.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "OpenVerbClient",
+      "moduleOutputPath" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/Modules/OpenVerbClient.swiftmodule",
+      "objects" : [
+        "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/AudioSession.swift.o",
+        "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/EngineClient.swift.o",
+        "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/EngineManager.swift.o",
+        "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/EngineProtocol.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx13.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-Onone",
+        "-enable-testing",
+        "-j10",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-emit-objc-header",
+        "-emit-objc-header-path",
+        "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/include/OpenVerbClient-Swift.h",
+        "-swift-version",
+        "5",
+        "-Xfrontend",
+        "-experimental-lazy-typecheck",
+        "-Xfrontend",
+        "-experimental-skip-all-function-bodies",
+        "-Xfrontend",
+        "-experimental-allow-module-with-compiler-errors",
+        "-Xfrontend",
+        "-empty-abi-descriptor",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "client"
+      ],
+      "outputFileMapPath" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/Modules/OpenVerbClient.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : true,
+      "sources" : [
+        "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Sources/AudioSession.swift",
+        "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Sources/EngineClient.swift",
+        "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Sources/EngineManager.swift",
+        "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Sources/EngineProtocol.swift"
+      ],
+      "tempsPath" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build",
+      "wholeModuleOptimization" : false
+    },
+    "C.openverb-client-arm64-apple-macosx15.0-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/openverb_client.build/sources",
+      "importPath" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Sources/main.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/Modules/OpenVerbClient.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/openverb_client.build/sources"
+        }
+      ],
+      "isLibrary" : false,
+      "moduleName" : "openverb_client",
+      "moduleOutputPath" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/Modules/openverb_client.swiftmodule",
+      "objects" : [
+        "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/openverb_client.build/main.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx13.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-Onone",
+        "-enable-testing",
+        "-j10",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-Xfrontend",
+        "-entry-point-function-name",
+        "-Xfrontend",
+        "openverb_client_main",
+        "-swift-version",
+        "5",
+        "-Xfrontend",
+        "-experimental-lazy-typecheck",
+        "-Xfrontend",
+        "-experimental-skip-all-function-bodies",
+        "-Xfrontend",
+        "-experimental-allow-module-with-compiler-errors",
+        "-Xfrontend",
+        "-empty-abi-descriptor",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "client"
+      ],
+      "outputFileMapPath" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/openverb_client.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/Modules/openverb_client.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : true,
+      "sources" : [
+        "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Sources/main.swift"
+      ],
+      "tempsPath" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/openverb_client.build",
+      "wholeModuleOptimization" : false
+    },
+    "C.openverb-clientPackageTests-arm64-apple-macosx15.0-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/openverb_clientPackageTests.build/sources",
+      "importPath" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/openverb-clientPackageTests.derived/runner.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/Modules/IntegrationTests.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/openverb_clientPackageTests.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "openverb_clientPackageTests",
+      "moduleOutputPath" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/Modules/openverb_clientPackageTests.swiftmodule",
+      "objects" : [
+        "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/openverb_clientPackageTests.build/runner.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx13.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-Onone",
+        "-enable-testing",
+        "-Xfrontend",
+        "-enable-cross-import-overlays",
+        "-j10",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-emit-objc-header",
+        "-emit-objc-header-path",
+        "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/openverb_clientPackageTests.build/include/openverb-clientPackageTests-Swift.h",
+        "-Xfrontend",
+        "-experimental-lazy-typecheck",
+        "-Xfrontend",
+        "-experimental-skip-all-function-bodies",
+        "-Xfrontend",
+        "-experimental-allow-module-with-compiler-errors",
+        "-Xfrontend",
+        "-empty-abi-descriptor",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "client"
+      ],
+      "outputFileMapPath" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/openverb_clientPackageTests.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/Modules/openverb_clientPackageTests.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : true,
+      "sources" : [
+        "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/openverb-clientPackageTests.derived/runner.swift"
+      ],
+      "tempsPath" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/openverb_clientPackageTests.build",
+      "wholeModuleOptimization" : false
+    }
+  },
+  "swiftFrontendCommands" : {
+
+  },
+  "swiftTargetScanArgs" : {
+    "IntegrationTests" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "IntegrationTests",
+      "-package-name",
+      "client",
+      "-c",
+      "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Tests/IntegrationTests.swift",
+      "-I",
+      "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx14.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-Onone",
+      "-enable-testing",
+      "-Xfrontend",
+      "-enable-cross-import-overlays",
+      "-j10",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-swift-version",
+      "5",
+      "-Xfrontend",
+      "-experimental-lazy-typecheck",
+      "-Xfrontend",
+      "-experimental-skip-all-function-bodies",
+      "-Xfrontend",
+      "-experimental-allow-module-with-compiler-errors",
+      "-Xfrontend",
+      "-empty-abi-descriptor",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "client",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ],
+    "OpenVerbClient" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "OpenVerbClient",
+      "-package-name",
+      "client",
+      "-c",
+      "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Sources/AudioSession.swift",
+      "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Sources/EngineClient.swift",
+      "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Sources/EngineManager.swift",
+      "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Sources/EngineProtocol.swift",
+      "-I",
+      "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx13.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-Onone",
+      "-enable-testing",
+      "-j10",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-emit-objc-header",
+      "-emit-objc-header-path",
+      "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/include/OpenVerbClient-Swift.h",
+      "-swift-version",
+      "5",
+      "-Xfrontend",
+      "-experimental-lazy-typecheck",
+      "-Xfrontend",
+      "-experimental-skip-all-function-bodies",
+      "-Xfrontend",
+      "-experimental-allow-module-with-compiler-errors",
+      "-Xfrontend",
+      "-empty-abi-descriptor",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "client",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ],
+    "openverb_client" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "openverb_client",
+      "-package-name",
+      "client",
+      "-c",
+      "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Sources/main.swift",
+      "-I",
+      "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx13.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-Onone",
+      "-enable-testing",
+      "-j10",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-Xfrontend",
+      "-entry-point-function-name",
+      "-Xfrontend",
+      "openverb_client_main",
+      "-swift-version",
+      "5",
+      "-Xfrontend",
+      "-experimental-lazy-typecheck",
+      "-Xfrontend",
+      "-experimental-skip-all-function-bodies",
+      "-Xfrontend",
+      "-experimental-allow-module-with-compiler-errors",
+      "-Xfrontend",
+      "-empty-abi-descriptor",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "client",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ],
+    "openverb_clientPackageTests" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "openverb_clientPackageTests",
+      "-package-name",
+      "client",
+      "-c",
+      "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/openverb-clientPackageTests.derived/runner.swift",
+      "-I",
+      "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx13.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-Onone",
+      "-enable-testing",
+      "-Xfrontend",
+      "-enable-cross-import-overlays",
+      "-j10",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-emit-objc-header",
+      "-emit-objc-header-path",
+      "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/openverb_clientPackageTests.build/include/openverb-clientPackageTests-Swift.h",
+      "-Xfrontend",
+      "-experimental-lazy-typecheck",
+      "-Xfrontend",
+      "-experimental-skip-all-function-bodies",
+      "-Xfrontend",
+      "-experimental-allow-module-with-compiler-errors",
+      "-Xfrontend",
+      "-empty-abi-descriptor",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "client",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ]
+  },
+  "targetDependencyMap" : {
+    "IntegrationTests" : [
+      "OpenVerbClient"
+    ],
+    "OpenVerbClient" : [
+
+    ],
+    "openverb_client" : [
+      "OpenVerbClient"
+    ],
+    "openverb_clientPackageTests" : [
+      "IntegrationTests",
+      "OpenVerbClient"
+    ]
+  },
+  "testDiscoveryCommands" : {
+
+  },
+  "testEntryPointCommands" : {
+
+  },
+  "traitConfiguration" : {
+    "default" : {
+
+    }
+  },
+  "writeCommands" : {
+    "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/IntegrationTests.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Tests/IntegrationTests.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/IntegrationTests.build/sources"
+    },
+    "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Sources/AudioSession.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Sources/EngineClient.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Sources/EngineManager.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Sources/EngineProtocol.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/OpenVerbClient.build/sources"
+    },
+    "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/openverb_client.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Sources/main.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/openverb_client.build/sources"
+    },
+    "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/openverb_clientPackageTests.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/openverb-clientPackageTests.derived/runner.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/openverb_clientPackageTests.build/sources"
+    },
+    "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt" : {
+      "alwaysOutOfDate" : true,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<swift-get-version>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+        }
+      ],
+      "outputFilePath" : "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/.build/index-build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+    }
+  }
+}
