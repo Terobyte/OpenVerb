@@ -340,7 +340,8 @@ std::string LlamaContext::infer(const std::string&         text_prompt,
                                 const std::vector<int16_t>& audio_pcm,
                                 int                         sample_rate,
                                 const std::string&          generation_suffix,
-                                ProgressCallback            progress) {
+                                ProgressCallback            progress,
+                                const std::atomic<bool>*    abort_flag) {
     // Engine always resamples to 16 kHz before calling infer().
     // Assert here so any future caller that skips resampling gets a clear error.
     if (sample_rate != 16000)
@@ -410,11 +411,21 @@ std::string LlamaContext::infer(const std::string&         text_prompt,
             "Ensure the prompt contains exactly one <__media__> marker.");
     }
 
+    // Check abort after tokenize (can take seconds for long audio)
+    if (g_interrupted.load(std::memory_order_relaxed)) return "";
+    if (abort_flag && abort_flag->load(std::memory_order_relaxed)) return "";
+
     // -----------------------------------------------------------------------
     // Step 5: Process all chunks (encode audio + decode text into KV cache)
     // -----------------------------------------------------------------------
     // KV-cache must be cleared between calls
     llama_memory_clear(llama_get_memory(impl_->lctx), false);
+
+    llama_sampler_reset(impl_->sampler);
+
+    // Check abort before eval (encoding can also take seconds)
+    if (g_interrupted.load(std::memory_order_relaxed)) return "";
+    if (abort_flag && abort_flag->load(std::memory_order_relaxed)) return "";
 
     llama_pos n_past     = 0;
     int32_t   eval_rc    = mtmd_helper_eval_chunks(
@@ -455,10 +466,9 @@ std::string LlamaContext::infer(const std::string&         text_prompt,
     if (progress) progress(0.0f);
 
     for (int i = 0; i < MAX_NEW_TOKENS; ++i) {
-        // --- Check for interrupt ---
-        if (g_interrupted.load(std::memory_order_relaxed)) {
-            break;
-        }
+        // --- Check for interrupt (global SIGINT or per-session abort) ---
+        if (g_interrupted.load(std::memory_order_relaxed)) break;
+        if (abort_flag && abort_flag->load(std::memory_order_relaxed)) break;
 
         // --- Sample next token (greedy) ---
         const llama_token token_id =
@@ -478,7 +488,17 @@ std::string LlamaContext::infer(const std::string&         text_prompt,
             piece_buf, sizeof(piece_buf) - 1,
             /*lstrip=*/  0,
             /*special=*/ false);
-        if (piece_len > 0) {
+        if (piece_len < 0) {
+            // Buffer too small — retry with dynamic allocation
+            std::vector<char> dyn(static_cast<size_t>(-piece_len) + 1);
+            piece_len = llama_token_to_piece(
+                vocab, token_id,
+                dyn.data(), static_cast<int32_t>(dyn.size()) - 1, 0, false);
+            if (piece_len > 0) {
+                dyn[piece_len] = '\0';
+                output.append(dyn.data(), piece_len);
+            }
+        } else if (piece_len > 0) {
             piece_buf[piece_len] = '\0';
             output.append(piece_buf, piece_len);
         }
