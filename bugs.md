@@ -81,9 +81,11 @@ Changed to `@Published private(set) var preparingSubtitle: String?`. Updated 3 t
 ### Bug 9 — Server memory pressure WARN unload TOCTOU race with new session
 - **File:** `engine/src/ipc/server.cpp:198-206`
 - **Severity:** Medium
-- **Status:** Open
+- **Status:** Fixed
 
 WARN-pressure forced unload checks `session_active_` then calls `engine_.unload_model()`. A new client can connect between the check and the unload. The CRITICAL-pressure path mitigates this via `pressure_critical_active_` double-flag, but the WARN path has no such guard.
+
+False positive per Bug 21 re-examination. WARN-pressure unload and accept() run on the same main thread in different `poll()` branches — no concurrency exists between the check and the unload.
 
 ---
 
@@ -138,6 +140,103 @@ Replaced silent empty-string fallback with an explicit `getenv("HOME")` null/emp
 - **Status:** Fixed
 
 Changed `num_frames` and all related loop variables/containers to `size_t`, eliminating the `static_cast<int>(pcm.size())` overflow. `pending` is now `std::vector<size_t>` and `append_frame` takes `size_t`.
+
+---
+
+### Bug 16 — `drainResult` error path unconditionally tears down new recording after abort+restart
+- **File:** `app/OpenVerb/App/OpenVerbApp.swift:552-556`
+- **Severity:** High
+- **Status:** Open
+
+When `abortAndRestart()` disconnects the socket, the stale `drainResult` Task receives a `receiveMessage()` error. The catch block unconditionally executes `recordingWindow.hide()`, `audioSession.stop()`, and `hotkeyManager.removeEscapeMonitors()` — even if the state has already moved to `.preparing` or `.recording` for the new session. The guard `if appState.state == .inferring` only protects the `transition(to: .error)` call, not the teardown above it.
+
+**Repro:**
+1. ⌥Space → record → ⌥Space → inference starts
+2. ⌥Space again (abort+restart) → state moves to `.preparing`, new recording begins
+3. Old `drainResult` Task resumes from suspended `receiveMessage()`, catches the error
+4. `audioSession.stop()` / `recordingWindow.hide()` / `removeEscapeMonitors()` kill the new recording silently
+
+**Fix:** Wrap teardown in `guard appState.state == .inferring else { return }` before the UI cleanup calls.
+
+---
+
+### Bug 17 — Phase 2 monitor fires `onError` after `stopPhase2Monitor()` during abort+restart
+- **File:** `app/OpenVerb/Engine/EngineClient.swift:501-521`, `app/OpenVerb/App/OpenVerbApp.swift:144-162`
+- **Severity:** High
+- **Status:** Open
+
+`stopPhase2Monitor()` sets `phase2MonitorStopped = true` and writes the wakeup byte, but does **not** wait for the monitor Task to finish. If the monitor is already inside `recvJSONSync()` (past the `stopped` check at line 504), the subsequent `disconnect()` closes the fd, causing `recvJSONSync()` to throw. The monitor catches the error, sets `phase2Error`, and calls `onError` — even though the stop was intentional.
+
+The `onError` handler in AppDelegate performs full session teardown (stop audio, hide window, remove monitors, transition to `.error(...)`, trigger `handleCrash()`). This overwrites the `.preparing` state from abort+restart and shows a spurious error to the user.
+
+**Fix:** Check `phase2MonitorStopped` inside the monitor's error catch before calling `onError`, or gate the AppDelegate `onError` handler on `appState.state`.
+
+---
+
+### Bug 18 — Six `AppSettings` properties are published but never consumed
+- **File:** `app/OpenVerb/Settings/AppSettings.swift` vs consumers
+- **Severity:** Medium
+- **Status:** Open
+
+The following `AppSettings` properties are persisted to UserDefaults and published via `@Published`, but the code that should read them uses hardcoded values or defaults instead:
+
+| Property | Expected consumer | Actual behavior |
+|----------|-------------------|-----------------|
+| `hotkeyKeyCode` / `hotkeyModifiers` | `HotkeyManager` | Hardcoded `HotKey.altSpace` |
+| `language` | `ContextBuilder.build(languageOverride:)` | Parameter not passed (`OpenVerbApp.swift:478`) |
+| `includeClipboard` | `ContextBuilder.build(includeClipboard:)` | Parameter not passed |
+| `soundEffectsEnabled` | `NSSound.play()` calls | Sounds play unconditionally |
+| `showWaveform` | `RecordingContentView` | Waveform always visible |
+| `modelDirectory` | `EngineManager` | Uses `Constants.DEFAULT_MODEL_DIR` |
+
+User changes to these settings have no effect.
+
+**Fix:** Pass `AppSettings.shared` into the relevant components at init time and read from it.
+
+---
+
+### Bug 19 — `Engine::unload_model()` can race with `process_stream()` — use-after-free
+- **File:** `engine/src/engine.cpp:158-164` (unload) vs `:166-189` (process_stream)
+- **Severity:** Medium
+- **Status:** Fixed
+
+`process_stream()` copies `backend_` to a local `shared_ptr` (`be`), releases `engine_mutex_`, then calls `be->process_stream()`. If `unload_model()` runs concurrently, it locks `engine_mutex_`, calls `backend_->unload_model()` which resets `llama_` (the `unique_ptr<LlamaContext>`). The Backend object remains alive (shared_ptr) but its internal `llama_` is destroyed. The inference thread then dereferences the dangling reference in `process_impl()` → `llama_->infer()`.
+
+Server-level guards (`session_active_` checks in the WARN/CRITICAL pressure handlers) prevent this in normal operation, but the `Engine` class itself is not thread-safe for concurrent unload + inference calls.
+
+`engine.cpp` already holds `std::unique_lock<std::shared_mutex>` (exclusive) in `unload_model()` and `std::shared_lock<std::shared_mutex>` (shared) in `process_stream()/process_file()`. Fix was applied as part of a prior commit.
+
+---
+
+### Bug 20 — `Vad::filter()` iterates `vector<size_t>` with `int` loop variable
+- **File:** `engine/src/audio/vad.cpp:156`
+- **Severity:** Low
+- **Status:** Fixed
+
+```cpp
+std::vector<size_t> pending;
+// ...
+for (int si : pending) {   // truncation: size_t → int
+    append_frame(si);
+}
+```
+
+Truncates `size_t` to `int` on 64-bit systems. Practically safe (frame indices won't exceed `INT_MAX`), but formally incorrect.
+
+`vad.cpp:155` already reads `for (size_t si : pending)`. Applied as part of the Bug 15 fix commit.
+
+---
+
+### Bug 21 — Bug 9 reassessment: WARN TOCTOU is likely a false positive
+- **File:** `engine/src/ipc/server.cpp:198-206`
+- **Severity:** Info
+- **Status:** Fixed
+
+Re-examined the WARN-pressure unload path. Both `session_active_` check (line 199) and `engine_.unload_model()` (line 202) execute on the main thread within the `poll()` timeout branch (`pret == 0`). `accept()` only runs in the `pret > 0` branch. Since the main thread is single-threaded, no new client can be accepted between the check and the unload. The GCD handler only sets the `pressure_force_unload_` flag — the actual unload is serialized on the main thread. No TOCTOU exists.
+
+The original assessment may have assumed the GCD handler calls `unload_model()` directly (which the CRITICAL handler does for the no-session case), but the WARN handler only sets a flag.
+
+Analysis complete. See Bug 9 update.
 
 ---
 
