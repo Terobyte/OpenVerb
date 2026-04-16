@@ -279,7 +279,7 @@ final class EngineManager: ObservableObject {
 
     /// Backend override set by restartWithBackend(_:). Passed as --backend arg
     /// to the engine subprocess on the next launchEngine() call.
-    var backendOverride: String?
+    private var backendOverride: String?
 
     private func launchEngine() async throws {
         let proc = Process()
@@ -400,14 +400,7 @@ final class EngineManager: ObservableObject {
         AppSettings.shared.backend = backend
         backendOverride = backend.rawValue
         status = .starting
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            DispatchQueue.global().async {
-                DispatchQueue.main.sync { [weak self] in
-                    self?.shutdown()
-                }
-                continuation.resume()
-            }
-        }
+        shutdown()
         try? await ensureRunning()
     }
 
