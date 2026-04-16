@@ -28,6 +28,9 @@ foreach(test_src ${TEST_SOURCES})
         gtest_main
         openverb-engine-lib
     )
+    target_compile_definitions(${test_name} PRIVATE
+        OPENVERB_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/.."
+    )
     if(test_name STREQUAL "test_capture")
         gtest_discover_tests(${test_name} PROPERTIES DISABLED TRUE)
     else()

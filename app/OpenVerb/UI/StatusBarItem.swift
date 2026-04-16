@@ -27,7 +27,6 @@ final class StatusBarItem {
     // -----------------------------------------------------------------------
 
     private let item: NSStatusItem
-    private var stateObserver: Any?
     private var engineObserver: Any?
     private var pulseTimer: Timer?
     private var pulsePhase: Bool = false
@@ -40,23 +39,9 @@ final class StatusBarItem {
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         buildMenu()
         applyIcon(for: appState.state)
-
-        // Observe AppState changes.
-        stateObserver = NotificationCenter.default.addObserver(
-            forName: NSNotification.Name("AppStateChanged"),
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            self?.applyIcon(for: appState.state)
-        }
-
-        // Observe engine status via KVO is not straightforward; use a polling
-        // approach via the published property.  In practice the full app wires
-        // this up via Combine subscribers in AppDelegate.
     }
 
     deinit {
-        if let obs = stateObserver { NotificationCenter.default.removeObserver(obs) }
     }
 
     // -----------------------------------------------------------------------

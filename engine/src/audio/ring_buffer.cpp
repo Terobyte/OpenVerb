@@ -4,6 +4,7 @@
 RingBuffer::RingBuffer() : buf_(BUF_SIZE, 0) {}
 
 size_t RingBuffer::write(const void* data, size_t len) {
+    std::lock_guard<std::mutex> lk(write_mutex_);
     size_t w = write_idx_.load(std::memory_order_relaxed);
     size_t r = read_idx_.load(std::memory_order_acquire);
     size_t free = BUF_SIZE - (w - r);

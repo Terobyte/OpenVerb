@@ -73,6 +73,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
 
+        // Suppress SIGPIPE process-wide.  Without this, any write() to a
+        // broken socket (engine crashed, sleep disconnect) kills the app
+        // silently — the kernel delivers SIGPIPE before write() returns
+        // EPIPE, so our error-handling code never executes.
+        signal(SIGPIPE, SIG_IGN)
+
         // Initialise state objects here (not at class scope) so they are
         // always created on the main thread / MainActor.
         appState      = AppState()
@@ -95,7 +101,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // AXIsProcessTrustedWithOptions with prompt:true registers the *current*
         // binary's signing identity with TCC (unlike AXIsProcessTrusted which only
         // checks). This prevents stale-entry problems after rebuilds/resignings.
-        let axOptions = [kAXTrustedCheckOptionPrompt.takeRetainedValue() as String: true] as CFDictionary
+        // #44: use takeUnretainedValue() — kAXTrustedCheckOptionPrompt is a CF
+        // constant with +0 reference count; takeRetainedValue() over-releases it.
+        let axOptions = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(axOptions)
 
         // ---- Step 23: Model existence check ----
@@ -272,6 +280,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // ---- Step 30: IDLE / ERROR → PREPARING; reset processing VM ----
         appState.transition(to: .preparing)
         processingVM.reset()
+        waveformVM.reset()  // #42: reset waveform bars between recording sessions
 
         // ---- Step 31: Start audio session (pre-buffering begins now) ----
         do {
@@ -351,6 +360,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func abortAndRestart() {
         audioSession.stop()
+        // #30: stop Phase 2 monitor before disconnect() so the monitor does not
+        // detect the fd close as POLLHUP and trigger spurious crash recovery.
+        engineManager.engineClient.stopPhase2Monitor()
         engineManager.disconnect()
         // INFERRING→PREPARING: AppState sets preparingSubtitle = "Reconnecting..."
         // immediately inside applyEntryEffects — no external mutation needed here.
@@ -404,6 +416,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         audioSession.stop()
+        // #31: stop Phase 2 monitor before disconnect() so the monitor does not
+        // detect the fd close as POLLHUP and trigger spurious crash recovery.
+        engineManager.engineClient.stopPhase2Monitor()
         engineManager.disconnect()
         recordingWindow.hide()
         if appState.state != .idle {
@@ -452,6 +467,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             try await engineManager.ensureRunning()
 
+            // #32: user may have pressed Escape during ensureRunning() (up to 5 s).
+            // handleCancel() transitions to .idle; proceeding would call startSession()
+            // on a dead/disconnected socket and trigger spurious crash recovery.
+            guard appState.state == .preparing else {
+                engineManager.disconnect()
+                return
+            }
+
             let context = await ContextBuilder.build(targetApp: appState.targetApp)
             try await engineManager.engineClient.startSession(context: context)
 
@@ -460,6 +483,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let readyMsg = try await engineManager.engineClient.receiveMessage(timeoutMs: 120_000)
             guard case .ready = readyMsg else {
                 throw EngineClientError.unexpectedMessage(readyMsg)
+            }
+
+            // Guard: user may have pressed Escape while waiting for session.ready.
+            // handleCancel() transitions to .idle; IDLE→RECORDING is an invalid
+            // transition that crashes via assertionFailure in DEBUG builds.
+            guard appState.state == .preparing else {
+                engineManager.disconnect()
+                return
             }
 
             // Atomically flush pre-buffer and begin live streaming.
@@ -517,6 +548,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 logger.error("drainResult: receive error: \(error)")
                 recordingWindow.hide()
                 audioSession.stop()
+                // #33: remove Escape monitors on error path — monitors were left
+                // registered, staying active indefinitely after the session failed.
+                hotkeyManager.removeEscapeMonitors()
                 if appState.state == .inferring {
                     appState.transition(to: .error("Connection lost"))
                     NSSound(named: "Basso")?.play()
@@ -563,7 +597,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 hotkeyManager.removeEscapeMonitors()
                 appState.transition(to: .idle)
-                recordingWindow.hide()
                 return
 
             case .warning(let code, let message):

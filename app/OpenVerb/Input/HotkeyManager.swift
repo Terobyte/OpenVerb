@@ -85,13 +85,12 @@ final class HotkeyManager {
     // -----------------------------------------------------------------------
 
     func register() {
-        // Proactively request Input Monitoring so macOS shows the permission
-        // prompt now rather than silently failing tapCreate.
-        let access = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)
-        if access != kIOHIDAccessTypeGranted {
-            IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
-        }
         installEventTap(key: hotKey)
+        // Always start the watchdog — it retries tap installation if permissions
+        // are granted after startup (user may grant without relaunching the app).
+        if eventTap == nil {
+            startRetryWatchdog()
+        }
     }
 
     private func installEventTap(key: HotKey) {
@@ -114,7 +113,9 @@ final class HotkeyManager {
                 if let userInfo = userInfo {
                     let manager = Unmanaged<HotkeyManager>
                         .fromOpaque(userInfo).takeUnretainedValue()
-                    let copy = event.copy()!
+                    guard let copy = event.copy() else {
+                        return Unmanaged.passUnretained(event)
+                    }
                     DispatchQueue.main.async { manager.handleCGKeyEvent(copy) }
                 }
                 return Unmanaged.passUnretained(event)
@@ -214,7 +215,7 @@ final class HotkeyManager {
         guard !escapeHandled else { return }
         escapeHandled = true
         // Reset on next run loop turn so future events work correctly.
-        DispatchQueue.main.async { self.escapeHandled = false }
+        DispatchQueue.main.async { [weak self] in self?.escapeHandled = false }
 
         logger.debug("Escape fired")
         onCancelRecording?()
@@ -245,6 +246,31 @@ final class HotkeyManager {
     // -----------------------------------------------------------------------
     // Watchdog — re-enables the tap if macOS silently disables it.
     // -----------------------------------------------------------------------
+
+    // Retry watchdog: used when tap creation failed at startup due to missing
+    // permissions. Polls every 2 seconds until permissions are granted, then
+    // installs the tap. Cancels itself once the tap is live.
+    private func startRetryWatchdog() {
+        stopWatchdog()
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 2, repeating: 2)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            guard self.eventTap == nil else {
+                // Tap installed by someone else — stop retrying
+                self.stopWatchdog()
+                return
+            }
+            let axOk  = AXIsProcessTrusted()
+            let hidOk = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
+            if axOk && hidOk {
+                logger.info("Permissions now granted — installing event tap")
+                self.installEventTap(key: self.hotKey)
+            }
+        }
+        timer.resume()
+        watchdogTimer = timer
+    }
 
     private func startWatchdog(tap: CFMachPort) {
         stopWatchdog()
@@ -296,6 +322,7 @@ final class HotkeyManager {
             """
         alert.addButton(withTitle: "Open System Settings")
         alert.addButton(withTitle: "Later")
+        if #available(macOS 14.0, *) { NSApp.activate() } else { NSApp.activate(ignoringOtherApps: true) }
         if alert.runModal() == .alertFirstButtonReturn {
             if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
                 NSWorkspace.shared.open(url)
@@ -313,6 +340,7 @@ final class HotkeyManager {
             """
         alert.addButton(withTitle: "Open System Settings")
         alert.addButton(withTitle: "Later")
+        if #available(macOS 14.0, *) { NSApp.activate() } else { NSApp.activate(ignoringOtherApps: true) }
         if alert.runModal() == .alertFirstButtonReturn {
             if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_InputMonitoring") {
                 NSWorkspace.shared.open(url)

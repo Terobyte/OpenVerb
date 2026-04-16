@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <vector>
 
 class RingBuffer {
@@ -23,4 +24,7 @@ private:
     std::vector<uint8_t>       buf_;
     std::atomic<size_t>        write_idx_{0};
     std::atomic<size_t>        read_idx_{0};
+    // Serialises concurrent writes.  CoreAudio may invoke the capture callback
+    // from multiple internal threads, violating the SPSC contract.
+    mutable std::mutex         write_mutex_;
 };

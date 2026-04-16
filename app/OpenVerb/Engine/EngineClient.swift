@@ -100,6 +100,16 @@ final class EngineClient {
         let sock = socket(AF_UNIX, SOCK_STREAM, 0)
         guard sock >= 0 else { throw EngineClientError.systemError(errno: errno) }
 
+        // Prevent SIGPIPE on this socket — write() returns EPIPE instead.
+        var on: Int32 = 1
+        setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+
+        // #23: validate path length before writing to sun_path (104-byte buffer).
+        guard path.utf8.count < 104 else {
+            close(sock)
+            throw EngineClientError.connectionFailed(ENAMETOOLONG)
+        }
+
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         addr.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
@@ -133,6 +143,14 @@ final class EngineClient {
 
     func disconnect() {
         ioQueue.async {
+            // #41: move the wakeup write inside ioQueue to eliminate the TOCTOU
+            // race where the caller's thread checks wakeWrite >= 0 concurrently
+            // with the monitor's defer closing it.  Writing before close(fd) also
+            // ensures the monitor sees the signal before a POLLHUP from fd close.
+            if self.wakeWrite >= 0 {
+                var b: UInt8 = 0
+                _ = Darwin.write(self.wakeWrite, &b, 1)
+            }
             guard self.fd >= 0 else { return }
             close(self.fd)
             self.fd = -1
@@ -140,14 +158,9 @@ final class EngineClient {
             self.recvBuffer = RecvAccumulator()
             self.recvLock.unlock()
         }
-        // Wakeup the phase2 monitor if running.
-        if wakeWrite >= 0 {
-            var b: UInt8 = 0
-            _ = Darwin.write(wakeWrite, &b, 1)
-        }
     }
 
-    var isConnected: Bool { fd >= 0 }
+    var isConnected: Bool { ioQueue.sync { fd >= 0 } }
 
     // -----------------------------------------------------------------------
     // Low-level write helpers (called from ioQueue)
@@ -409,45 +422,56 @@ final class EngineClient {
     // -----------------------------------------------------------------------
 
     func startPhase2Monitor() {
+        // #21: protect phase2MonitorStopped with phase2Lock — it is written
+        // here (MainActor) and read from a detached background Task.
+        phase2Lock.lock()
         phase2Error = nil
         phase2MonitorStopped = false
+        phase2Lock.unlock()
 
         // Create a wakeup pipe so stopPhase2Monitor() can interrupt poll()
         // immediately rather than waiting for the 100 ms timeout.
         var pipefds: [Int32] = [-1, -1]
         guard Darwin.pipe(&pipefds) == 0 else { return }
-        wakeRead  = pipefds[0]
-        wakeWrite = pipefds[1]
-        _ = fcntl(wakeRead, F_SETFL, O_NONBLOCK)
+        let rfd = pipefds[0]
+        let wfd = pipefds[1]
+        wakeRead  = rfd
+        wakeWrite = wfd
+        _ = fcntl(rfd, F_SETFL, O_NONBLOCK)
 
+        // #22: capture the pipe fds as local constants so the task's defer
+        // closes the fds it opened — not self.wakeRead/wakeWrite, which a
+        // subsequent startPhase2Monitor() may have already overwritten with
+        // a new pipe.
         let task = Task.detached(priority: .userInitiated) { [weak self] in
+            defer { close(rfd); close(wfd) }
             guard let self else { return }
-            await self.runPhase2Monitor()
+            await self.runPhase2Monitor(wakeReadFD: rfd)
         }
         phase2MonitorTask = task
     }
 
-    private func runPhase2Monitor() async {
-        // Ensure wakeup pipe fds are closed on every exit path — including
-        // early returns from error conditions. stopPhase2Monitor() also closes
-        // them, but checks >= 0 first, so double-close is safe.
-        defer {
-            if wakeRead  >= 0 { close(wakeRead);  wakeRead  = -1 }
-            if wakeWrite >= 0 { close(wakeWrite); wakeWrite = -1 }
-        }
-        while !phase2MonitorStopped && fd >= 0 {
+    private func runPhase2Monitor(wakeReadFD: Int32) async {
+        // #21: read phase2MonitorStopped under phase2Lock throughout the loop.
+        phase2Lock.lock()
+        var stopped = phase2MonitorStopped
+        phase2Lock.unlock()
+
+        while !stopped && fd >= 0 {
             // poll(fd, POLLIN, 100 ms) + wakeup pipe
             var pfds = [
-                pollfd(fd: fd,       events: Int16(POLLIN), revents: 0),
-                pollfd(fd: wakeRead, events: Int16(POLLIN), revents: 0),
+                pollfd(fd: fd,          events: Int16(POLLIN), revents: 0),
+                pollfd(fd: wakeReadFD,  events: Int16(POLLIN), revents: 0),
             ]
             let pr = poll(&pfds, 2, 100)
-            if pr <= 0 { continue }
-            if pfds[1].revents & Int16(POLLIN) != 0 { break }  // wakeup
+            if pr <= 0 {
+                phase2Lock.lock()
+                stopped = phase2MonitorStopped
+                phase2Lock.unlock()
+                continue
+            }
+            if pfds[1].revents & Int16(POLLIN) != 0 { break }  // wakeup signal
             // POLLHUP / POLLERR means the engine died mid-recording.
-            // Surface this immediately as a fatal stream error so the write loop
-            // aborts and the UI transitions to an error state promptly — rather
-            // than spinning until the next poll timeout.
             if pfds[0].revents & Int16(POLLHUP | POLLERR) != 0 {
                 logger.error("Phase 2 monitor: engine connection dropped (POLLHUP/POLLERR)")
                 let errMsg = ServerMessage.error(code: "connection_closed",
@@ -458,16 +482,25 @@ final class EngineClient {
                 onError?(errMsg)
                 return
             }
-            guard pfds[0].revents & Int16(POLLIN) != 0 else { continue }
-            if phase2MonitorStopped { break }
+            guard pfds[0].revents & Int16(POLLIN) != 0 else {
+                phase2Lock.lock()
+                stopped = phase2MonitorStopped
+                phase2Lock.unlock()
+                continue
+            }
+
+            phase2Lock.lock()
+            stopped = phase2MonitorStopped
+            phase2Lock.unlock()
+            if stopped { break }
 
             // Data available — read one message.
+            // #20: use 100 ms timeout (matching the outer poll) so stopPhase2Monitor()
+            // is never blocked for more than 200 ms waiting for this read to return.
             let data: Data
             do {
-                data = try recvJSONSync(timeoutMs: 1_000)
+                data = try recvJSONSync(timeoutMs: 100)
             } catch {
-                // Fatal: a read failure during Phase 2 is an unrecoverable stream error.
-                // Set phase2Error so the write loop aborts, and notify the UI via onError.
                 logger.error("Phase 2 monitor: fatal read error — aborting stream: \(error)")
                 let errMsg = ServerMessage.error(code: "stream_read_error",
                                                  message: "Phase 2 monitor read failed: \(error)")
@@ -479,7 +512,6 @@ final class EngineClient {
             }
 
             guard data.first == UInt8(ascii: "{") else {
-                // Fatal protocol violation: non-JSON byte is unrecoverable.
                 logger.error("Phase 2 monitor: fatal protocol violation — non-JSON byte — aborting stream")
                 let errMsg = ServerMessage.error(code: "protocol_violation",
                                                  message: "Unexpected non-JSON byte in Phase 2 stream")
@@ -495,6 +527,9 @@ final class EngineClient {
                 msg = try ServerMessage.fromJSON(data)
             } catch {
                 logger.warning("Phase 2 monitor JSON decode error: \(error)")
+                phase2Lock.lock()
+                stopped = phase2MonitorStopped
+                phase2Lock.unlock()
                 continue
             }
 
@@ -518,8 +553,12 @@ final class EngineClient {
                 restored.append(UInt8(ascii: "\n"))
                 recvBuffer.prepend(restored)
                 recvLock.unlock()
-                return
+                // Do NOT return here — keep monitoring for errors.
             }
+
+            phase2Lock.lock()
+            stopped = phase2MonitorStopped
+            phase2Lock.unlock()
         }
     }
 
@@ -530,23 +569,24 @@ final class EngineClient {
     }
 
     func stopPhase2Monitor() {
+        // #21: write under phase2Lock.
+        phase2Lock.lock()
         phase2MonitorStopped = true
-        // Wake the monitor immediately.
+        phase2Lock.unlock()
+
+        // Signal the monitor to wake up and exit immediately.
         if wakeWrite >= 0 {
             var b: UInt8 = 0
             _ = Darwin.write(wakeWrite, &b, 1)
         }
-        // Give the monitor task up to 1.5 s to finish.
-        let group = DispatchGroup()
-        group.enter()
-        Task.detached { [weak self] in
-            _ = await self?.phase2MonitorTask?.value
-            group.leave()
-        }
-        _ = group.wait(timeout: .now() + .milliseconds(1500))
-
-        if wakeRead  >= 0 { close(wakeRead);  wakeRead  = -1 }
-        if wakeWrite >= 0 { close(wakeWrite); wakeWrite = -1 }
+        // #19: do NOT block waiting for the monitor task to finish.
+        // phase2MonitorStopped=true prevents it from processing further data.
+        // The task exits within ~200 ms (one poll + one recvJSONSync cycle).
+        // Pipe fds are closed by the task's defer in startPhase2Monitor().
+        // Clear instance vars so disconnect() / next startPhase2Monitor() are clean.
+        wakeRead  = -1
+        wakeWrite = -1
+        phase2MonitorTask?.cancel()
         phase2MonitorTask = nil
     }
 }

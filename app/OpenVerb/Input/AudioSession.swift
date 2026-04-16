@@ -49,7 +49,7 @@ final class AudioSession {
     // Private — state (all guarded by lock)
     // -----------------------------------------------------------------------
 
-    private var lock = os_unfair_lock()
+    private let lock = OSAllocatedUnfairLock()
     private var preBuffer: [Data] = []
     private var sendCallback: ((Data) -> Void)?
     private var _isCapturing = false
@@ -63,8 +63,8 @@ final class AudioSession {
     // -----------------------------------------------------------------------
 
     var isCapturing: Bool {
-        os_unfair_lock_lock(&lock)
-        defer { os_unfair_lock_unlock(&lock) }
+        lock.lock()
+        defer { lock.unlock() }
         return _isCapturing
     }
 
@@ -116,11 +116,11 @@ final class AudioSession {
         // Reset pre-buffer state before the tap can fire.  Do NOT set
         // _isCapturing = true yet — that happens only after audioEngine.start()
         // succeeds so the invariant "isCapturing ↔ engine is running" holds.
-        os_unfair_lock_lock(&lock)
+        lock.lock()
         preBuffer.removeAll()
         residual = Data()
         sendCallback = nil
-        os_unfair_lock_unlock(&lock)
+        lock.unlock()
 
         // Install tap on the input node.
         // Fixed buffer size of 4096 frames as specified. AVAudioEngine treats this
@@ -147,9 +147,9 @@ final class AudioSession {
         }
 
         // Engine started successfully — now it is safe to claim we are capturing.
-        os_unfair_lock_lock(&lock)
+        lock.lock()
         _isCapturing = true
-        os_unfair_lock_unlock(&lock)
+        lock.unlock()
 
         logger.info("AudioSession started (hardware: \(hardwareFormat.sampleRate, format: .fixed(precision: 0)) Hz)")
     }
@@ -163,11 +163,11 @@ final class AudioSession {
     // -----------------------------------------------------------------------
 
     func flushAndSetSendCallback(_ callback: @escaping (Data) -> Void) -> [Data] {
-        os_unfair_lock_lock(&lock)
+        lock.lock()
         let flushed = preBuffer
         preBuffer.removeAll()
         sendCallback = callback
-        os_unfair_lock_unlock(&lock)
+        lock.unlock()
         return flushed
     }
 
@@ -176,16 +176,16 @@ final class AudioSession {
     // -----------------------------------------------------------------------
 
     func stop() {
-        os_unfair_lock_lock(&lock)
+        lock.lock()
         guard _isCapturing else {
-            os_unfair_lock_unlock(&lock)
+            lock.unlock()
             return
         }
         preBuffer.removeAll()
         sendCallback = nil
         _isCapturing = false
         residual = Data()
-        os_unfair_lock_unlock(&lock)
+        lock.unlock()
 
         audioEngine.inputNode.removeTap(onBus: 0)
         audioEngine.stop()
@@ -247,18 +247,18 @@ final class AudioSession {
         var chunksToSend: [Data] = []
         var chunksToDisplay: [Data] = []
 
-        os_unfair_lock_lock(&lock)
+        lock.lock()
 
         guard _isCapturing else {
             // stop() already ran — discard this callback's output entirely.
-            os_unfair_lock_unlock(&lock)
+            lock.unlock()
             return
         }
 
-        var pending = residual + rawData
-        while pending.count >= Constants.CHUNK_BYTES {
-            let chunk = Data(pending.prefix(Constants.CHUNK_BYTES))
-            pending = pending.dropFirst(Constants.CHUNK_BYTES)
+        let combined = residual + rawData
+        var offset = 0
+        while offset + Constants.CHUNK_BYTES <= combined.count {
+            let chunk = Data(combined[offset ..< offset + Constants.CHUNK_BYTES])
             chunksToDisplay.append(chunk)   // guaranteed 4096-byte chunk for waveform
             if sendCallback != nil {
                 // Will be dispatched after we release the lock.
@@ -266,10 +266,11 @@ final class AudioSession {
             } else {
                 preBuffer.append(chunk)
             }
+            offset += Constants.CHUNK_BYTES
         }
-        residual = pending          // safe: stop() hasn't run (we're still under lock)
+        residual = Data(combined[offset...])  // safe: stop() hasn't run (we're still under lock)
         let sendCb = sendCallback   // capture before releasing
-        os_unfair_lock_unlock(&lock)
+        lock.unlock()
 
         // Fire waveform callback for each guaranteed 4096-byte chunk,
         // outside the lock so it cannot block audio-thread progress.
@@ -282,9 +283,9 @@ final class AudioSession {
         // main thread cannot cause chunks to arrive after capture ends.
         if let send = sendCb {
             for chunk in chunksToSend {
-                os_unfair_lock_lock(&lock)
+                lock.lock()
                 let stillCapturing = _isCapturing
-                os_unfair_lock_unlock(&lock)
+                lock.unlock()
                 guard stillCapturing else { break }
                 send(chunk)
             }

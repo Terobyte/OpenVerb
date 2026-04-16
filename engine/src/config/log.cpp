@@ -50,6 +50,9 @@ static void rotate_log() {
     std::rename(s_log_path.c_str(), p1.c_str());
 
     s_log_file = std::fopen(s_log_path.c_str(), "a");
+    if (!s_log_file) {
+        std::fprintf(stderr, "[log] rotate: fopen failed: %s\n", std::strerror(errno));
+    }
 }
 
 namespace log_detail {

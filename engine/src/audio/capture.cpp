@@ -1,5 +1,6 @@
 #include "audio/capture.h"
 #include "config/defaults.h"
+#include "config/log.h"
 
 #include <AudioToolbox/AudioToolbox.h>
 #include <atomic>
@@ -21,7 +22,8 @@ struct AudioCapture::Impl {
                                 const AudioStreamPacketDescription*) {
         auto* self = static_cast<Impl*>(user_data);
         if (!self->capturing.load(std::memory_order_acquire) || !self->callback) {
-            AudioQueueEnqueueBuffer(self->queue, buffer, 0, nullptr);
+            // Do not re-enqueue during dispose — AudioQueueDispose(true) is in flight
+            // and re-enqueuing a buffer into a queue being torn down is undefined.
             return;
         }
 
@@ -55,12 +57,16 @@ void AudioCapture::start(CaptureCallback callback) {
 
     OSStatus status = AudioQueueNewInput(&fmt, &Impl::audio_callback, impl_,
                                           nullptr, nullptr, 0, &impl_->queue);
-    if (status != noErr) return;
+    if (status != noErr) {
+        LOG_ERROR("AudioCapture: AudioQueueNewInput failed: %d", (int)status);
+        return;
+    }
 
     for (int i = 0; i < 3; ++i) {
         OSStatus alloc_s = AudioQueueAllocateBuffer(
             impl_->queue, Impl::kBufferBytes, &impl_->buffers[i]);
         if (alloc_s != noErr) {
+            LOG_ERROR("AudioCapture: AudioQueueAllocateBuffer[%d] failed: %d", i, (int)alloc_s);
             AudioQueueDispose(impl_->queue, true);
             impl_->queue = nullptr;
             return;
@@ -70,6 +76,7 @@ void AudioCapture::start(CaptureCallback callback) {
 
     OSStatus start_s = AudioQueueStart(impl_->queue, nullptr);
     if (start_s != noErr) {
+        LOG_ERROR("AudioCapture: AudioQueueStart failed: %d", (int)start_s);
         AudioQueueDispose(impl_->queue, true);
         impl_->queue = nullptr;
         return;
@@ -83,7 +90,7 @@ void AudioCapture::stop() {
 
     if (impl_->queue) {
         AudioQueueStop(impl_->queue, true);
-        AudioQueueDispose(impl_->queue, false);
+        AudioQueueDispose(impl_->queue, true);  // immediate: no more callbacks after this returns
         impl_->queue = nullptr;
     }
 }

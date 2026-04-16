@@ -47,10 +47,11 @@ constexpr double kPi = 3.14159265358979323846;
 // ---------------------------------------------------------------------------
 
 std::vector<double> blackman_sinc_kernel(int num_taps,
-                                         double cutoff_hz,
-                                         int sample_rate)
+                                          double cutoff_hz,
+                                          int sample_rate)
 {
-    // Normalised cut-off frequency (cycles per sample), range (0, 0.5).
+    if (num_taps < 2) return {1.0};
+
     const double fc = cutoff_hz / static_cast<double>(sample_rate);
 
     std::vector<double> h(static_cast<std::size_t>(num_taps));

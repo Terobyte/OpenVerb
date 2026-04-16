@@ -77,14 +77,17 @@ private func expandPath(_ path: String) -> String {
 // Signal handling — Ctrl-C triggers end-of-audio instead of immediate exit.
 // ---------------------------------------------------------------------------
 
-private var shouldStop = false
+// #36: sig_atomic_t (Int32 on Darwin) is the only type guaranteed safe for
+// signal handler writes.  Plain Bool can be cached by the optimizer, making
+// the while-loop spin forever after Ctrl-C in optimized builds.
+private var shouldStop: Int32 = 0
 
 private func setupSignalHandler() {
     signal(SIGINT) { _ in
-        shouldStop = true
+        shouldStop = 1
     }
     signal(SIGTERM) { _ in
-        shouldStop = true
+        shouldStop = 1
     }
 }
 
@@ -107,6 +110,9 @@ do {
         try manager.client.waitForReady(context: context)
 
         let audioSession = AudioSession()
+        // #39: defer ensures audioSession.stop() runs even if sendEndOfAudio()
+        // or the Phase 3 drain throws — prevents AVAudioEngine tap leak.
+        defer { audioSession.stop() }
         let client = manager.client
 
         client.startPhase2ErrorMonitor()
@@ -126,7 +132,7 @@ do {
 
         audioSession.flushPreBuffer()
 
-        while !shouldStop {
+        while shouldStop == 0 {
             if let err = client.checkPhase2Error() {
                 audioSession.stop()
                 throw EngineClientError.unexpectedMessage(err)

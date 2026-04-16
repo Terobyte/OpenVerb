@@ -210,6 +210,17 @@ void Session::run(int fd, Engine& engine, const SessionConfig& cfg) {
                     send_error(fd, ErrorCode::duration_exceeded,
                                "recording exceeded maximum duration");
                     ring_buffer_.reset();
+                    // Drain in-flight binary frames until the client sends the
+                    // sentinel (zero-length frame).  Without this, the client
+                    // may still stream binary frames while the engine has
+                    // already transitioned to IDLE (JSON mode), causing
+                    // recv_json() to parse binary data as JSON → session destroyed.
+                    try {
+                        while (true) {
+                            auto f = recv_binary_frame(fd, buf, 5000);
+                            if (f.empty()) break;
+                        }
+                    } catch (...) {}
                     state = State::IDLE;
                     break;
                 }
@@ -226,6 +237,11 @@ void Session::run(int fd, Engine& engine, const SessionConfig& cfg) {
                         });
                         state = State::IDLE;
                     } else {
+                        // #27: clear any leftover binary bytes from the STREAMING_AUDIO
+                        // phase before switching to INFERRING (JSON mode).  Without this,
+                        // stale binary data in buf.accumulated is misinterpreted as JSON
+                        // by recv_json(), causing spurious malformed_json errors.
+                        buf.accumulated.clear();
                         state = State::INFERRING;
                     }
                     break;
@@ -254,6 +270,12 @@ void Session::run(int fd, Engine& engine, const SessionConfig& cfg) {
                     send_error(fd, ErrorCode::duration_exceeded,
                                "recording exceeded context window limit");
                     ring_buffer_.reset();
+                    try {
+                        while (true) {
+                            auto f = recv_binary_frame(fd, buf, 5000);
+                            if (f.empty()) break;
+                        }
+                    } catch (...) {}
                     state = State::IDLE;
                     break;
                 }
@@ -295,6 +317,13 @@ void Session::run(int fd, Engine& engine, const SessionConfig& cfg) {
                 // Discard any stale progress from a previous inference that
                 // was aborted; ensures a clean queue for each inference run.
                 progress_queue_.drain();
+
+                // #25: guard against assigning to a still-joinable thread.
+                // Under normal operation the thread is always joined before we
+                // re-enter INFERRING, but a cancelled/aborted prior inference
+                // could leave it joinable.  Assigning to a joinable std::thread
+                // calls std::terminate, so join defensively here.
+                if (inference_thread_.joinable()) inference_thread_.join();
 
                 // Launch inference on the class-owned thread.
                 //   infer_cv_  — notified when the thread has started.

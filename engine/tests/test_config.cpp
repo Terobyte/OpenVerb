@@ -59,8 +59,8 @@ TEST(ParseArgsContext, DefaultContextJsonEmpty) {
 // ===========================================================================
 // --context: JSON schema — all fields optional
 //
-// Schema: {"app":"<name>", "window":"<title>", "clipboard":"<text>", "selected":"<text>"}
-// All four keys are optional; any subset (including empty object) is valid.
+// Schema: {"app":"<name>", "window":"<title>", "selected":"<text>"}
+// All keys are optional; any subset (including empty object) is valid.
 //
 // Each test calls resolve_config() (with fake model/mmproj paths to bypass
 // filesystem I/O) to confirm that valid JSON objects are accepted end-to-end,
@@ -81,7 +81,7 @@ static Config run_resolve(int argc, char** argv) {
 TEST(ResolveConfigContext, AllSchemaFieldsAccepted) {
     char prog[] = "test";
     char flag[] = "--context";
-    char val[]  = R"({"app":"Finder","window":"Downloads","clipboard":"hi","selected":"ok"})";
+    char val[]  = R"({"app":"Finder","window":"Downloads","selected":"ok"})";
     char* argv[] = {prog, flag, val};
     // resolve_config must not exit for a fully-populated valid object.
     Config cfg = run_resolve(3, argv);
@@ -104,15 +104,6 @@ TEST(ResolveConfigContext, OnlyWindowFieldOk) {
     char prog[] = "test";
     char flag[] = "--context";
     char val[]  = R"({"window":"Downloads"})";
-    char* argv[] = {prog, flag, val};
-    Config cfg = run_resolve(3, argv);
-    EXPECT_EQ(cfg.context_json, val);
-}
-
-TEST(ResolveConfigContext, OnlyClipboardFieldOk) {
-    char prog[] = "test";
-    char flag[] = "--context";
-    char val[]  = R"({"clipboard":"some text"})";
     char* argv[] = {prog, flag, val};
     Config cfg = run_resolve(3, argv);
     EXPECT_EQ(cfg.context_json, val);

@@ -12,13 +12,12 @@
 // to populate from the JSON wire format, or construct directly in tests.
 //
 // Wire format (--context flag):
-//   {"app":"<bundle-id>","window":"<title>","clipboard":"<text>","selected":"<text>"}
+//   {"app":"<bundle-id>","window":"<title>","selected":"<text>"}
 // ---------------------------------------------------------------------------
 
 struct PromptContext {
     std::string app_name;      // macOS bundle ID of the frontmost app (e.g. "com.apple.Mail")
     std::string window_title;  // frontmost window title
-    std::string clipboard;     // current clipboard text (may be empty / very long)
     std::string selected_text; // text currently selected in the active app
 };
 
@@ -63,7 +62,6 @@ std::string resolve_style(const std::string& app_name);
 //   {
 //     "app":       "<bundle-id>",
 //     "window":    "<window-title>",
-//     "clipboard": "<clipboard-text>",
 //     "selected":  "<selected-text>"
 //   }
 //

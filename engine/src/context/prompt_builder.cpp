@@ -47,7 +47,7 @@ using json = nlohmann::json;
 // Constants
 // ---------------------------------------------------------------------------
 
-// Maximum bytes kept from clipboard / selected-text fields.
+// Maximum bytes kept from selected-text field.
 static constexpr std::size_t MAX_CONTEXT_BYTES = 10u * 1024u;  // 10 KB
 
 // System prompt injected into <SystemContext>.
@@ -144,14 +144,6 @@ std::pair<std::string, std::string> build_prompt(const PromptContext& ctx) {
     xml += "Style: ";  xml += style;                        xml += "\n";
     xml += "</ApplicationContext>\n";
 
-    // <ClipboardContext> — omit tag entirely when clipboard is empty.
-    // Escape content so clipboard text cannot inject XML structure.
-    if (!ctx.clipboard.empty()) {
-        xml += "<ClipboardContext>\n";
-        xml += xml_escape(ctx.clipboard);
-        xml += "\n</ClipboardContext>\n";
-    }
-
     // <SelectedText> — omit tag entirely when selected_text is empty.
     // Escape for the same reason as clipboard.
     if (!ctx.selected_text.empty()) {
@@ -204,12 +196,6 @@ PromptContext parse_context_json(const std::string& json_str) {
 
     if (j.contains("window") && j.at("window").is_string())
         ctx.window_title = j.at("window").get<std::string>();
-
-    if (j.contains("clipboard") && j.at("clipboard").is_string()) {
-        ctx.clipboard = j.at("clipboard").get<std::string>();
-        if (ctx.clipboard.size() > MAX_CONTEXT_BYTES)
-            ctx.clipboard = truncate_utf8(ctx.clipboard, MAX_CONTEXT_BYTES);
-    }
 
     if (j.contains("selected") && j.at("selected").is_string()) {
         ctx.selected_text = j.at("selected").get<std::string>();

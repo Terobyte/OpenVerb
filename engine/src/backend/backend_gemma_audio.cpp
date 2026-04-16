@@ -37,15 +37,21 @@ InferenceResult GemmaAudioBackend::process_impl(
     std::function<void(float)>   progress,
     const std::atomic<bool>*     abort_flag)
 {
+    // #26: guard against null llama_ (set by unload_model() between process()
+    // calls under memory pressure).  A stale shared_ptr from an in-flight call
+    // could reach here after the model is unloaded.
+    if (!llama_) throw std::runtime_error("model not loaded");
+
     const auto t_start = std::chrono::steady_clock::now();
 
     // -----------------------------------------------------------------------
-    // Optional VAD filter — skip silent / sub-threshold clips.
+    // Optional VAD filter — trim silence before inference.
     //
-    // Gemma 4 is audio-native and can handle silence, but for live/daemon
-    // mode (--vad) we avoid sending empty recordings to the model.
-    // VAD is OFF by default for --file mode to preserve audio quality.
+    // #29: pass the VAD-filtered audio to infer() so the context window is not
+    // wasted on ~50% silent padding.  VAD also acts as a gating filter: if no
+    // speech is detected (<200 ms), inference is skipped entirely.
     // -----------------------------------------------------------------------
+    std::vector<int16_t> vad_filtered;
     if (vad_enabled_) {
         // Build a temporary AudioData shell so Vad::filter() can inspect it
         AudioData tmp;
@@ -54,15 +60,14 @@ InferenceResult GemmaAudioBackend::process_impl(
         tmp.channels        = 1;
         tmp.bits_per_sample = 16;
 
-        const std::vector<int16_t> speech = vad_.filter(tmp, sample_rate);
-        if (speech.empty()) {
+        vad_filtered = vad_.filter(tmp, sample_rate);
+        if (vad_filtered.empty()) {
             // Less than ~200 ms of detected speech — return empty result
             return InferenceResult{};
         }
-        // Note: we pass the *original* audio_pcm to infer(), not the trimmed
-        // speech, because Gemma 4 processes the full audio natively.
-        // VAD here is used only as a gating filter, not for trimming.
     }
+    // Use trimmed speech when VAD is enabled, original audio otherwise.
+    const std::vector<int16_t>& pcm_to_infer = vad_enabled_ ? vad_filtered : audio_pcm;
 
     // -----------------------------------------------------------------------
     // Parse context JSON and build the two-part prompt.
@@ -75,7 +80,7 @@ InferenceResult GemmaAudioBackend::process_impl(
     // -----------------------------------------------------------------------
     const std::string raw_output = llama_->infer(
         system_xml,
-        audio_pcm,
+        pcm_to_infer,
         sample_rate,
         suffix,
         progress,
@@ -137,7 +142,7 @@ InferenceResult GemmaAudioBackend::process_stream(
     ProgressQueue&               progress_queue)
 {
     auto progress_cb = [&progress_queue](float frac) {
-        progress_queue.push(frac * 100.0f);
+        progress_queue.push(frac);
     };
     return process_impl(audio_pcm, sample_rate, context_json,
                         progress_cb, &abort_flag);

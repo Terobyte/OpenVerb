@@ -20,19 +20,47 @@
 #include <cctype>
 #include <string>
 
-// ---------------------------------------------------------------------------
-// trim_whitespace — remove leading and trailing ASCII whitespace in-place.
-// ---------------------------------------------------------------------------
+static bool is_unicode_space(unsigned char c0, const std::string& s, size_t pos, int& len) {
+    auto peek = [&](size_t i) -> unsigned char {
+        return (pos + i < s.size()) ? static_cast<unsigned char>(s[pos + i]) : 0;
+    };
+    if (c0 == 0xC2 && peek(1) == 0xA0) { len = 2; return true; }
+    if (c0 == 0xE2) {
+        unsigned char b1 = peek(1), b2 = peek(2);
+        if (b1 == 0x80 && (b2 == 0x80 || b2 == 0x81 || b2 == 0x82 ||
+                           b2 == 0x83 || b2 == 0x84 || b2 == 0x85 ||
+                           b2 == 0x86 || b2 == 0x87 || b2 == 0x88 ||
+                           b2 == 0x89 || b2 == 0x8A || b2 == 0x8B ||
+                           b2 == 0x8C || b2 == 0x8D || b2 == 0x8E ||
+                           b2 == 0x8F || b2 == 0xA0))
+            { len = 3; return true; }
+    }
+    if (c0 == 0xEF && peek(1) == 0xBB && peek(2) == 0xBF) { len = 3; return true; }
+    return false;
+}
 
 static void trim_whitespace(std::string& s) {
-    // Trim leading
-    s.erase(s.begin(),
-            std::find_if(s.begin(), s.end(),
-                         [](unsigned char c) { return !std::isspace(c); }));
-    // Trim trailing
-    s.erase(std::find_if(s.rbegin(), s.rend(),
-                         [](unsigned char c) { return !std::isspace(c); }).base(),
-            s.end());
+    auto is_ws = [&](size_t pos) -> int {
+        unsigned char c = static_cast<unsigned char>(s[pos]);
+        if (std::isspace(c)) return 1;
+        int len = 0;
+        if (is_unicode_space(c, s, pos, len)) return len;
+        return 0;
+    };
+
+    size_t start = 0;
+    while (start < s.size()) {
+        int w = is_ws(start);
+        if (w == 0) break;
+        start += static_cast<size_t>(w);
+    }
+    size_t end = s.size();
+    while (end > start) {
+        int w = is_ws(end - 1);
+        if (w == 0) break;
+        end -= static_cast<size_t>(w);
+    }
+    s = s.substr(start, end - start);
 }
 
 // ---------------------------------------------------------------------------

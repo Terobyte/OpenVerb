@@ -42,6 +42,10 @@ struct Shutdown: Encodable {
     let type: String = "session.shutdown"
 }
 
+struct SessionEnd: Encodable {
+    let type: String = "session.end"
+}
+
 // ---------------------------------------------------------------------------
 // TypeProbe — lightweight struct to read the "type" discriminator before
 // dispatching to the full decode path.

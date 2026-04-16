@@ -28,6 +28,9 @@ public final class EngineClient {
     private let monitorGroup = DispatchGroup()
     private var monitorPipeRead: Int32 = -1
     private var monitorPipeWrite: Int32 = -1
+    // Serialises the poll+read loop — prevents the Phase 2 monitor and a Phase 3
+    // caller from both calling read(fd) concurrently, splitting the byte stream.
+    private let readSerializerLock = NSLock()
 
     public init() {}
 
@@ -74,6 +77,13 @@ public final class EngineClient {
             throw EngineClientError.systemError(errno: errno)
         }
 
+        // #24: sun_path is only 104 bytes; overflow silently truncates the path,
+        // connecting to the wrong (or garbage) socket without error.
+        guard path.utf8.count < 104 else {
+            close(socketFD)
+            throw EngineClientError.connectionFailed(ENAMETOOLONG)
+        }
+
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         path.withCString { p in
@@ -100,13 +110,15 @@ public final class EngineClient {
 
     public func disconnect() {
         guard fd >= 0 else { return }
+        // Stop the Phase 2 monitor before closing fd — the monitor may be blocked
+        // in read(fd); closing first leaves it reading from a closed or kernel-reused fd.
+        // stopPhase2ErrorMonitor() also closes the wakeup pipe fds.
+        stopPhase2ErrorMonitor()
         close(fd)
         fd = -1
         recvLock.lock()
         recvBuffer = RecvAccumulator()
         recvLock.unlock()
-        if monitorPipeRead >= 0 { close(monitorPipeRead); monitorPipeRead = -1 }
-        if monitorPipeWrite >= 0 { close(monitorPipeWrite); monitorPipeWrite = -1 }
     }
 
     public var isConnected: Bool { fd >= 0 }
@@ -115,6 +127,10 @@ public final class EngineClient {
     // JSON send helpers
     // ---------------------------------------------------------------------------
 
+    // writeFully — must be called from a single thread at a time.
+    // sendJSON and sendAudioFrame both call this; the caller is responsible for
+    // ensuring they are not invoked concurrently.  In the normal flow main.swift
+    // calls these sequentially (no concurrent writers), so no lock is needed here.
     private func writeFully(_ buffer: UnsafeRawPointer, count: Int) throws {
         var remaining = count
         var ptr = buffer
@@ -150,6 +166,12 @@ public final class EngineClient {
     private func recvJSON(timeoutMs: Int = 15_000) throws -> Data {
         guard fd >= 0 else { throw EngineClientError.notConnected }
 
+        // Serialise the entire poll+read loop: the Phase 2 monitor (readQueue)
+        // and Phase 3 callers (main thread) must never call read(fd) concurrently
+        // — the kernel would split the byte stream between them, fragmenting both.
+        readSerializerLock.lock()
+        defer { readSerializerLock.unlock() }
+
         recvLock.lock()
         if let msg = recvBuffer.extractMessage() {
             recvLock.unlock()
@@ -165,10 +187,18 @@ public final class EngineClient {
             guard remaining > 0 else { throw EngineClientError.timeout }
 
             var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-            let pr = poll(&pfd, 1, Int32(remaining))
+            // #43: clamp to valid Int32 range; negative remaining would make
+            // poll() block indefinitely, and values > Int32.max crash in Swift.
+            let pollTimeout = Int32(max(0, min(remaining, Double(Int32.max))))
+            let pr = poll(&pfd, 1, pollTimeout)
             guard pr > 0 else {
                 if pr == 0 { throw EngineClientError.timeout }
                 throw EngineClientError.systemError(errno: errno)
+            }
+            // #37: POLLHUP/POLLERR without POLLIN means the peer closed the
+            // connection; translate to connectionClosed rather than systemError.
+            if pfd.revents & (Int16(POLLHUP) | Int16(POLLERR)) != 0 {
+                throw EngineClientError.connectionClosed
             }
             guard pfd.revents & Int16(POLLIN) != 0 else {
                 throw EngineClientError.systemError(errno: errno)
@@ -291,7 +321,10 @@ public final class EngineClient {
         phase2MonitorStopped = false
 
         var pipefds: [Int32] = [-1, -1]
-        guard Darwin.pipe(&pipefds) == 0 else { return }
+        guard Darwin.pipe(&pipefds) == 0 else {
+            fputs("[warning] EngineClient: pipe() failed — phase 2 error monitoring disabled\n", stderr)
+            return
+        }
         monitorPipeRead = pipefds[0]
         monitorPipeWrite = pipefds[1]
         _ = fcntl(monitorPipeRead, F_SETFL, O_NONBLOCK)
@@ -324,12 +357,10 @@ public final class EngineClient {
                         fputs("[warning] \(code): \(message)\n", stderr)
                         continue
                     }
-                    self.recvLock.lock()
-                    var restored = rawData
-                    restored.append(UInt8(ascii: "\n"))
-                    self.recvBuffer.prepend(restored)
-                    self.recvLock.unlock()
-                    return
+                    // #38: unexpected message type during Phase 2 — discard and
+                    // keep monitoring.  Using return here would exit permanently,
+                    // causing any subsequent .error to go undetected.
+                    continue
                 } catch {
                     return
                 }

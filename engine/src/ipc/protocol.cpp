@@ -1,4 +1,5 @@
 #include "ipc/protocol.h"
+#include "config/log.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -42,6 +43,12 @@ void send_json(int fd, const nlohmann::json& msg) {
 nlohmann::json recv_json(int fd, RecvBuffer& buf, int timeout_ms) {
     constexpr size_t MAX_JSON_SIZE = 65536;
 
+    // #28: track deadline so each poll() iteration uses the remaining time
+    // rather than the original timeout_ms (which allowed slow-drip clients
+    // to hold the connection indefinitely).
+    using clock = std::chrono::steady_clock;
+    const auto deadline = clock::now() + std::chrono::milliseconds(timeout_ms);
+
     while (true) {
         auto nl = buf.accumulated.find('\n');
         if (nl != std::string::npos) {
@@ -51,21 +58,32 @@ nlohmann::json recv_json(int fd, RecvBuffer& buf, int timeout_ms) {
             try {
                 return nlohmann::json::parse(msg);
             } catch (const nlohmann::json::parse_error&) {
-                throw std::runtime_error("malformed_json");
+                // #65: skip malformed lines instead of destroying the session.
+                // One bad byte from the model or network should not kill a
+                // live connection — warn and try the next newline-delimited line.
+                LOG_WARN("recv_json: skipping malformed JSON line");
+                continue;
             }
+        }
+
+        // #28: compute remaining ms against the deadline.
+        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             deadline - clock::now()).count();
+        if (remaining <= 0) {
+            throw std::runtime_error("timeout");
         }
 
         struct pollfd pfd{};
         pfd.fd     = fd;
         pfd.events = POLLIN;
 
-        int pret = ::poll(&pfd, 1, timeout_ms);
+        int pret = ::poll(&pfd, 1, static_cast<int>(remaining));
         if (pret < 0) {
             if (errno == EINTR) continue;
             throw std::runtime_error("recv_json: poll error: " + std::string(std::strerror(errno)));
         }
         if (pret == 0) {
-            throw std::runtime_error("timeout");
+            throw std::runtime_error("timeout");  // deadline reached
         }
 
         // POLLHUP without POLLIN means the peer closed and no bytes remain;
@@ -75,7 +93,14 @@ nlohmann::json recv_json(int fd, RecvBuffer& buf, int timeout_ms) {
             throw ConnectionClosed("recv_json: connection closed");
         }
 
-        ssize_t n = ::read(fd, buf.chunk, sizeof(buf.chunk));
+        size_t to_read = std::min(sizeof(buf.chunk),
+            MAX_JSON_SIZE > buf.accumulated.size()
+                ? MAX_JSON_SIZE - buf.accumulated.size() : 0);
+        if (to_read == 0) {
+            throw std::runtime_error("json message too large");
+        }
+
+        ssize_t n = ::read(fd, buf.chunk, to_read);
         if (n < 0) {
             if (errno == EINTR) continue;
             if (errno == ECONNRESET)
@@ -87,10 +112,6 @@ nlohmann::json recv_json(int fd, RecvBuffer& buf, int timeout_ms) {
         }
 
         buf.accumulated.append(buf.chunk, static_cast<size_t>(n));
-
-        if (buf.accumulated.size() > MAX_JSON_SIZE) {
-            throw std::runtime_error("json message too large");
-        }
     }
 }
 

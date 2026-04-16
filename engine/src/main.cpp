@@ -103,6 +103,7 @@ static std::string json_escape(const std::string& s) {
 int main(int argc, char** argv) {
     std::signal(SIGINT,  handle_signal);
     std::signal(SIGTERM, handle_signal);
+    std::signal(SIGPIPE, SIG_IGN);
 
     Config cfg = parse_args(argc, argv);
 
@@ -190,10 +191,11 @@ int main(int argc, char** argv) {
 
         try {
             openverb::Engine engine(cfg);
-            static std::atomic<bool> never_abort{false};
+            // #53: pass g_interrupted so Ctrl-C aborts inference immediately
+            // instead of waiting for the full generation to complete.
             ProgressQueue pq;
             InferenceResult result = engine.process_stream(
-                pcm, SAMPLE_RATE, cfg.context_json, never_abort, pq);
+                pcm, SAMPLE_RATE, cfg.context_json, g_interrupted, pq);
             if (!result.text.empty()) {
                 std::printf("%s\n", result.text.c_str());
             } else if (!result.command.empty()) {

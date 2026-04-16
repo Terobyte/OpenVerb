@@ -72,6 +72,7 @@ final class EngineManager: ObservableObject {
     private var firstCrashTime: Date?
     private let crashWindow: TimeInterval = 60.0
     private let maxCrashes = 3
+    private var isRecovering = false
 
     /// Timestamp of the most recent successful ping.
     private var lastSuccessfulConnect: Date?
@@ -198,6 +199,28 @@ final class EngineManager: ObservableObject {
     // -----------------------------------------------------------------------
 
     func ensureRunning() async throws {
+        // Fast path: verify the connection is actually live.
+        // status can be .running while the socket is closed — this happens
+        // after drainResult() calls disconnect() to signal EOF to the engine.
+        // A blind return here would let startSession() write to a dead fd.
+        if status == .running {
+            if await tryPing() { return }
+            // Socket closed but engine process still alive — fall through to reconnect.
+        }
+        // Dedup: another ensureRunning() is already in flight — wait for it
+        // rather than racing to spawn a second engine process.
+        // All checks and the status = .starting assignment below are synchronous
+        // on @MainActor, so no interleave is possible between them.
+        guard status != .starting else {
+            // #43 (app): add a 10 s timeout so that if the first caller's Task
+            // is cancelled without updating status, this loop does not spin forever.
+            let spinDeadline = Date().addingTimeInterval(10.0)
+            while status == .starting && Date() < spinDeadline {
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            if status != .running { throw EngineManagerError.launchTimeout }
+            return
+        }
         status = .starting
 
         // Try existing socket first.
@@ -206,6 +229,12 @@ final class EngineManager: ObservableObject {
             lastSuccessfulConnect = Date()
             return
         }
+
+        // #64: terminate the old process before launching a new one.  If the
+        // engine is alive but unresponsive (ping failed), replacing self.process
+        // without SIGTERM leaks an orphan process consuming memory/GPU.
+        sendSIGTERM()
+        waitForProcessExit(timeout: 0.5)
 
         // Remove stale socket.
         try? FileManager.default.removeItem(atPath: socketPath)
@@ -270,19 +299,11 @@ final class EngineManager: ObservableObject {
 
     func shutdown() {
         engineClient.sendShutdown()
-        // Wait up to 1 s for the engine to acknowledge the shutdown message.
-        // Use Task.detached so the receive work runs on the cooperative pool,
-        // NOT on the MainActor — blocking the main thread with a semaphore while
-        // a MainActor Task is pending would starve the Task and deadlock.
-        let sema = DispatchSemaphore(value: 0)
-        Task.detached { [weak self] in
-            guard let self else { sema.signal(); return }
-            do {
-                _ = try await self.engineClient.receiveMessage(timeoutMs: 1_000)
-            } catch { }
-            sema.signal()
-        }
-        _ = sema.wait(timeout: .now() + 1.0)
+        // Do NOT block the MainActor waiting for an ack — the engine is always
+        // terminated via SIGTERM below regardless.  The shutdown JSON is a
+        // courtesy to let the engine close the client session cleanly; we do
+        // not need to read the response.
+        //
         // ALWAYS SIGTERM the engine subprocess.  The shutdown JSON only destroys
         // the client session — the listening server process (engine/src/ipc/server.cpp)
         // keeps running.  Without SIGTERM the engine survives app quit / sleep and
@@ -310,6 +331,15 @@ final class EngineManager: ObservableObject {
     // -----------------------------------------------------------------------
 
     func handleCrash() async throws {
+        // Guard against multiple callers racing to start recovery for the same crash
+        // (e.g. Phase 2 onError + drainResult() both detecting the same engine death).
+        guard !isRecovering else {
+            logger.info("handleCrash: recovery already in progress — skipping duplicate")
+            return
+        }
+        isRecovering = true
+        defer { isRecovering = false }
+
         engineClient.disconnect()
 
         let now = Date()
@@ -419,47 +449,38 @@ final class EngineManager: ObservableObject {
     }
 
     @objc func handleSleep() {
-        // STRICT ORDER per spec — sleep budget is ~1-3 s.
         // (1) UI teardown (audio stop, window hide, state transition).
         onPreSleep?()
-        // (2) Stop the Phase 2 monitor to prevent concurrent readers on the
-        //     socket during the shutdown sequence that follows.
+        // (2) Stop the Phase 2 monitor before closing the socket.
         engineClient.stopPhase2Monitor()
-        // (3) Send shutdown while socket is still open.
-        engineClient.sendShutdown()
-        // (3) Wait up to 1 s for graceful acknowledgement.
-        let sema = DispatchSemaphore(value: 0)
-        Task.detached { [weak self] in
-            guard let self else { sema.signal(); return }
-            do {
-                _ = try await self.engineClient.receiveMessage(timeoutMs: 1_000)
-            } catch {}
-            sema.signal()
-        }
-        _ = sema.wait(timeout: .now() + 1.0)
-        // (4) ALWAYS SIGTERM the engine subprocess — shutdown JSON only closes
-        //     the client session, not the listening server process.
-        if let proc = process, proc.isRunning {
-            proc.terminate()
-        }
-        waitForProcessExit(timeout: 0.5)
-        // (5) Disconnect — close the socket fd.
+        // (3) Disconnect — close the socket fd.
+        //     The engine process is intentionally kept alive so the model
+        //     stays loaded in memory.  On wake we reconnect without reloading.
         engineClient.disconnect()
         status = .stopped
-        logger.info("System sleep — engine shut down")
+        logger.info("System sleep — disconnected from engine (process kept alive)")
     }
 
     @objc func handleWake() {
-        logger.info("System wake — restarting engine")
+        logger.info("System wake — reconnecting to engine")
         status = .starting
         onWakeStarted?()
         Task { [weak self] in
             guard let self else { return }
-            do {
-                try await ensureRunning()
-            } catch {
-                logger.error("Engine restart after wake failed: \(error)")
-                self.status = .error("Engine failed to restart after wake")
+            // Fast path: engine survived sleep, model is still hot.
+            if await tryPing() {
+                status = .running
+                lastSuccessfulConnect = Date()
+                logger.info("Engine reconnected after wake — model hot")
+            } else {
+                // Engine died during sleep (jetsam, etc.) — full restart.
+                logger.info("Engine did not survive sleep — restarting")
+                do {
+                    try await ensureRunning()
+                } catch {
+                    logger.error("Engine restart after wake failed: \(error)")
+                    self.status = .error("Engine failed to restart after wake")
+                }
             }
             self.onWakeCompleted?()
         }

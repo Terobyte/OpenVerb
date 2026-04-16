@@ -90,10 +90,7 @@ void IpcServer::start(const std::string& socket_path) {
 
     write_pid_file(pid_path_);
     running_.store(true, std::memory_order_release);
-
-    // Do NOT reset g_interrupted here.  If a signal arrived before start()
-    // was called (e.g. during Engine construction) the flag must remain set
-    // so the loop below exits immediately rather than silently swallowing it.
+    g_interrupted.store(false, std::memory_order_release);
 
     LOG_INFO("ipc: listening on %s", expanded.c_str());
 
@@ -132,13 +129,17 @@ void IpcServer::start(const std::string& socket_path) {
 
                 if (pressure & DISPATCH_MEMORYPRESSURE_CRITICAL) {
                     LOG_WARN("ipc: CRITICAL memory pressure — aborting session + unloading model");
-                    if (self->pressure_critical_active_.load(std::memory_order_acquire)) {
-                        // Session is active: calling unload_model() while inference
-                        // is running is a use-after-free.  Set g_interrupted to abort
-                        // the session and exit the main poll loop; the process will
-                        // terminate and the OS reclaims memory.  pressure_force_unload_
-                        // is set as a belt-and-suspenders signal (not acted on since
-                        // the poll loop exits immediately after g_interrupted is set).
+                    // #66: guard unload_model() with BOTH pressure_critical_active_ and
+                    // session_active_.  pressure_critical_active_ is set first (lines
+                    // 238-239 in start()), so checking session_active_ after a false read
+                    // of pressure_critical_active_ catches the narrow window where a new
+                    // session was accepted between our check and the unload call.
+                    if (self->pressure_critical_active_.load(std::memory_order_acquire) ||
+                        self->session_active_.load(std::memory_order_acquire)) {
+                        // Session is active or just started: calling unload_model() while
+                        // inference is running is a use-after-free.  Set g_interrupted to
+                        // abort the session and exit the main poll loop; the process will
+                        // terminate and the OS reclaims memory.
                         g_interrupted.store(true, std::memory_order_relaxed);
                         self->pressure_force_unload_.store(true, std::memory_order_relaxed);
                     } else {

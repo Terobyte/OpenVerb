@@ -17,6 +17,10 @@ import Foundation
 // WaveformViewModel
 // ---------------------------------------------------------------------------
 
+// #34: @MainActor ensures @Published mutations are always on the main actor,
+// satisfying Swift 6 strict concurrency.  updateAmplitude and computeRMS are
+// nonisolated so they can be called from the background audio tap thread.
+@MainActor
 final class WaveformViewModel: ObservableObject {
 
     @Published private(set) var amplitudes: [CGFloat] = []
@@ -25,8 +29,8 @@ final class WaveformViewModel: ObservableObject {
 
     /// Computes RMS amplitude from a PCM Int16 mono chunk and appends it to
     /// the ring buffer.  May be called from any thread; dispatches to main.
-    func updateAmplitude(_ data: Data) {
-        let rms = computeRMS(data)
+    nonisolated func updateAmplitude(_ data: Data) {
+        let rms = WaveformViewModel.computeRMS(data)
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.amplitudes.append(rms)
@@ -47,7 +51,7 @@ final class WaveformViewModel: ObservableObject {
     // Private — RMS computation from raw PCM Int16 samples.
     // -----------------------------------------------------------------------
 
-    private func computeRMS(_ data: Data) -> CGFloat {
+    nonisolated private static func computeRMS(_ data: Data) -> CGFloat {
         let sampleCount = data.count / 2
         guard sampleCount > 0 else { return 0 }
 

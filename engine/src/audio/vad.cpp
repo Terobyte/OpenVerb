@@ -85,7 +85,7 @@ std::vector<int16_t> Vad::filter(const AudioData& audio,
 
     for (int fi = 0; fi < num_frames; ++fi) {
         int result = WebRtcVad_Process(vad_, sample_rate,
-                                       pcm.data() + fi * frame_size,
+                                       pcm.data() + static_cast<size_t>(fi) * frame_size,
                                        static_cast<size_t>(frame_size));
         bool s = (result == 1);
         speech[static_cast<size_t>(fi)] = s;
