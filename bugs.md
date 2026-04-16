@@ -106,7 +106,7 @@ Originally six properties were unwired. Current state:
 ### Bug 23 — `EngineManager.modelDirPath` is a snapshot — model directory changes in Preferences have no effect until app restart
 - **File:** `app/OpenVerb/Engine/EngineManager.swift:107-108`, `app/OpenVerb/UI/PreferencesView.swift:220-233`
 - **Severity:** Medium
-- **Status:** Open
+- **Status:** Fixed
 
 `modelDirPath` is declared `let` and initialised once from `AppSettings.shared.modelDirectory` in `EngineManager.init()`. The Preferences → Backend → Model → "Browse..." button writes a new path to `AppSettings`, but `EngineManager` never re-reads it. All subsequent `launchEngine()` calls (crash recovery, backend switch, sleep/wake) pass the original path to the engine subprocess. Changing the model directory in Preferences has no effect until the app is relaunched.
 

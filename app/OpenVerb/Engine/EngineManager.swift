@@ -60,7 +60,11 @@ final class EngineManager: ObservableObject {
     let engineClient: EngineClient
     private var enginePath: String
     private let socketPath: String
-    let modelDirPath: String
+    private let modelDirOverride: String?
+    var modelDirPath: String {
+        let dir = AppSettings.shared.modelDirectory
+        return modelDirOverride ?? (dir.isEmpty ? Constants.DEFAULT_MODEL_DIR : dir)
+    }
     /// Injected for unit testing; production code uses `.default`.
     let fileManager: FileManager
 
@@ -100,12 +104,7 @@ final class EngineManager: ObservableObject {
         self.socketPath = socketPath
         self.engineClient = client
         self.enginePath = enginePath ?? EngineManager.resolveEnginePath()
-        // Bug 18 fix: honour the user's AppSettings.modelDirectory preference
-        // when no explicit override is passed.  Fall back to the compiled-in
-        // default only if both the override and the setting are empty.
-        let settingsDir = AppSettings.shared.modelDirectory
-        self.modelDirPath = modelDirOverride
-            ?? (settingsDir.isEmpty ? Constants.DEFAULT_MODEL_DIR : settingsDir)
+        self.modelDirOverride = modelDirOverride
         self.fileManager = fileManager
         registerSleepWakeNotifications()
     }
