@@ -55,8 +55,11 @@ final class AppStateTests: XCTestCase {
     }
 
     func testPreparingToRecordingClearsPreparingSubtitle() {
+        // Drive through abort+restart to set subtitle synchronously (no async timer needed).
         sut.transition(to: .preparing)
-        sut.preparingSubtitle = "Preparing..."
+        sut.transition(to: .recording)
+        sut.transition(to: .inferring)
+        sut.transition(to: .preparing)  // sets "Reconnecting..."
         sut.transition(to: .recording)
         XCTAssertEqual(sut.state, .recording)
         XCTAssertNil(sut.preparingSubtitle, "preparingSubtitle must be cleared on PREPARING→RECORDING")
@@ -157,10 +160,13 @@ final class AppStateTests: XCTestCase {
 
     func testPreparingSubtitleSetAndCleared() {
         sut.transition(to: .preparing)
-        XCTAssertNil(sut.preparingSubtitle)  // not set yet
+        XCTAssertNil(sut.preparingSubtitle)  // timer hasn't fired yet
 
-        sut.preparingSubtitle = "Preparing..."
-        XCTAssertEqual(sut.preparingSubtitle, "Preparing...")
+        // Drive through abort+restart to populate subtitle synchronously.
+        sut.transition(to: .recording)
+        sut.transition(to: .inferring)
+        sut.transition(to: .preparing)  // sets "Reconnecting..."
+        XCTAssertEqual(sut.preparingSubtitle, "Reconnecting...")
 
         sut.transition(to: .recording)
         XCTAssertNil(sut.preparingSubtitle, "Must be nil after PREPARING→RECORDING")
@@ -168,7 +174,9 @@ final class AppStateTests: XCTestCase {
 
     func testPreparingSubtitleClearedOnCancelToIdle() {
         sut.transition(to: .preparing)
-        sut.preparingSubtitle = "Reconnecting..."
+        sut.transition(to: .recording)
+        sut.transition(to: .inferring)
+        sut.transition(to: .preparing)  // sets "Reconnecting..."
         sut.transition(to: .idle)
         XCTAssertNil(sut.preparingSubtitle)
     }

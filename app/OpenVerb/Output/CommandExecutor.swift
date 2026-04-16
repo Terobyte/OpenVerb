@@ -139,7 +139,9 @@ struct CommandExecutor {
 
         // Focus sequence (same as TextInjector)
         window.orderOut(nil)
-        targetApp.activate(options: [])
+        if !targetApp.activate(options: []) {
+            logger.warning("CommandExecutor: activate() failed for \(targetApp.bundleIdentifier ?? targetApp.localizedName ?? "unknown")")
+        }
         try? await Task.sleep(for: .milliseconds(50))
 
         // Post each key action; 50 ms gap between sequential events

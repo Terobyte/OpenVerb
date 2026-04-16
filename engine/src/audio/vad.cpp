@@ -78,17 +78,17 @@ std::vector<int16_t> Vad::filter(const AudioData& audio,
     // -----------------------------------------------------------------------
     // Pass 1: classify every 30 ms frame and count total speech frames.
     // -----------------------------------------------------------------------
-    const int num_frames = static_cast<int>(pcm.size()) / frame_size;
+    const size_t num_frames = pcm.size() / static_cast<size_t>(frame_size);
 
-    std::vector<bool> speech(static_cast<size_t>(num_frames));
+    std::vector<bool> speech(num_frames);
     int total_speech = 0;
 
-    for (int fi = 0; fi < num_frames; ++fi) {
+    for (size_t fi = 0; fi < num_frames; ++fi) {
         int result = WebRtcVad_Process(vad_, sample_rate,
-                                       pcm.data() + static_cast<size_t>(fi) * frame_size,
+                                       pcm.data() + fi * static_cast<size_t>(frame_size),
                                        static_cast<size_t>(frame_size));
         bool s = (result == 1);
-        speech[static_cast<size_t>(fi)] = s;
+        speech[fi] = s;
         if (s) ++total_speech;
     }
 
@@ -109,22 +109,22 @@ std::vector<int16_t> Vad::filter(const AudioData& audio,
     //                  if silence exceeds limit → close region, discard buffer.
     // -----------------------------------------------------------------------
     std::vector<int16_t> out;
-    out.reserve(static_cast<size_t>(num_frames * frame_size));
+    out.reserve(num_frames * static_cast<size_t>(frame_size));
 
     bool              in_speech    = false;
     int               silence_cnt  = 0;
-    std::vector<int>  pending;          // frame indices of buffered silence
+    std::vector<size_t> pending;        // frame indices of buffered silence
 
-    auto append_frame = [&](int fi) {
-        const int16_t* p = pcm.data() + fi * frame_size;
+    auto append_frame = [&](size_t fi) {
+        const int16_t* p = pcm.data() + fi * static_cast<size_t>(frame_size);
         out.insert(out.end(), p, p + frame_size);
     };
 
-    for (int fi = 0; fi < num_frames; ++fi) {
-        if (speech[static_cast<size_t>(fi)]) {
+    for (size_t fi = 0; fi < num_frames; ++fi) {
+        if (speech[fi]) {
             if (in_speech) {
                 // Speech resumed within the silence gap — flush buffered silence.
-                for (int si : pending) {
+                for (size_t si : pending) {
                     append_frame(si);
                 }
                 pending.clear();

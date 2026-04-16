@@ -117,7 +117,12 @@ int main(int argc, char** argv) {
 
     // --- Daemon mode: --listen ---
     if (cfg.listen) {
-        std::string home(getenv("HOME") ? getenv("HOME") : "");
+        const char* home_cstr = getenv("HOME");
+        if (!home_cstr || home_cstr[0] == '\0') {
+            std::fprintf(stderr, "error: HOME environment variable is not set\n");
+            return 1;
+        }
+        std::string home(home_cstr);
         std::filesystem::create_directories(home + "/.openverb");
         std::filesystem::create_directories(home + "/.openverb/logs");
         std::filesystem::create_directories(home + "/.openverb/models");

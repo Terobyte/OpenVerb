@@ -12,13 +12,17 @@
 // to populate from the JSON wire format, or construct directly in tests.
 //
 // Wire format (--context flag):
-//   {"app":"<bundle-id>","window":"<title>","selected":"<text>"}
+//   {"app":"<bundle-id>","window":"<title>","selected":"<text>","locale":"<code>"}
+//
+// All fields are optional.  "locale" defaults to "en" (English).  Supported
+// codes: en, ru, es, fr, de, ja.  Unknown codes silently fall back to "en".
 // ---------------------------------------------------------------------------
 
 struct PromptContext {
-    std::string app_name;      // macOS bundle ID of the frontmost app (e.g. "com.apple.Mail")
-    std::string window_title;  // frontmost window title
-    std::string selected_text; // text currently selected in the active app
+    std::string app_name;             // macOS bundle ID of the frontmost app (e.g. "com.apple.Mail")
+    std::string window_title;         // frontmost window title
+    std::string selected_text;        // text currently selected in the active app
+    std::string locale       = "en";  // ISO 639-1 language code for prompt localisation
 };
 
 // ---------------------------------------------------------------------------

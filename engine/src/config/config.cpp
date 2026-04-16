@@ -331,7 +331,7 @@ void resolve_config(Config& cfg) {
             std::fprintf(stderr, "         using: %s\n", matches[0].c_str());
         }
 
-        cfg.model_path = matches[0];
+        cfg.model_path = std::filesystem::weakly_canonical(matches[0]).string();
     }
 
     // ---- Auto-detect mmproj file ----------------------------------------

@@ -15,6 +15,7 @@ import os
 //   Engine status (dynamic label, disabled)
 //   ─────────────
 //   Quit OpenVerb
+//   Preferences menu item deferred to MVP5.
 // ---------------------------------------------------------------------------
 
 private let logger = Logger(subsystem: "io.openverb.app", category: "StatusBarItem")

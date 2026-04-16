@@ -77,7 +77,7 @@ final class AppState: ObservableObject {
     /// Non-nil while the engine is still loading in the PREPARING state.
     /// Set to "Preparing..." after 500ms in PREPARING; "Reconnecting..." during
     /// abort+restart window. Cleared when PREPARING→RECORDING.
-    @Published var preparingSubtitle: String?
+    @Published private(set) var preparingSubtitle: String?
 
     // -----------------------------------------------------------------------
     // Dependency injection for testing
@@ -277,6 +277,7 @@ final class AppState: ObservableObject {
                     // Task was cancelled — another transition happened; stop here.
                     return
                 }
+                guard !Task.isCancelled else { return }
                 self?.transition(to: .idle)
             }
             autoClearTimer = task

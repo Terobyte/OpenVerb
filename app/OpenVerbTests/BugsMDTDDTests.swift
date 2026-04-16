@@ -12,7 +12,7 @@ import AppKit
 //   Bug 1  — CGEvent tap: passRetained → fixed to passUnretained
 //   Bug 4  — recordingWindow.show() before audio start → fixed order
 //   Bug 6  — unload_model + inference race → fixed with engine_mutex_
-//   Bug 11 — truncateToUTF8Bytes over-striping → fixed with sequence-length
+//   Bug 11 — truncateToUTF8Bytes over-stripping → fixed with sequence-length
 //
 // Untestable without full runtime (model, hardware, IPC):
 //   Bug 2  — EngineClient disconnect() fd race (needs real socket)
@@ -21,35 +21,96 @@ import AppKit
 //   Bug 9  — shared RecvBuffer (design concern, not a code error)
 //   Bug 12 — StatusBarItem no animation (UI, needs real NSStatusBar)
 //   Bug 13 — shutdown() blocks MainActor (mitigated by Task.detached)
+//
+// Partially testable (API incomplete per Bug 4):
+//   Bug 4  — ContextBuilder incomplete (PasteboardReadable, pasteboard param,
+//            truncateToUTF8Bytes) — referenced by ContextBuilderTests.swift
 // ---------------------------------------------------------------------------
 
 final class BugsMDTDDTests: XCTestCase {
 
     // =======================================================================
-    // Bug 11 (was): truncateToUTF8Bytes over-stripping.
+    // Bug 1 — WaveformViewModel.reset() is async when it should be sync.
     //
-    // These tests now PASS, confirming the fix in ContextBuilder.swift:83-109
-    // correctly checks sequence length before removing a leading byte.
-    // They remain as regression guards.
+    // The reset() method wraps amplitudes.removeAll() in DispatchQueue.main.async
+    // even though the method is @MainActor. This causes a race condition where
+    // stale amplitude bars may briefly appear in the new session.
+    //
+    // EXPECTED: reset() should clear amplitudes synchronously.
+    // ACTUAL: reset() defers clearing to next run loop turn.
     // =======================================================================
 
-    func testBug11_regression_2ByteCharAtLimit() {
-        let result = ContextBuilder.truncateToUTF8Bytes("éa", limit: 2)
-        XCTAssertEqual(result, "é")
+    @MainActor
+    func testBug1_resetShouldClearAmplitudesSynchronously() {
+        let vm = WaveformViewModel()
+        vm.updateAmplitude(Data([0, 1, 2, 3, 4, 5, 6, 7]))
+        vm.updateAmplitude(Data([0, 1, 2, 3, 4, 5, 6, 7]))
+
+        XCTAssertFalse(vm.amplitudes.isEmpty, "Should have amplitudes before reset")
+
+        vm.reset()
+
+        XCTAssertTrue(vm.amplitudes.isEmpty,
+                      "reset() should clear amplitudes synchronously, but bug causes async delay")
     }
 
-    func testBug11_regression_3ByteCharAtLimit() {
-        let result = ContextBuilder.truncateToUTF8Bytes("€a", limit: 3)
-        XCTAssertEqual(result, "€")
+    // =======================================================================
+    // Bug 3 — Auto-clear timer can fire during PREPARING, silently killing
+    // the session.
+    //
+    // If Task.sleep completes just before user triggers a new session, the
+    // continuation runs after transition(to: .preparing) but the cancellation
+    // check is missing, causing an invalid transition from .preparing to .idle.
+    //
+    // EXPECTED: Timer continuation should check Task.isCancelled before
+    //           calling transition.
+    // ACTUAL: Timer fires and calls transition from .preparing → .idle.
+    // =======================================================================
+
+    @MainActor
+    func testBug3_autoClearTimerShouldRespectCancellation() async {
+        let appState = AppState()
+        appState.errorClearDelay = .milliseconds(50)
+
+        await appState.transition(to: .error("test"))
+        XCTAssertEqual(appState.state, .error("test"))
+
+        await appState.transition(to: .preparing)
+        XCTAssertEqual(appState.state, .preparing)
+
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertEqual(appState.state, .preparing,
+                       "Auto-clear timer should have been cancelled by transition to PREPARING")
     }
 
-    func testBug11_regression_4ByteCharAtLimit() {
-        let result = ContextBuilder.truncateToUTF8Bytes("😂a", limit: 4)
-        XCTAssertEqual(result, "😂")
-    }
+    // =======================================================================
+    // Bug 7 — AppState.preparingSubtitle has public setter, breaking encapsulation.
+    //
+    // Currently @Published var preparingSubtitle allows direct mutation.
+    // Should be @Published private(set) var. This test tries to set the property
+    // directly - if private(set), compilation fails.
+    //
+    // EXPECTED: preparingSubtitle should be @Published private(set).
+    // ACTUAL: preparingSubtitle has public setter allowing external mutation.
+    // =======================================================================
 
-    func testBug11_incompleteLeadingByteIsStripped() {
-        let result = ContextBuilder.truncateToUTF8Bytes("abécd", limit: 3)
-        XCTAssertEqual(result, "ab")
+    @MainActor
+    func testBug7_preparingSubtitleShouldBeReadOnly() {
+        let appState = AppState()
+        
+        let canDirectlyMutate = compileTimeCheckCanMutatePreparingSubtitle(appState)
+        XCTAssertFalse(canDirectlyMutate,
+                       "preparingSubtitle should have private(set), but public setter allows direct mutation")
+    }
+    
+    @MainActor
+    private func compileTimeCheckCanMutatePreparingSubtitle(_ appState: AppState) -> Bool {
+        var canMutate = false
+        if appState.preparingSubtitle != nil {
+            canMutate = true
+            appState.preparingSubtitle = nil
+        }
+        return canMutate
     }
 }

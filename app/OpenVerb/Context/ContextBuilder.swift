@@ -4,8 +4,8 @@ import AppKit
 // ---------------------------------------------------------------------------
 // ContextBuilder — assembles the context dictionary for session.start.
 //
-// MVP3 scope: "app" + "language" only.
-// Accessibility API (window title, selection) is deferred to MVP4.
+// MVP3 scope: "app" + "language" + "window" (empty placeholder).
+// Accessibility API (window title, selected text) is deferred to MVP4.
 //
 // Protocol abstraction allows unit testing without real NSRunningApplication.
 // ---------------------------------------------------------------------------
@@ -56,7 +56,7 @@ struct ContextBuilder {
         // "no window title available, apply default style."
         context["window"] = ""
 
-        // "selection" is omitted entirely (requires Accessibility API — MVP4).
+        // "selected" is set from Accessibility API — deferred to MVP4.
 
         return context
     }

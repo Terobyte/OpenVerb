@@ -19,6 +19,7 @@ public final class EngineManager {
 
     public private(set) var process: Process?
     private var crashTimestamps: [Date] = []
+    private var crashAttempts = 0   // monotonically increasing — not pruned with crashTimestamps
     private let crashWindow: TimeInterval = 60.0
     private let maxCrashes = 3
 
@@ -183,7 +184,9 @@ public final class EngineManager {
         }
 
         // Exponential backoff: 1s, 2s, 4s
-        let backoff = min(pow(2.0, Double(crashTimestamps.count - 1)), 4.0)
+        // Use crashAttempts (not crashTimestamps.count) so pruning old timestamps
+        // does not reset the backoff — crashAttempts is monotonically increasing.
+        let backoff = min(pow(2.0, Double(crashAttempts - 1)), 4.0)
         Thread.sleep(forTimeInterval: backoff)
 
         try ensureRunning()
@@ -191,6 +194,7 @@ public final class EngineManager {
 
     private func recordCrash() {
         crashTimestamps.append(Date())
+        crashAttempts += 1
         // Prune timestamps older than the crash window.
         let cutoff = Date().addingTimeInterval(-crashWindow)
         crashTimestamps = crashTimestamps.filter { $0 > cutoff }
@@ -198,6 +202,7 @@ public final class EngineManager {
 
     public func resetCrashCounter() {
         crashTimestamps.removeAll()
+        crashAttempts = 0
     }
 
     // ---------------------------------------------------------------------------

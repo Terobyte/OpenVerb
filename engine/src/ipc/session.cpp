@@ -416,6 +416,7 @@ void Session::run(int fd, Engine& engine, const SessionConfig& cfg) {
                     if (elapsed_secs(infer_start) >= cfg.inference_timeout_secs) {
                         stop_requested_.store(true, std::memory_order_relaxed);
                         if (inference_thread_.joinable()) inference_thread_.join();
+                        progress_queue_.drain();
                         send_error(fd, ErrorCode::timeout, "inference timeout");
                         ring_buffer_.reset();
                         state = State::IDLE;

@@ -11,12 +11,12 @@
 **Tech Stack:** Swift 5.9 / SwiftUI (macOS 13+), AXUIElement (ApplicationServices), URLSession, C++ (engine templates), Ruby (Homebrew cask), Bash (build-release)
 
 **Existing code alignment:**
-- `app/OpenVerb/Context/ContextBuilder.swift:54-57` — explicit "deferred to MVP4" placeholders for `window` and `selection`. **NOTE: line 59 comment reads `// "selection" is omitted entirely` — this is a typo; the engine key is `"selected"` (prompt_builder.cpp:200). Task 3 Step 10 rewrites this function and uses the correct key. The comment must become `// "selected" is set from Accessibility API` — do NOT perpetuate the "selection" typo.**
-- `app/OpenVerb/Output/TextInjector.swift:25` — "CGEvent per-character fallback deferred to MVP5"
-- `app/OpenVerb/UI/StatusBarItem.swift` — no Preferences menu item (MVP5)
-- `engine/src/context/prompt_builder.cpp:55` — "MVP4+ i18n: replace with per-locale template"
-- `engine/src/context/prompt_builder.cpp:74` — "MVP4+ i18n: localize style descriptions" (style localization deferred to post-v1.0; this plan localizes system prompts and generation suffixes only)
-- `app/OpenVerb/Engine/EngineManager.swift` — `checkModelExists()` is a simple file check; ModelDownloader replaces the manual download script
+- [x] `app/OpenVerb/Context/ContextBuilder.swift:54-57` — explicit "deferred to MVP4" placeholders for `window` and `selection`. **NOTE: line 59 comment reads `// "selection" is omitted entirely` — this is a typo; the engine key is `"selected"` (prompt_builder.cpp:200). Task 3 Step 10 rewrites this function and uses the correct key. The comment must become `// "selected" is set from Accessibility API` — do NOT perpetuate the "selection" typo.**
+- [x] `app/OpenVerb/Output/TextInjector.swift:25` — "CGEvent per-character fallback deferred to MVP5"
+- [x] `app/OpenVerb/UI/StatusBarItem.swift` — no Preferences menu item (MVP5)
+- [x] `engine/src/context/prompt_builder.cpp:55` — "MVP4+ i18n: replace with per-locale template"
+- [x] `engine/src/context/prompt_builder.cpp:74` — "MVP4+ i18n: localize style descriptions" (style localization deferred to post-v1.0; this plan localizes system prompts and generation suffixes only)
+- [x] `app/OpenVerb/Engine/EngineManager.swift` — `checkModelExists()` is a simple file check; ModelDownloader replaces the manual download script
 
 ---
 
@@ -25,12 +25,12 @@
 ### Task 1: AccessibilityReader — protocol + failing test
 
 **Files:**
-- Create: `app/OpenVerb/Context/AccessibilityReader.swift`
-- Create: `app/OpenVerbTests/AccessibilityReaderTests.swift`
+- [x] Create: `app/OpenVerb/Context/AccessibilityReader.swift`
+- [x] Create: `app/OpenVerbTests/AccessibilityReaderTests.swift`
 
 > **Xcode:** Add each new file to the correct target in `OpenVerb.xcodeproj` (drag into navigator → tick target checkbox). Source `.swift` → **OpenVerb** target; test `.swift` → **OpenVerbTests** target. Alternatively run tests via `cd app && swift test` — SwiftPM auto-discovers files without project membership.
 
-- [ ] **Step 1: Write the AccessibilityReader protocol and struct skeleton**
+- [x] **Step 1: Write the AccessibilityReader protocol and struct skeleton**
 
 ```swift
 // app/OpenVerb/Context/AccessibilityReader.swift
@@ -57,7 +57,7 @@ struct AccessibilityReader: AccessibilityReadable {
 }
 ```
 
-- [ ] **Step 2: Write failing tests for AccessibilityReader**
+- [x] **Step 2: Write failing tests for AccessibilityReader**
 
 ```swift
 // app/OpenVerbTests/AccessibilityReaderTests.swift
@@ -107,7 +107,7 @@ final class AccessibilityReaderTests: XCTestCase {
 }
 ```
 
-- [ ] **Step 3: Run tests to verify they compile and the mock tests pass**
+- [x] **Step 3: Run tests to verify they compile and the mock tests pass**
 
 Run: `cd app && xcodebuild test -scheme OpenVerb -only-testing:OpenVerbTests/AccessibilityReaderTests 2>&1 | tail -20`
 Expected: 4 tests PASS (mock-based, no real AX calls)
@@ -117,9 +117,9 @@ Expected: 4 tests PASS (mock-based, no real AX calls)
 ### Task 2: AccessibilityReader — AXUIElement implementation
 
 **Files:**
-- Modify: `app/OpenVerb/Context/AccessibilityReader.swift`
+- [x] Modify: `app/OpenVerb/Context/AccessibilityReader.swift`
 
-- [ ] **Step 5: Implement readWindowTitle with AXUIElement**
+- [x] **Step 5: Implement readWindowTitle with AXUIElement**
 
 Replace the `fatalError` stubs with real AX calls:
 
@@ -194,8 +194,8 @@ Expected: 4 tests PASS
 ### Task 3: ContextBuilder — add Accessibility fields
 
 **Files:**
-- Modify: `app/OpenVerb/Context/ContextBuilder.swift`
-- Modify: `app/OpenVerbTests/ContextBuilderTests.swift`
+- [ ] Modify: `app/OpenVerb/Context/ContextBuilder.swift`
+- [ ] Modify: `app/OpenVerbTests/ContextBuilderTests.swift`
 
 - [ ] **Step 8: Write failing test for window title in context**
 
@@ -383,7 +383,7 @@ Expected: ALL PASS (old tests use default params, new tests use mock reader)
 ### Task 4: Wire AccessibilityReader into the app flow
 
 **Files:**
-- Modify: `app/OpenVerb/App/OpenVerbApp.swift`
+- [ ] Modify: `app/OpenVerb/App/OpenVerbApp.swift`
 
 - [ ] **Step 13: Update ContextBuilder call in OpenVerbApp.swift to pass accessibilityApp**
 
@@ -432,9 +432,9 @@ Open Slack, select a message, dictate "reply that sounds great" → verify casua
 ### Task 6: UserDefaults settings wrapper
 
 **Files:**
-- Create: `app/OpenVerb/Settings/` directory (new — does not exist yet)
-- Create: `app/OpenVerb/Settings/AppSettings.swift`
-- Create: `app/OpenVerbTests/AppSettingsTests.swift`
+- [ ] Create: `app/OpenVerb/Settings/` directory (new — does not exist yet)
+- [ ] Create: `app/OpenVerb/Settings/AppSettings.swift`
+- [ ] Create: `app/OpenVerbTests/AppSettingsTests.swift`
 
 > **Xcode:** Add each new file to the correct target in `OpenVerb.xcodeproj`. Source `.swift` → **OpenVerb** target; test `.swift` → **OpenVerbTests** target. Alternatively run tests via `cd app && swift test`.
 
@@ -594,8 +594,8 @@ Expected: 6 tests PASS
 ### Task 7: Wire AppSettings into ContextBuilder (clipboard toggle)
 
 **Files:**
-- Modify: `app/OpenVerb/Context/ContextBuilder.swift`
-- Modify: `app/OpenVerbTests/ContextBuilderTests.swift`
+- [ ] Modify: `app/OpenVerb/Context/ContextBuilder.swift`
+- [ ] Modify: `app/OpenVerbTests/ContextBuilderTests.swift`
 
 - [ ] **Step 25: Write failing test for clipboard toggle OFF**
 
@@ -632,7 +632,7 @@ Expected: ALL PASS
 ### Task 7b: Wire AppSettings into connectAndRecord call site
 
 **Files:**
-- Modify: `app/OpenVerb/App/OpenVerbApp.swift`
+- [ ] Modify: `app/OpenVerb/App/OpenVerbApp.swift`
 
 Without this task, the `includeClipboard` and `language` parameters added to `ContextBuilder.build()`
 have no effect because `connectAndRecord()` still calls the function with default values.
@@ -713,9 +713,9 @@ Expected: ALL PASS
 ### Task 8: PreferencesView
 
 **Files:**
-- Create: `app/OpenVerb/UI/PreferencesView.swift`
-- Modify: `app/OpenVerb/UI/StatusBarItem.swift`
-- Modify: `app/OpenVerb/Engine/EngineManager.swift`
+- [ ] Create: `app/OpenVerb/UI/PreferencesView.swift`
+- [ ] Modify: `app/OpenVerb/UI/StatusBarItem.swift`
+- [ ] Modify: `app/OpenVerb/Engine/EngineManager.swift`
 
 > **Xcode:** Add `PreferencesView.swift` to the **OpenVerb** target in `OpenVerb.xcodeproj`.
 
@@ -1025,9 +1025,9 @@ git commit -m "wire appsettings clipboard and language into context builder call
 ### Task 9: ModelDownloader — failing test
 
 **Files:**
-- Create: `app/OpenVerb/Model/` directory (new — does not exist yet)
-- Create: `app/OpenVerb/Model/ModelDownloader.swift`
-- Create: `app/OpenVerbTests/ModelDownloaderTests.swift`
+- [ ] Create: `app/OpenVerb/Model/` directory (new — does not exist yet)
+- [ ] Create: `app/OpenVerb/Model/ModelDownloader.swift`
+- [ ] Create: `app/OpenVerbTests/ModelDownloaderTests.swift`
 
 > **Xcode:** Add each new file to the correct target in `OpenVerb.xcodeproj`. `ModelDownloader.swift` → **OpenVerb** target; `ModelDownloaderTests.swift` → **OpenVerbTests** target. Alternatively run tests via `cd app && swift test`.
 
@@ -1293,7 +1293,7 @@ Expected: 4 tests PASS
 ### Task 10: OnboardingView
 
 **Files:**
-- Create: `app/OpenVerb/UI/OnboardingView.swift`
+- [ ] Create: `app/OpenVerb/UI/OnboardingView.swift`
 
 > **Xcode:** Add `OnboardingView.swift` to the **OpenVerb** target in `OpenVerb.xcodeproj`.
 
@@ -1514,8 +1514,8 @@ Expected: BUILD SUCCEEDED
 ### Task 11: Wire Onboarding into app launch
 
 **Files:**
-- Modify: `app/OpenVerb/App/OpenVerbApp.swift`
-- Modify: `app/OpenVerb/Engine/EngineManager.swift`
+- [ ] Modify: `app/OpenVerb/App/OpenVerbApp.swift`
+- [ ] Modify: `app/OpenVerb/Engine/EngineManager.swift`
 
 - [ ] **Step 41: Add stored properties and first-launch detection in AppDelegate**
 
@@ -1628,8 +1628,8 @@ Expected: BUILD SUCCEEDED
 ### Task 12: CGEvent per-character fallback in TextInjector
 
 **Files:**
-- Modify: `app/OpenVerb/Output/TextInjector.swift`
-- Create: `app/OpenVerbTests/TextInjectorTests.swift`
+- [ ] Modify: `app/OpenVerb/Output/TextInjector.swift`
+- [ ] Create: `app/OpenVerbTests/TextInjectorTests.swift`
 
 > **Xcode:** Add `TextInjectorTests.swift` to the **OpenVerbTests** target in `OpenVerb.xcodeproj`. Alternatively run tests via `cd app && swift test`.
 
@@ -1757,8 +1757,8 @@ Expected: 3 tests PASS
 **Decision:** `injectPerCharacter()` is NOT auto-triggered from `inject()` in MVP5. Reliable detection of "paste blocked" is impossible without Accessibility API element inspection (checking if the focused field supports the `AXValue` attribute), which adds latency and fragility.
 
 For MVP5, the fallback is an explicitly callable method. Future integration points:
-- A "Character-by-character injection" toggle in Preferences (Task 8 PreferencesView) can call `injectPerCharacter()` instead of the ⌘V path when enabled.
-- A post-v1.0 task can implement AX-based paste detection.
+- [ ] A "Character-by-character injection" toggle in Preferences (Task 8 PreferencesView) can call `injectPerCharacter()` instead of the ⌘V path when enabled.
+- [ ] A post-v1.0 task can implement AX-based paste detection.
 
 **No code change needed in `inject()` for this step.** The step is a decision checkpoint, not an implementation step.
 
@@ -1767,7 +1767,7 @@ For MVP5, the fallback is an explicitly callable method. Future integration poin
 ### Task 13: Custom shortcut recorder
 
 **Files:**
-- Create: `app/OpenVerb/Input/ShortcutRecorder.swift`
+- [ ] Create: `app/OpenVerb/Input/ShortcutRecorder.swift`
 
 > **Xcode:** Add `ShortcutRecorder.swift` to the **OpenVerb** target in `OpenVerb.xcodeproj`.
 
@@ -1906,8 +1906,8 @@ Section("Hotkey") {
 ### Task 13b: Wire AppSettings hotkey into HotkeyManager
 
 **Files:**
-- Modify: `app/OpenVerb/App/OpenVerbApp.swift`
-- Modify: `app/OpenVerb/Engine/EngineManager.swift` (or HotkeyManager if needed)
+- [ ] Modify: `app/OpenVerb/App/OpenVerbApp.swift`
+- [ ] Modify: `app/OpenVerb/Engine/EngineManager.swift` (or HotkeyManager if needed)
 
 Without this task, the user can record a hotkey in Preferences and it is saved to UserDefaults —
 but (a) on app restart `HotkeyManager` ignores UserDefaults and re-registers `.altSpace`, and
@@ -1965,14 +1965,14 @@ Expected: ALL PASS
 ### Task 14: Engine i18n prompt templates
 
 **Files:**
-- Create: `engine/src/context/templates/en.h`
-- Create: `engine/src/context/templates/ru.h`
-- Create: `engine/src/context/templates/es.h`
-- Create: `engine/src/context/templates/fr.h`
-- Create: `engine/src/context/templates/de.h`
-- Create: `engine/src/context/templates/ja.h`
-- Modify: `engine/src/context/prompt_builder.h`
-- Modify: `engine/src/context/prompt_builder.cpp`
+- [ ] Create: `engine/src/context/templates/en.h`
+- [ ] Create: `engine/src/context/templates/ru.h`
+- [ ] Create: `engine/src/context/templates/es.h`
+- [ ] Create: `engine/src/context/templates/fr.h`
+- [ ] Create: `engine/src/context/templates/de.h`
+- [ ] Create: `engine/src/context/templates/ja.h`
+- [ ] Modify: `engine/src/context/prompt_builder.h`
+- [ ] Modify: `engine/src/context/prompt_builder.cpp`
 
 - [ ] **Step 55: Create English template (extract from current prompt_builder.cpp)**
 
@@ -2252,8 +2252,8 @@ Expected: ALL PASS
 ### Task 15: Homebrew cask + build-release
 
 **Files:**
-- Create: `homebrew/Casks/openverb.rb`
-- Create: `scripts/build-release.sh`
+- [ ] Create: `homebrew/Casks/openverb.rb`
+- [ ] Create: `scripts/build-release.sh`
 
 - [ ] **Step 61: Write Homebrew cask formula**
 
@@ -2435,19 +2435,19 @@ Delete `~/.openverb/`, run OpenVerb.app → verify onboarding wizard launches (p
 - [ ] **Step 67: HUMAN: Preferences test**
 
 Open Preferences from status bar menu → verify:
-- Hotkey section shows current ⌥Space
-- Click recorder → press ⌃Space → hotkey updates
-- Press new hotkey → verify it works for dictation
-- Toggle clipboard OFF → dictate → check engine logs (no clipboard in context JSON)
-- Change language to Russian → dictate → verify Russian system prompt in engine logs
+- [ ] Hotkey section shows current ⌥Space
+- [ ] Click recorder → press ⌃Space → hotkey updates
+- [ ] Press new hotkey → verify it works for dictation
+- [ ] Toggle clipboard OFF → dictate → check engine logs (no clipboard in context JSON)
+- [ ] Change language to Russian → dictate → verify Russian system prompt in engine logs
 
 - [ ] **Step 68: HUMAN: Backend switching test**
 
 In Preferences, switch to "Whisper + Gemma Text" → verify:
-- Loading state shown
-- If Whisper model missing → download prompt appears
-- After switch: dictate → verify result (may differ slightly from Path A)
-- Switch back to Gemma Audio → verify it works
+- [ ] Loading state shown
+- [ ] If Whisper model missing → download prompt appears
+- [ ] After switch: dictate → verify result (may differ slightly from Path A)
+- [ ] Switch back to Gemma Audio → verify it works
 
 - [ ] **Step 69: HUMAN: CGEvent fallback test**
 
@@ -2464,21 +2464,21 @@ brew install --cask openverb
 - [ ] **Step 71: HUMAN: Context awareness end-to-end**
 
 Open VS Code with a file selected → some text highlighted → dictate → verify:
-- Engine logs show `"window":"filename.py"` and `"selected":"the selected text"`
-- Output is code-aware (code style, not prose)
+- [ ] Engine logs show `"window":"filename.py"` and `"selected":"the selected text"`
+- [ ] Output is code-aware (code style, not prose)
 
 Open Mail compose → dictate → verify formal style output.
 
 - [ ] **Step 72: HUMAN: Accessibility denial graceful degradation**
 
 Revoke Accessibility in System Settings → restart app → dictate → verify:
-- App still works (no crash)
-- Context shows `"window":""` and no `"selected"` key
-- Preferences shows hint: "Grant Accessibility for richer context"
+- [ ] App still works (no crash)
+- [ ] Context shows `"window":""` and no `"selected"` key
+- [ ] Preferences shows hint: "Grant Accessibility for richer context"
 
 - [ ] **Step 73: HUMAN: Sleep/wake with new settings**
 
 Change hotkey to ⌃Space in Preferences. Close lid → open → verify:
-- Engine restarts
-- New hotkey (⌃Space) still works post-wake
-- Settings persist across restart
+- [ ] Engine restarts
+- [ ] New hotkey (⌃Space) still works post-wake
+- [ ] Settings persist across restart

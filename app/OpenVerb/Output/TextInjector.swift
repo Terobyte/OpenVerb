@@ -69,7 +69,9 @@ struct TextInjector {
         window.orderOut(nil)
 
         // (4) activate target app
-        targetApp.activate(options: [])
+        if !targetApp.activate(options: []) {
+            logger.warning("TextInjector: activate() failed for \(targetApp.bundleIdentifier ?? targetApp.localizedName ?? "unknown")")
+        }
 
         // (5) 50 ms focus-transfer delay
         // 0 ms works in microbenchmarks but fails intermittently under
