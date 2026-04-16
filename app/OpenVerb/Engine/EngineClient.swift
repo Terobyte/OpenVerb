@@ -457,10 +457,11 @@ final class EngineClient {
         var stopped = phase2MonitorStopped
         phase2Lock.unlock()
 
-        while !stopped && fd >= 0 {
+        while !stopped && ioQueue.sync(execute: { self.fd >= 0 }) {
             // poll(fd, POLLIN, 100 ms) + wakeup pipe
+            let currentFd = ioQueue.sync(execute: { self.fd })
             var pfds = [
-                pollfd(fd: fd,          events: Int16(POLLIN), revents: 0),
+                pollfd(fd: currentFd,   events: Int16(POLLIN), revents: 0),
                 pollfd(fd: wakeReadFD,  events: Int16(POLLIN), revents: 0),
             ]
             let pr = poll(&pfds, 2, 100)
