@@ -95,22 +95,21 @@ final class BugsMDTDDTests: XCTestCase {
     // ACTUAL: preparingSubtitle has public setter allowing external mutation.
     // =======================================================================
 
-    @MainActor
     func testBug7_preparingSubtitleShouldBeReadOnly() {
-        let appState = AppState()
-        
-        let canDirectlyMutate = compileTimeCheckCanMutatePreparingSubtitle(appState)
-        XCTAssertFalse(canDirectlyMutate,
-                       "preparingSubtitle should have private(set), but public setter allows direct mutation")
-    }
-    
-    @MainActor
-    private func compileTimeCheckCanMutatePreparingSubtitle(_ appState: AppState) -> Bool {
-        var canMutate = false
-        if appState.preparingSubtitle != nil {
-            canMutate = true
-            appState.preparingSubtitle = nil
+        // Check source code for private(set) rather than attempting mutation
+        // (which would cause a compile error once the bug is fixed).
+        let path = "OpenVerb/State/AppState.swift"
+        guard let content = try? String(contentsOfFile: path, encoding: .utf8) else {
+            // Try absolute path fallback.
+            let abs = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/app/OpenVerb/State/AppState.swift"
+            guard let c = try? String(contentsOfFile: abs, encoding: .utf8) else {
+                XCTFail("Cannot read AppState.swift"); return
+            }
+            XCTAssertTrue(c.contains("private(set) var preparingSubtitle"),
+                          "preparingSubtitle should be private(set) to prevent external mutation")
+            return
         }
-        return canMutate
+        XCTAssertTrue(content.contains("private(set) var preparingSubtitle"),
+                      "preparingSubtitle should be private(set) to prevent external mutation")
     }
 }

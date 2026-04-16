@@ -502,6 +502,12 @@ final class EngineClient {
                 data = try recvJSONSync(timeoutMs: 100)
             } catch {
                 logger.error("Phase 2 monitor: fatal read error — aborting stream: \(error)")
+                // Bug 17: re-check stopped — disconnect() after stopPhase2Monitor() closes
+                // fd intentionally, causing recvJSONSync to throw. Don't call onError for that.
+                phase2Lock.lock()
+                stopped = phase2MonitorStopped
+                phase2Lock.unlock()
+                if stopped { return }
                 let errMsg = ServerMessage.error(code: "stream_read_error",
                                                  message: "Phase 2 monitor read failed: \(error)")
                 phase2Lock.lock()

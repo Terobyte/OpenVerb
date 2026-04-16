@@ -375,6 +375,14 @@ final class EngineManager: ObservableObject {
         try await ensureRunning()
     }
 
+    /// Restarts the engine with a new backend selection.
+    /// Updates AppSettings.shared.backend then calls ensureRunning() to
+    /// reconnect with the updated configuration.
+    func restartWithBackend(_ backend: BackendType) async {
+        AppSettings.shared.backend = backend
+        try? await ensureRunning()
+    }
+
     func resetCrashCounter() {
         crashCounter = 0
         firstCrashTime = nil

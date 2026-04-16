@@ -4,10 +4,8 @@ import AppKit
 // ---------------------------------------------------------------------------
 // ContextBuilder — assembles the context dictionary for session.start.
 //
-// MVP3 scope: "app" + "language" + "window" (empty placeholder).
-// Accessibility API (window title, selected text) is deferred to MVP4.
-//
-// Protocol abstraction allows unit testing without real NSRunningApplication.
+// Protocol abstraction allows unit testing without real NSRunningApplication
+// or NSPasteboard.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -23,19 +21,43 @@ protocol AppIdentifiable {
 extension NSRunningApplication: AppIdentifiable {}
 
 // ---------------------------------------------------------------------------
+// PasteboardReadable — protocol wrapping NSPasteboard for testability.
+// NSPasteboard conforms via extension below.
+// ---------------------------------------------------------------------------
+
+protocol PasteboardReadable {
+    func string(forType: NSPasteboard.PasteboardType) -> String?
+}
+
+extension NSPasteboard: PasteboardReadable {}
+
+// ---------------------------------------------------------------------------
 // ContextBuilder
 // ---------------------------------------------------------------------------
 
 struct ContextBuilder {
+
+    // Maximum UTF-8 byte length for the clipboard context field.
+    static let clipboardByteLimit = 10_240
 
     /// Builds the context dictionary for the current session.
     ///
     /// - Parameters:
     ///   - targetApp: The app that was frontmost when ⌥Space was pressed.
     ///                Pass `nil` if no frontmost app could be determined.
+    ///   - accessibilityApp: App to read accessibility info from (window title,
+    ///                       selected text). Defaults to nil (no accessibility).
+    ///   - pasteboard: Pasteboard to read clipboard from. Defaults to
+    ///                 `NSPasteboard.general`.
+    ///   - includeClipboard: Whether to include clipboard content. Default true.
+    ///   - languageOverride: If non-nil, overrides locale language detection.
     /// - Returns: `[String: String]` suitable for `SessionStart.context`.
     static func build(
-        targetApp: AppIdentifiable?
+        targetApp: AppIdentifiable?,
+        accessibilityApp: NSRunningApplication? = nil,
+        pasteboard: PasteboardReadable = NSPasteboard.general,
+        includeClipboard: Bool = true,
+        languageOverride: String? = nil
     ) async -> [String: String] {
         var context: [String: String] = [:]
 
@@ -48,17 +70,40 @@ struct ContextBuilder {
             context["app"] = "unknown"
         }
 
-        // "language" — BCP-47 language code from current locale.
-        context["language"] = Locale.current.language.languageCode?.identifier ?? "en"
+        // "language" — BCP-47 language code from current locale, or override.
+        if let override = languageOverride, !override.isEmpty {
+            context["language"] = override
+        } else {
+            context["language"] = Locale.current.language.languageCode?.identifier ?? "en"
+        }
 
         // "window" — always empty string in MVP3 (Accessibility API deferred to MVP4).
-        // The engine uses this value to select formatting style; empty string signals
-        // "no window title available, apply default style."
         context["window"] = ""
+
+        // "clipboard" — read from pasteboard if enabled; omit if nil or empty.
+        if includeClipboard,
+           let clip = pasteboard.string(forType: .string),
+           !clip.isEmpty {
+            context["clipboard"] = truncateToUTF8Bytes(clip, limit: clipboardByteLimit)
+        }
 
         // "selected" is set from Accessibility API — deferred to MVP4.
 
         return context
     }
 
+    /// Truncates `s` to at most `limit` UTF-8 bytes without splitting
+    /// multi-byte characters (including surrogate pairs / emoji).
+    static func truncateToUTF8Bytes(_ s: String, limit: Int) -> String {
+        guard s.utf8.count > limit else { return s }
+        var count = 0
+        var result = ""
+        for char in s {
+            let charBytes = String(char).utf8.count
+            if count + charBytes > limit { break }
+            result.append(char)
+            count += charBytes
+        }
+        return result
+    }
 }
