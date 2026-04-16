@@ -32,6 +32,10 @@
 		B3A1E2F3D4C5B6A7E8F9C00E /* CommandExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9A06E /* CommandExecutor.swift */; };
 		B3A1E2F3D4C5B6A7E8F9C020 /* AppSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9A068 /* AppSettings.swift */; };
 		B3A1E2F3D4C5B6A7E8F9C021 /* PreferencesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9A069 /* PreferencesView.swift */; };
+		B3A1E2F3D4C5B6A7E8F9C022 /* AccessibilityReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9A06A /* AccessibilityReader.swift */; };
+		B3A1E2F3D4C5B6A7E8F9C023 /* ShortcutRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9A06B /* ShortcutRecorder.swift */; };
+		B3A1E2F3D4C5B6A7E8F9C024 /* ModelDownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9A06C /* ModelDownloader.swift */; };
+		B3A1E2F3D4C5B6A7E8F9C025 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9A06D /* OnboardingView.swift */; };
 		B3A1E2F3D4C5B6A7F0000001 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7F0000101 /* AVFoundation.framework */; };
 		B3A1E2F3D4C5B6A7F0000002 /* Carbon.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7F0000102 /* Carbon.framework */; };
 		B3A1E2F3D4C5B6A7F0000003 /* ApplicationServices.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7F0000103 /* ApplicationServices.framework */; };
@@ -80,9 +84,13 @@
 		B3A1E2F3D4C5B6A7E8F9A05D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9A05E /* OpenVerb.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = OpenVerb.entitlements; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9A05F /* TextInjector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextInjector.swift; sourceTree = "<group>"; };
-		B3A1E2F3D4C5B6A7E8F9A06E /* CommandExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandExecutor.swift; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9A068 /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettings.swift; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9A069 /* PreferencesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreferencesView.swift; sourceTree = "<group>"; };
+		B3A1E2F3D4C5B6A7E8F9A06A /* AccessibilityReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityReader.swift; sourceTree = "<group>"; };
+		B3A1E2F3D4C5B6A7E8F9A06B /* ShortcutRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShortcutRecorder.swift; sourceTree = "<group>"; };
+		B3A1E2F3D4C5B6A7E8F9A06C /* ModelDownloader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelDownloader.swift; sourceTree = "<group>"; };
+		B3A1E2F3D4C5B6A7E8F9A06D /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
+		B3A1E2F3D4C5B6A7E8F9A06E /* CommandExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandExecutor.swift; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9A07A /* openverb-engine */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.executable"; name = "openverb-engine"; path = "../engine/build/openverb-engine"; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9B050 /* AppStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStateTests.swift; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9B051 /* ContextBuilderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContextBuilderTests.swift; sourceTree = "<group>"; };
@@ -148,6 +156,7 @@
 				B3A1E2F3D4C5B6A7E8F9D005 /* UI */,
 				B3A1E2F3D4C5B6A7E8F9D007 /* Output */,
 				B3A1E2F3D4C5B6A7E8F9D008 /* Settings */,
+				B3A1E2F3D4C5B6A7E8F9D009 /* Model */,
 				B3A1E2F3D4C5B6A7E8F9D006 /* Resources */,
 			);
 			path = OpenVerb;
@@ -199,6 +208,7 @@
 			children = (
 				B3A1E2F3D4C5B6A7E8F9A056 /* AudioSession.swift */,
 				B3A1E2F3D4C5B6A7E8F9A057 /* HotkeyManager.swift */,
+				B3A1E2F3D4C5B6A7E8F9A06B /* ShortcutRecorder.swift */,
 			);
 			path = Input;
 			sourceTree = "<group>";
@@ -207,6 +217,7 @@
 			isa = PBXGroup;
 			children = (
 				B3A1E2F3D4C5B6A7E8F9A058 /* ContextBuilder.swift */,
+				B3A1E2F3D4C5B6A7E8F9A06A /* AccessibilityReader.swift */,
 			);
 			path = Context;
 			sourceTree = "<group>";
@@ -219,6 +230,7 @@
 				B3A1E2F3D4C5B6A7E8F9A05B /* StatusBarItem.swift */,
 				B3A1E2F3D4C5B6A7E8F9A05C /* WaveformView.swift */,
 				B3A1E2F3D4C5B6A7E8F9A069 /* PreferencesView.swift */,
+				B3A1E2F3D4C5B6A7E8F9A06D /* OnboardingView.swift */,
 			);
 			path = UI;
 			sourceTree = "<group>";
@@ -247,6 +259,14 @@
 				B3A1E2F3D4C5B6A7E8F9A068 /* AppSettings.swift */,
 			);
 			path = Settings;
+			sourceTree = "<group>";
+		};
+		B3A1E2F3D4C5B6A7E8F9D009 /* Model */ = {
+			isa = PBXGroup;
+			children = (
+				B3A1E2F3D4C5B6A7E8F9A06C /* ModelDownloader.swift */,
+			);
+			path = Model;
 			sourceTree = "<group>";
 		};
 		B3A1E2F3D4C5B6A7F0000200 /* Frameworks */ = {
@@ -380,6 +400,10 @@
 				B3A1E2F3D4C5B6A7E8F9C00E /* CommandExecutor.swift in Sources */,
 				B3A1E2F3D4C5B6A7E8F9C020 /* AppSettings.swift in Sources */,
 				B3A1E2F3D4C5B6A7E8F9C021 /* PreferencesView.swift in Sources */,
+				B3A1E2F3D4C5B6A7E8F9C022 /* AccessibilityReader.swift in Sources */,
+				B3A1E2F3D4C5B6A7E8F9C023 /* ShortcutRecorder.swift in Sources */,
+				B3A1E2F3D4C5B6A7E8F9C024 /* ModelDownloader.swift in Sources */,
+				B3A1E2F3D4C5B6A7E8F9C025 /* OnboardingView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -414,6 +438,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = OpenVerb/Resources/OpenVerb.entitlements;
 				CODE_SIGN_IDENTITY = "-";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
@@ -440,6 +465,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = OpenVerb/Resources/OpenVerb.entitlements;
 				CODE_SIGN_IDENTITY = "-";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
@@ -467,6 +493,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = G568D6B8S9;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				MARKETING_VERSION = 1.0;
@@ -484,6 +511,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = G568D6B8S9;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				MARKETING_VERSION = 1.0;
