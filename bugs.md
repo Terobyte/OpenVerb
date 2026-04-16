@@ -215,7 +215,7 @@ The `recvLock` (NSLock) only protects `recvBuffer` mutations. The `poll()` and `
 ### Bug 29 — `ModelDownloader.destinationURL` hardcoded, ignores `AppSettings.modelDirectory`
 - **File:** `app/OpenVerb/Model/ModelDownloader.swift:60-64`
 - **Severity:** Medium
-- **Status:** Open
+- **Status:** Fixed
 
 Related to Bug 23 (EngineManager snapshot) but distinct: `ModelDownloader.init()` always constructs `destinationURL` from `~/.openverb/models/` without reading `AppSettings.shared.modelDirectory`. If the user changes the model directory in Preferences and then triggers a re-download (e.g. deletes the model and relaunches → onboarding), the download writes to `~/.openverb/models/` while `EngineManager` looks at the user's chosen directory. The model is downloaded but not found on the next launch.
 

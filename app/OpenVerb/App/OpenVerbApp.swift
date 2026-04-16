@@ -52,15 +52,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Long-lived state objects (all @MainActor)
     // -----------------------------------------------------------------------
 
-    private var appState:       AppState!
-    private var engineManager:  EngineManager!
-    private var hotkeyManager:  HotkeyManager!
-    private var audioSession:   AudioSession!
-    private var waveformVM:     WaveformViewModel!
-    private var processingVM:   ProcessingViewModel!
+    private var appState:        AppState!
+    private var engineManager:   EngineManager!
+    private var hotkeyManager:   HotkeyManager!
+    private var audioSession:    AudioSession!
+    private var waveformVM:      WaveformViewModel!
+    private var processingVM:    ProcessingViewModel!
     private var recordingWindow: RecordingWindow!
-    private var statusBar:      StatusBarItem!
-    private var appSettings:    AppSettings!
+    private var statusBar:       StatusBarItem!
+    private var appSettings:     AppSettings!
+    private var onboardingWindow: NSWindow?
 
     // -----------------------------------------------------------------------
     // Combine subscribers
@@ -68,8 +69,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var cancellables = Set<AnyCancellable>()
 
+    /// Bug 16: bumped on every stopRecording() and abortAndRestart(). Captured
+    /// by each drainResult Task at spawn time; a stale drain whose captured
+    /// generation no longer matches self.drainGeneration returns silently
+    /// instead of tearing down the (new) session. MainActor-isolated — no lock.
+    private var drainGeneration: UInt64 = 0
+
     // -----------------------------------------------------------------------
-    // applicationDidFinishLaunching — startup orchestration (steps 22–28).
+    // applicationDidFinishLaunching — initialise objects then branch:
+    //   first launch (no model) → showOnboarding()
+    //   normal launch           → normalStartup()
     // -----------------------------------------------------------------------
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -98,6 +107,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             processingVM: processingVM
         )
 
+        // First-launch detection: if no .gguf model exists, run onboarding
+        // wizard instead of the normal startup path. Onboarding calls
+        // normalStartup() via its onComplete closure when the user finishes.
+        if !engineManager.ggufModelExists() {
+            showOnboarding()
+            return
+        }
+
+        normalStartup()
+    }
+
+    // -----------------------------------------------------------------------
+    // normalStartup — steps 22–28, extracted so it can be called after
+    // onboarding completes on a fresh install.
+    // -----------------------------------------------------------------------
+
+    private func normalStartup() {
         // ---- Step 22: Accessibility permission check ----
         // Required for CGEvent ⌘V posting in TextInjector and for CGEvent tap.
         // AXIsProcessTrustedWithOptions with prompt:true registers the *current*
@@ -123,9 +149,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // ---- Step 25: Register global ⌥Space hotkey ----
-        // HotkeyManager shows its own alerts for permission failures
-        // and hotkey conflicts.
+        // ---- Step 25: Register global hotkey ----
+        // Load persisted hotkey from AppSettings before register() so the
+        // user's custom key survives an app restart.
+        hotkeyManager.configure(
+            keyCode: appSettings.hotkeyKeyCode,
+            modifiers: appSettings.hotkeyModifiers
+        )
         hotkeyManager.onToggleRecording = { [weak self] in
             self?.handleHotkeyToggle()
         }
@@ -137,6 +167,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         hotkeyManager.register()
 
+        // Live-reload the hotkey tap whenever the user changes it in Preferences.
+        // combineLatest ensures both keyCode and modifiers are applied atomically.
+        appSettings.$hotkeyKeyCode
+            .combineLatest(appSettings.$hotkeyModifiers)
+            .dropFirst()  // skip the initial emit (already applied above)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] keyCode, modifiers in
+                self?.hotkeyManager.configure(keyCode: keyCode, modifiers: modifiers)
+            }
+            .store(in: &cancellables)
+
         // ---- Step 26: Bridge engine errors to AppState ----
         // onError fires from the Phase 2 monitor for errors detected mid-recording
         // (e.g. engine crash, dropped connection).  We must both update UI and trigger
@@ -146,6 +187,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         engineManager.engineClient.onError = { [weak self] msg in
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                // Bug 17 receive-side guard: if abort+restart moved us to .preparing,
+                // or handleCancel moved us to .idle, a stale onError from the
+                // Phase 2 monitor must not tear down the (new) session. Only
+                // .recording / .inferring indicate a live session that should react.
+                switch self.appState.state {
+                case .recording, .inferring:
+                    break
+                default:
+                    return
+                }
                 // Tear down the live recording session before transitioning to
                 // the error state — mirrors handleCancel() and drainResult() error
                 // paths for consistent cleanup regardless of how the error arrived.
@@ -202,6 +253,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         logger.info("OpenVerb launched")
+    }
+
+    // -----------------------------------------------------------------------
+    // showOnboarding — presents first-launch wizard.
+    // Called when no .gguf model is found on startup.
+    // -----------------------------------------------------------------------
+
+    private func showOnboarding() {
+        let customDir = appSettings.modelDirectory
+        let modelURL = customDir.isEmpty ? nil : URL(fileURLWithPath: customDir)
+        let downloader = ModelDownloader(modelDirectory: modelURL)
+        let onboardingView = OnboardingView(downloader: downloader) { [weak self] in
+            self?.onboardingWindow?.close()
+            self?.onboardingWindow = nil
+            self?.normalStartup()
+        }
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 360),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "OpenVerb Setup"
+        window.contentView = NSHostingView(rootView: onboardingView)
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        if #available(macOS 14.0, *) { NSApp.activate() }
+        else { NSApp.activate(ignoringOtherApps: true) }
+        onboardingWindow = window
     }
 
     // -----------------------------------------------------------------------
@@ -345,9 +425,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // ---- Step 49: Drain progress / result in background Task ----
+        // Bug 16: capture generation so a stale drain from a previous session
+        // (e.g. abort+restart path) cannot tear down this session's UI when
+        // its receiveMessage() continuation finally resumes with an error.
+        drainGeneration &+= 1
+        let gen = drainGeneration
         Task { [weak self] in
             guard let self else { return }
-            await drainResult()
+            await drainResult(generation: gen)
         }
     }
 
@@ -365,6 +450,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // #30: stop Phase 2 monitor before disconnect() so the monitor does not
         // detect the fd close as POLLHUP and trigger spurious crash recovery.
         engineManager.engineClient.stopPhase2Monitor()
+        // Bug 16: invalidate any in-flight drainResult from the aborted session
+        // BEFORE disconnect() closes fd — the stale drain's receiveMessage will
+        // throw momentarily, and its catch block must see the bumped generation.
+        drainGeneration &+= 1
         engineManager.disconnect()
         // INFERRING→PREPARING: AppState sets preparingSubtitle = "Reconnecting..."
         // immediately inside applyEntryEffects — no external mutation needed here.
@@ -546,14 +635,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // leaves .inferring (e.g. handleCancel called concurrently).
     // -----------------------------------------------------------------------
 
-    private func drainResult() async {
-        while appState.state == .inferring {
+    private func drainResult(generation: UInt64) async {
+        while appState.state == .inferring && generation == drainGeneration {
             let msg: ServerMessage
             do {
                 msg = try await engineManager.engineClient.receiveMessage(timeoutMs: 180_000)
             } catch {
                 logger.error("drainResult: receive error: \(error)")
-                // Bug 16: only tear down if this session is still active — abort+restart
+                // Bug 16: a stale drain from a previous session (whose abortAndRestart()
+                // or stopRecording() has already bumped drainGeneration) must return
+                // without touching UI — the new session is owned by a newer generation.
+                guard generation == drainGeneration else { return }
+                // Only tear down if this session is still active — abort+restart
                 // moves to .preparing before this catch fires, so we must not clobber it.
                 if appState.state == .inferring {
                     recordingWindow.hide()

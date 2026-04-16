@@ -57,9 +57,14 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
     // Init
     // -----------------------------------------------------------------------
 
-    override init() {
-        let modelDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".openverb/models")
+    init(modelDirectory: URL? = nil) {
+        let modelDir: URL
+        if let dir = modelDirectory {
+            modelDir = dir
+        } else {
+            modelDir = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".openverb/models")
+        }
         self.destinationURL = modelDir.appendingPathComponent("gemma-4-E2B-it-Q4_K_M.gguf")
         super.init()
     }
