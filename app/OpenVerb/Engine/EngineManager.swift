@@ -100,7 +100,12 @@ final class EngineManager: ObservableObject {
         self.socketPath = socketPath
         self.engineClient = client
         self.enginePath = enginePath ?? EngineManager.resolveEnginePath()
-        self.modelDirPath = modelDirOverride ?? Constants.DEFAULT_MODEL_DIR
+        // Bug 18 fix: honour the user's AppSettings.modelDirectory preference
+        // when no explicit override is passed.  Fall back to the compiled-in
+        // default only if both the override and the setting are empty.
+        let settingsDir = AppSettings.shared.modelDirectory
+        self.modelDirPath = modelDirOverride
+            ?? (settingsDir.isEmpty ? Constants.DEFAULT_MODEL_DIR : settingsDir)
         self.fileManager = fileManager
         registerSleepWakeNotifications()
     }
@@ -234,7 +239,7 @@ final class EngineManager: ObservableObject {
         // engine is alive but unresponsive (ping failed), replacing self.process
         // without SIGTERM leaks an orphan process consuming memory/GPU.
         sendSIGTERM()
-        waitForProcessExit(timeout: 0.5)
+        Self.waitForProcessExit(process, timeout: 0.5)
 
         // Remove stale socket.
         try? FileManager.default.removeItem(atPath: socketPath)
@@ -309,7 +314,12 @@ final class EngineManager: ObservableObject {
         // keeps running.  Without SIGTERM the engine survives app quit / sleep and
         // breaks the lifecycle contract (wake restart, socket reuse, etc.).
         sendSIGTERM()
-        waitForProcessExit(timeout: 0.5)
+        // Bug 8 fix: don't block the MainActor spinning RunLoop for up to 500ms.
+        // SIGTERM already went out; the actual reap can happen off the main thread.
+        let procRef = process
+        Task.detached {
+            Self.waitForProcessExit(procRef, timeout: 0.5)
+        }
         status = .stopped
     }
 
@@ -318,8 +328,8 @@ final class EngineManager: ObservableObject {
         kill(proc.processIdentifier, SIGTERM)
     }
 
-    private func waitForProcessExit(timeout: TimeInterval) {
-        guard let proc = process else { return }
+    nonisolated private static func waitForProcessExit(_ proc: Process?, timeout: TimeInterval) {
+        guard let proc = proc else { return }
         let deadline = Date().addingTimeInterval(timeout)
         while proc.isRunning && Date() < deadline {
             RunLoop.current.run(until: Date().addingTimeInterval(0.05))
