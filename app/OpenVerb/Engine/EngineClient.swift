@@ -150,6 +150,11 @@ final class EngineClient {
             if self.wakeWrite >= 0 {
                 var b: UInt8 = 0
                 _ = Darwin.write(self.wakeWrite, &b, 1)
+                // Bug 12 fix: clear the wake fds only AFTER the signal byte was
+                // delivered.  Previously stopPhase2Monitor() cleared them first,
+                // causing disconnect() to see wakeWrite < 0 and skip the signal.
+                self.wakeWrite = -1
+                self.wakeRead  = -1
             }
             guard self.fd >= 0 else { return }
             close(self.fd)
@@ -590,9 +595,13 @@ final class EngineClient {
         // phase2MonitorStopped=true prevents it from processing further data.
         // The task exits within ~200 ms (one poll + one recvJSONSync cycle).
         // Pipe fds are closed by the task's defer in startPhase2Monitor().
-        // Clear instance vars so disconnect() / next startPhase2Monitor() are clean.
-        wakeRead  = -1
-        wakeWrite = -1
+        //
+        // Bug 12 fix: do NOT clear wakeRead / wakeWrite here.  disconnect()
+        // may run right after stopPhase2Monitor() and also needs to write a
+        // wakeup byte; clearing the fd to -1 here would make disconnect()
+        // skip its signal and leave the monitor blocked in poll() for up to
+        // 100 ms.  disconnect() now owns the fd reset after its own wakeup
+        // write completes.
         phase2MonitorTask?.cancel()
         phase2MonitorTask = nil
     }
