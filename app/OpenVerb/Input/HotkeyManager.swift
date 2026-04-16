@@ -58,6 +58,11 @@ final class HotkeyManager {
 
     private var hotKey: HotKey = .altSpace
 
+    // Bug 18 fix: read user-configured hotkey from AppSettings instead of
+    // hardcoding ⌥Space.  Applied on register() so the manager picks up the
+    // latest preference each time the tap is (re)installed.
+    private let settings = AppSettings.shared
+
     // -----------------------------------------------------------------------
     // Private — CGEvent tap state
     // -----------------------------------------------------------------------
@@ -85,6 +90,11 @@ final class HotkeyManager {
     // -----------------------------------------------------------------------
 
     func register() {
+        // Bug 18 fix: pull the user-configured hotkey from AppSettings so the
+        // preference panel actually has an effect.  Falls back to ⌥Space if the
+        // stored values match the default.
+        hotKey = HotKey(virtualKey: settings.hotkeyKeyCode,
+                        flags: settings.hotkeyModifiers)
         installEventTap(key: hotKey)
         // Always start the watchdog — it retries tap installation if permissions
         // are granted after startup (user may grant without relaunching the app).
