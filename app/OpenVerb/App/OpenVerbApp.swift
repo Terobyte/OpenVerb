@@ -60,6 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var processingVM:   ProcessingViewModel!
     private var recordingWindow: RecordingWindow!
     private var statusBar:      StatusBarItem!
+    private var appSettings:    AppSettings!
 
     // -----------------------------------------------------------------------
     // Combine subscribers
@@ -87,6 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         audioSession  = AudioSession()
         waveformVM    = WaveformViewModel()
         processingVM  = ProcessingViewModel()
+        appSettings   = AppSettings.shared
 
         // RecordingWindow needs the view-model references — created first
         // so it's ready before the first ⌥Space press.
@@ -475,7 +477,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
 
-            let context = await ContextBuilder.build(targetApp: appState.targetApp)
+            let context = await ContextBuilder.build(
+                targetApp: appState.targetApp,
+                accessibilityApp: appState.targetApp,
+                includeClipboard: appSettings.includeClipboard,
+                languageOverride: appSettings.language
+            )
             try await engineManager.engineClient.startSession(context: context)
 
             // Wait for session.ready — engine signals model is loaded and
@@ -546,23 +553,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 msg = try await engineManager.engineClient.receiveMessage(timeoutMs: 180_000)
             } catch {
                 logger.error("drainResult: receive error: \(error)")
-                recordingWindow.hide()
-                audioSession.stop()
-                // #33: remove Escape monitors on error path — monitors were left
-                // registered, staying active indefinitely after the session failed.
-                hotkeyManager.removeEscapeMonitors()
+                // Bug 16: only tear down if this session is still active — abort+restart
+                // moves to .preparing before this catch fires, so we must not clobber it.
                 if appState.state == .inferring {
+                    recordingWindow.hide()
+                    audioSession.stop()
+                    // #33: remove Escape monitors on error path — monitors were left
+                    // registered, staying active indefinitely after the session failed.
+                    hotkeyManager.removeEscapeMonitors()
                     appState.transition(to: .error("Connection lost"))
                     NSSound(named: "Basso")?.play()
-                }
-                // Invoke crash recovery (exponential backoff) so the engine is
-                // ready for the next session without a manual restart.
-                Task { [weak self] in
-                    guard let self else { return }
-                    do {
-                        try await engineManager.handleCrash()
-                    } catch {
-                        logger.error("Crash recovery failed after connection loss: \(error)")
+                    // Invoke crash recovery (exponential backoff) so the engine is
+                    // ready for the next session without a manual restart.
+                    Task { [weak self] in
+                        guard let self else { return }
+                        do {
+                            try await self.engineManager.handleCrash()
+                        } catch {
+                            logger.error("Crash recovery failed after drainResult error: \(error)")
+                        }
                     }
                 }
                 return
