@@ -123,8 +123,12 @@ struct RecordingContentView: View {
                             .transition(.opacity)
                     }
                 }
-                .animation(.easeInOut(duration: 0.15), value: appState.state == .recording)
-                .animation(.easeInOut(duration: 0.15), value: appState.state == .inferring)
+                // Bug 11 fix: sequential crossfade instead of simultaneous to
+                // eliminate the visible gap where both views are mid-opacity.
+                // Outgoing view fades out first (easeOut 0.1 s), then the
+                // incoming view fades in with a 0.1 s delay (easeIn 0.1 s).
+                .animation(.easeOut(duration: 0.1), value: appState.state == .recording)
+                .animation(.easeIn(duration: 0.1).delay(0.1), value: appState.state == .inferring)
 
                 if let subtitle = appState.preparingSubtitle {
                     Text(subtitle)
