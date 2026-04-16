@@ -277,10 +277,18 @@ final class EngineManager: ObservableObject {
     // launchEngine — spawn openverb-engine --listen
     // -----------------------------------------------------------------------
 
+    /// Backend override set by restartWithBackend(_:). Passed as --backend arg
+    /// to the engine subprocess on the next launchEngine() call.
+    var backendOverride: String?
+
     private func launchEngine() async throws {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: enginePath)
-        proc.arguments = ["--listen", "--socket", socketPath]
+        var args = ["--listen", "--socket", socketPath]
+        if let backend = backendOverride {
+            args += ["--backend", backend]
+        }
+        proc.arguments = args
 
         // Drain stderr asynchronously to prevent pipe-buffer deadlock.
         let pipe = Pipe()
@@ -386,10 +394,20 @@ final class EngineManager: ObservableObject {
     }
 
     /// Restarts the engine with a new backend selection.
-    /// Updates AppSettings.shared.backend then calls ensureRunning() to
-    /// reconnect with the updated configuration.
+    /// Sets backendOverride so launchEngine() passes --backend to the subprocess,
+    /// then shuts down and restarts via ensureRunning().
     func restartWithBackend(_ backend: BackendType) async {
         AppSettings.shared.backend = backend
+        backendOverride = backend.rawValue
+        status = .starting
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global().async {
+                DispatchQueue.main.sync { [weak self] in
+                    self?.shutdown()
+                }
+                continuation.resume()
+            }
+        }
         try? await ensureRunning()
     }
 
