@@ -30,6 +30,8 @@
 		B3A1E2F3D4C5B6A7E8F9C00C /* WaveformView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9A05C /* WaveformView.swift */; };
 		B3A1E2F3D4C5B6A7E8F9C00D /* TextInjector.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9A05F /* TextInjector.swift */; };
 		B3A1E2F3D4C5B6A7E8F9C00E /* CommandExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9A06E /* CommandExecutor.swift */; };
+		B3A1E2F3D4C5B6A7E8F9C020 /* AppSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9A068 /* AppSettings.swift */; };
+		B3A1E2F3D4C5B6A7E8F9C021 /* PreferencesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9A069 /* PreferencesView.swift */; };
 		B3A1E2F3D4C5B6A7F0000001 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7F0000101 /* AVFoundation.framework */; };
 		B3A1E2F3D4C5B6A7F0000002 /* Carbon.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7F0000102 /* Carbon.framework */; };
 		B3A1E2F3D4C5B6A7F0000003 /* ApplicationServices.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7F0000103 /* ApplicationServices.framework */; };
@@ -79,6 +81,8 @@
 		B3A1E2F3D4C5B6A7E8F9A05E /* OpenVerb.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = OpenVerb.entitlements; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9A05F /* TextInjector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextInjector.swift; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9A06E /* CommandExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandExecutor.swift; sourceTree = "<group>"; };
+		B3A1E2F3D4C5B6A7E8F9A068 /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettings.swift; sourceTree = "<group>"; };
+		B3A1E2F3D4C5B6A7E8F9A069 /* PreferencesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreferencesView.swift; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9A07A /* openverb-engine */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.executable"; name = "openverb-engine"; path = "../engine/build/openverb-engine"; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9B050 /* AppStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStateTests.swift; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9B051 /* ContextBuilderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContextBuilderTests.swift; sourceTree = "<group>"; };
@@ -143,6 +147,7 @@
 				B3A1E2F3D4C5B6A7E8F9D004 /* Context */,
 				B3A1E2F3D4C5B6A7E8F9D005 /* UI */,
 				B3A1E2F3D4C5B6A7E8F9D007 /* Output */,
+				B3A1E2F3D4C5B6A7E8F9D008 /* Settings */,
 				B3A1E2F3D4C5B6A7E8F9D006 /* Resources */,
 			);
 			path = OpenVerb;
@@ -213,6 +218,7 @@
 				B3A1E2F3D4C5B6A7E8F9A05A /* RecordingWindow.swift */,
 				B3A1E2F3D4C5B6A7E8F9A05B /* StatusBarItem.swift */,
 				B3A1E2F3D4C5B6A7E8F9A05C /* WaveformView.swift */,
+				B3A1E2F3D4C5B6A7E8F9A069 /* PreferencesView.swift */,
 			);
 			path = UI;
 			sourceTree = "<group>";
@@ -233,6 +239,14 @@
 				B3A1E2F3D4C5B6A7E8F9A06E /* CommandExecutor.swift */,
 			);
 			path = Output;
+			sourceTree = "<group>";
+		};
+		B3A1E2F3D4C5B6A7E8F9D008 /* Settings */ = {
+			isa = PBXGroup;
+			children = (
+				B3A1E2F3D4C5B6A7E8F9A068 /* AppSettings.swift */,
+			);
+			path = Settings;
 			sourceTree = "<group>";
 		};
 		B3A1E2F3D4C5B6A7F0000200 /* Frameworks */ = {
@@ -364,6 +378,8 @@
 				B3A1E2F3D4C5B6A7E8F9C00C /* WaveformView.swift in Sources */,
 				B3A1E2F3D4C5B6A7E8F9C00D /* TextInjector.swift in Sources */,
 				B3A1E2F3D4C5B6A7E8F9C00E /* CommandExecutor.swift in Sources */,
+				B3A1E2F3D4C5B6A7E8F9C020 /* AppSettings.swift in Sources */,
+				B3A1E2F3D4C5B6A7E8F9C021 /* PreferencesView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

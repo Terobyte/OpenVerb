@@ -12,10 +12,10 @@ import os
 //
 // Menu:
 //   About OpenVerb
+//   Preferences…
 //   Engine status (dynamic label, disabled)
 //   ─────────────
 //   Quit OpenVerb
-//   Preferences menu item deferred to MVP5.
 // ---------------------------------------------------------------------------
 
 private let logger = Logger(subsystem: "io.openverb.app", category: "StatusBarItem")
@@ -31,6 +31,7 @@ final class StatusBarItem {
     private var engineObserver: Any?
     private var pulseTimer: Timer?
     private var pulsePhase: Bool = false
+    private weak var engineManager: EngineManager?
 
     // -----------------------------------------------------------------------
     // Init
@@ -38,6 +39,7 @@ final class StatusBarItem {
 
     init(appState: AppState, engineManager: EngineManager) {
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        self.engineManager = engineManager
         buildMenu()
         applyIcon(for: appState.state)
     }
@@ -156,6 +158,14 @@ final class StatusBarItem {
         aboutItem.target = self
         menu.addItem(aboutItem)
 
+        let prefsItem = NSMenuItem(
+            title: "Preferences\u{2026}",
+            action: #selector(showPreferences),
+            keyEquivalent: ","
+        )
+        prefsItem.target = self
+        menu.addItem(prefsItem)
+
         menu.addItem(engineStatusMenuItem())
         menu.addItem(.separator())
 
@@ -171,7 +181,7 @@ final class StatusBarItem {
 
     private func engineStatusMenuItem() -> NSMenuItem {
         let item = NSMenuItem(title: "Engine: stopped", action: nil, keyEquivalent: "")
-        item.tag = 1   // Used to find and update this item later.
+        item.tag = 1
         item.isEnabled = false
         return item
     }
@@ -193,5 +203,9 @@ final class StatusBarItem {
 
     @objc private func showAbout() {
         NSApp.orderFrontStandardAboutPanel(nil)
+    }
+
+    @objc private func showPreferences() {
+        PreferencesWindowController.shared.open(engineManager: engineManager)
     }
 }
