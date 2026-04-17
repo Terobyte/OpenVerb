@@ -24,6 +24,7 @@ void VadScanner::push_frame(const int16_t* samples, int num_samples) {
     } else if (in_speech_ && silence_ms_ >= SILENCE_BOUNDARY_MS) {
         if (buffer_ms_ - silence_ms_ >= MIN_CHUNK_MS) {
             maybe_emit_chunk(false);
+            in_speech_ = false;  // utterance ended at silence boundary; don't accumulate trailing silence
         }
     }
 }
