@@ -13,9 +13,6 @@
 /// Number of audio channels (mono)
 #define CHANNELS             1
 
-/// Maximum recording length accepted in --file mode (seconds)
-#define MAX_RECORDING_SECS   300
-
 /// Silence duration that triggers end-of-utterance in VAD (milliseconds)
 #define VAD_SILENCE_MS       500
 
@@ -58,6 +55,25 @@
 #define QUEUE_STATUS_HEARTBEAT_MS 500
 #define DEFAULT_CHUNK_INFER_SPEED 0.5
 #define INFER_SPEED_EWMA_ALPHA    0.3
+
+// ---------------------------------------------------------------------------
+// Polish LLM cleanup pass constants
+// ---------------------------------------------------------------------------
+
+/// Token budget reserved for the surrounding-context in the polish prompt.
+#define POLISH_CONTEXT_TOKENS     256
+
+/// Maximum tokens the polish pass may generate (cleaned transcript output).
+#define POLISH_MAX_TOKENS         512
+
+/// System prompt used by the polish pass (Gemma Eloquent cleanup style).
+#define POLISH_SYSTEM_PROMPT      \
+    "You are a precise transcript editor. Remove filler words (\"эээ\", \"ну\", "  \
+    "\"like\", \"um\", \"uh\"), fix mid-sentence restarts by keeping the last "    \
+    "clean attempt, and add terminal punctuation. Output ONLY the cleaned text."
+
+/// Instruction prefix injected before the raw transcript in the polish prompt.
+#define POLISH_INSTRUCTION_PREFIX "Clean this transcript: "
 
 // ---------------------------------------------------------------------------
 // User-facing defaults (DEFAULT_ prefix — can vary per workflow / user pref)

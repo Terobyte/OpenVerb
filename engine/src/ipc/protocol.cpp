@@ -19,7 +19,6 @@ const char* error_code_string(ErrorCode code) {
         case ErrorCode::model_load_failed: return "model_load_failed";
         case ErrorCode::session_limit:     return "session_limit";
         case ErrorCode::timeout:           return "timeout";
-        case ErrorCode::duration_exceeded: return "duration_exceeded";
     }
     return "unknown";
 }
@@ -237,5 +236,18 @@ void send_queue_status(int fd, int pending, int in_flight, int eta_ms) {
     msg["pending"]   = pending;
     msg["in_flight"] = in_flight;
     msg["eta_ms"]    = eta_ms;
+    send_json(fd, msg);
+}
+
+void send_polish_started(int fd) {
+    nlohmann::json msg;
+    msg["type"] = "polish_started";
+    send_json(fd, msg);
+}
+
+void send_polished_result(int fd, const std::string& text) {
+    nlohmann::json msg;
+    msg["type"] = "polished_result";
+    msg["text"] = text;
     send_json(fd, msg);
 }

@@ -17,6 +17,7 @@
 
 #include "backend/backend.h"
 #include "config/config.h"
+#include "context/context.h"
 #include "ipc/progress.h"
 
 #include <atomic>
@@ -53,6 +54,27 @@ public:
         const std::string&          context_json,
         const std::atomic<bool>&    abort_flag,
         ProgressQueue&              progress_queue);
+
+    // Overload that accepts a typed Context struct instead of a raw JSON string.
+    // Existing callsites using the string overload compile unchanged.
+    InferenceResult process_stream(
+        const std::vector<int16_t>& pcm,
+        int                         sample_rate,
+        const Context&              ctx,
+        const std::atomic<bool>&    abort_flag,
+        ProgressQueue&              progress_queue);
+
+    // ---------------------------------------------------------------------------
+    // polish_text — LLM cleanup pass.
+    //
+    // Runs a short text-only inference (no audio) using the polish system prompt
+    // to remove filler words, normalise mid-sentence restarts, and add terminal
+    // punctuation.  Uses the same llama.cpp inference path as process_stream but
+    // with a text-only prompt (no audio tokens).
+    //
+    // Returns the polished transcript, or raw (unchanged) on error.
+    // ---------------------------------------------------------------------------
+    std::string polish_text(const std::string& raw, const Context& ctx);
 
 private:
     Config                   cfg_;

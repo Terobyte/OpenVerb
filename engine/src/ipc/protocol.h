@@ -24,8 +24,7 @@ enum class ErrorCode {
     inference_failed,
     model_load_failed,
     session_limit,
-    timeout,
-    duration_exceeded
+    timeout
 };
 
 const char* error_code_string(ErrorCode code);
@@ -38,3 +37,5 @@ void                     send_error(int fd, ErrorCode code, const std::string& m
 void                     send_warning(int fd, const char* code, const std::string& message);
 void                     send_partial_result(int fd, int chunk_id, const std::string& text, bool is_final);
 void                     send_queue_status(int fd, int pending, int in_flight, int eta_ms);
+void                     send_polish_started(int fd);
+void                     send_polished_result(int fd, const std::string& text);

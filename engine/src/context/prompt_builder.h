@@ -12,17 +12,18 @@
 // to populate from the JSON wire format, or construct directly in tests.
 //
 // Wire format (--context flag):
-//   {"app":"<bundle-id>","window":"<title>","selected":"<text>","locale":"<code>"}
+//   {"app":"<bundle-id>","window":"<title>","clipboard":"<text>","selected":"<text>","language":"<bcp47>"}
 //
-// All fields are optional.  "locale" defaults to "en" (English).  Supported
+// All fields are optional.  "language" defaults to "en" (English).  Supported
 // codes: en, ru, es, fr, de, ja.  Unknown codes silently fall back to "en".
 // ---------------------------------------------------------------------------
 
 struct PromptContext {
-    std::string app_name;             // macOS bundle ID of the frontmost app (e.g. "com.apple.Mail")
-    std::string window_title;         // frontmost window title
-    std::string selected_text;        // text currently selected in the active app
-    std::string locale       = "en";  // ISO 639-1 language code for prompt localisation
+    std::string app_name;              // macOS bundle ID of the frontmost app (e.g. "com.apple.Mail")
+    std::string window_title;          // frontmost window title
+    std::string clipboard;             // clipboard text (read-only style reference for the model)
+    std::string selected_text;         // text currently selected in the active app
+    std::string language     = "en";   // BCP-47 language code for prompt localisation
 };
 
 // ---------------------------------------------------------------------------
@@ -47,15 +48,14 @@ std::pair<std::string, std::string> build_prompt(const PromptContext& ctx);
 // terminal commands vs. composed email prose).
 //
 // Lookup is O(1) via a static unordered_map initialised on first call.
-// Unknown bundle IDs return "general".
+// Unknown bundle IDs return "Neutral, clean grammar".
 //
 // Example mappings:
-//   "com.apple.Terminal"           → "terminal"
-//   "com.apple.Mail"               → "email"
-//   "com.tinyspeck.slackmacgap"    → "chat"
-//   "com.microsoft.VSCode"         → "code"
-//   "com.apple.Notes"              → "notes"
-//   "com.google.Chrome"            → "web"
+//   "com.apple.Terminal"           → "Commands, no prose"
+//   "com.apple.Mail"               → "Formal, complete sentences"
+//   "com.tinyspeck.slackmacgap"    → "Casual, concise, emoji OK"
+//   "com.microsoft.VSCode"         → "Code-aware, syntax-correct, comments"
+//   "com.apple.Notes"              → "Raw dictation, preserve everything"
 // ---------------------------------------------------------------------------
 std::string resolve_style(const std::string& app_name);
 
@@ -66,7 +66,9 @@ std::string resolve_style(const std::string& app_name);
 //   {
 //     "app":       "<bundle-id>",
 //     "window":    "<window-title>",
-//     "selected":  "<selected-text>"
+//     "selected":  "<selected-text>",
+//     "clipboard": "<clipboard-content>",
+//     "language":  "<language-code>"
 //   }
 //
 // Returns a default-constructed PromptContext if json is empty or "{}".

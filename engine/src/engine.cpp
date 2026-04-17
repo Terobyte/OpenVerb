@@ -9,6 +9,7 @@
 #include "audio/reader.h"
 #include "audio/resampler.h"
 #include "config/defaults.h"
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -81,27 +82,10 @@ InferenceResult Engine::process_file(const std::string&         file_path,
     AudioData audio;
 
     if (ext == ".wav") {
-        // ── WAV: peek header first to avoid allocating memory for oversized files.
-        double dur = peek_wav_duration_secs(file_path);
-        if (dur > MAX_RECORDING_SECS) {
-            throw std::runtime_error("audio too long: " +
-                std::to_string(static_cast<int>(dur)) + "s, max " +
-                std::to_string(MAX_RECORDING_SECS) + "s");
-        }
         audio = read_wav(file_path);
 
     } else if (ext == ".pcm" || ext == ".raw") {
-        // ── PCM: no header available — load first, then check duration.
         audio = read_pcm(file_path);
-
-        // read_pcm always sets sample_rate = 16000, channels = 1.
-        double dur = static_cast<double>(audio.samples.size()) /
-                     static_cast<double>(audio.sample_rate);
-        if (dur > MAX_RECORDING_SECS) {
-            throw std::runtime_error("audio too long: " +
-                std::to_string(static_cast<int>(dur)) + "s, max " +
-                std::to_string(MAX_RECORDING_SECS) + "s");
-        }
 
     } else {
         throw std::runtime_error("unsupported audio extension: " + file_path);
@@ -186,6 +170,66 @@ InferenceResult Engine::process_stream(
     }
     return be->process_stream(pcm, sample_rate, context_json,
                               abort_flag, progress_queue);
+}
+
+InferenceResult Engine::process_stream(
+    const std::vector<int16_t>& pcm,
+    int                         sample_rate,
+    const Context&              ctx,
+    const std::atomic<bool>&    abort_flag,
+    ProgressQueue&              progress_queue)
+{
+    // Build a minimal JSON string from the typed Context so the backend
+    // receives the same wire format it expects.  Only fields that the prompt
+    // builder cares about are included to keep the serialised form compact.
+    nlohmann::json j;
+    if (!ctx.app_identifier.empty())    j["app"]                = ctx.app_identifier;
+    if (!ctx.text_before_cursor.empty()) j["surrounding_before"] = ctx.text_before_cursor;
+    if (!ctx.text_after_cursor.empty())  j["surrounding_after"]  = ctx.text_after_cursor;
+
+    return process_stream(pcm, sample_rate, j.dump(), abort_flag, progress_queue);
+}
+
+std::string Engine::polish_text(const std::string& raw, const Context& ctx) {
+    if (raw.empty()) return raw;
+
+    // Build the polish prompt: system instruction + optional context snippet
+    // + raw transcript.
+    std::string prompt = POLISH_SYSTEM_PROMPT "\n";
+    if (!ctx.text_before_cursor.empty()) {
+        // Append a short excerpt of the surrounding text for context.
+        const std::size_t EXCERPT_BYTES = 200;
+        std::string excerpt = ctx.text_before_cursor.size() > EXCERPT_BYTES
+            ? ctx.text_before_cursor.substr(ctx.text_before_cursor.size() - EXCERPT_BYTES)
+            : ctx.text_before_cursor;
+        prompt += "Context: \"" + excerpt + "\"\n";
+    }
+    prompt += POLISH_INSTRUCTION_PREFIX;
+    prompt += raw;
+
+    // Run a text-only inference pass via the backend.
+    std::shared_ptr<Backend> be;
+    {
+        std::lock_guard<std::mutex> lk(engine_mutex_);
+        if (!loaded_.load(std::memory_order_acquire) || !backend_) {
+            // Engine not loaded yet — return raw text unchanged to avoid
+            // blocking the caller on a model load.
+            return raw;
+        }
+        be = backend_;
+    }
+
+    try {
+        InferenceResult result = be->process(
+            /*samples=*/{},
+            /*sample_rate=*/SAMPLE_RATE,
+            /*context_json=*/prompt,
+            /*progress=*/nullptr);
+        if (!result.text.empty()) return result.text;
+    } catch (const std::exception&) {
+        // Polish failure is non-fatal — return raw transcript.
+    }
+    return raw;
 }
 
 }  // namespace openverb

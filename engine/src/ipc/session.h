@@ -1,7 +1,10 @@
 #pragma once
 
+#include "audio/chunk_queue.h"
 #include "audio/ring_buffer.h"
+#include "audio/vad_scanner.h"
 #include "backend/backend.h"
+#include "config/defaults.h"
 #include "ipc/progress.h"
 
 #include <atomic>
@@ -32,34 +35,38 @@ public:
 
 private:
     Session() = default;
-    ~Session();  // safety net: joins inference_thread_ via stop()
+    ~Session();  // safety net: signals stop and joins worker_thread_ if running
 
     Session(const Session&)            = delete;
     Session& operator=(const Session&) = delete;
 
     void run(int fd, Engine& engine, const SessionConfig& cfg);
 
-    // Signals stop_requested_ and joins inference_thread_ if running.
-    // Safe to call at any point; idempotent after the thread has been joined.
+    // Signals stop_requested_ and wakes any waiters.
+    // Worker teardown (worker_thread_ join) is handled inline in run().
     void stop();
 
-    RingBuffer    ring_buffer_;
-    ProgressQueue progress_queue_;
+    // ---------------------------------------------------------------------------
+    // Streaming pipeline members (phases 5-6)
+    // ---------------------------------------------------------------------------
+    std::optional<VadScanner> chunker_;          // VAD-based chunk emitter
+    ChunkQueue                chunk_queue_;      // bounded chunk queue
+    std::thread               worker_thread_;   // pops chunks and runs inference
+    double                    infer_speed_ewma_ = DEFAULT_CHUNK_INFER_SPEED;
+    std::atomic<bool>         pipeline_active_{false};
 
     // ---------------------------------------------------------------------------
-    // Inference-thread lifetime members
+    // Streaming result communication (worker_thread_ → sentinel handler)
     //
-    // inference_thread_ is (re-)created for each INFERRING state entry.
-    // result_cv_  — notified by the inference thread when the result is ready.
-    // inference_result_ — populated by inference_thread_ under infer_mutex_.
+    // result_cv_       — notified by worker_thread_ when inference is done.
+    // inference_result_ — populated by worker_thread_; read after join().
     // stop_requested_   — abort flag; set by stop() or on timeout/interrupt.
     // ---------------------------------------------------------------------------
-    std::thread                          inference_thread_;
     std::mutex                           infer_mutex_;
     std::condition_variable              result_cv_;
     std::optional<InferenceResult>       inference_result_;
-    std::string                          inference_error_;   // set by catch in lambda
     std::atomic<bool>                    stop_requested_{false};
+    ProgressQueue progress_queue_;
 
     // Context JSON supplied by the session.start message (empty if omitted).
     std::string context_;
@@ -68,10 +75,13 @@ private:
         IDLE,
         WAITING_READY,
         STREAMING_AUDIO,
-        INFERRING,
         SHUTDOWN,
         DESTROYED
     };
+
+    // Worker thread that pops chunks from chunk_queue_, runs inference, and
+    // emits partial_result + queue_status messages.  Declared here for Phase 6.
+    void run_inference_worker_(int fd, Engine& engine);
 
     static const char* state_name(State s);
 };

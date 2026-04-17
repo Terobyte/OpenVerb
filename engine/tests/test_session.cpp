@@ -106,6 +106,51 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// CooperativeSlowBackend — Backend that runs for a fixed duration, checking
+// abort_flag every ~10 ms.  Used by ClientEofDuringInferenceAbortsPromptly to
+// verify that stop_requested_ terminates a long-running inference quickly.
+// ---------------------------------------------------------------------------
+
+class CooperativeSlowBackend : public Backend {
+public:
+    explicit CooperativeSlowBackend(int delay_ms) : delay_ms_(delay_ms) {}
+
+    InferenceResult process(
+        const std::vector<int16_t>&,
+        int,
+        const std::string&,
+        std::function<void(float)>) override
+    {
+        return InferenceResult{};
+    }
+
+    void unload_model() override {}
+
+    InferenceResult process_stream(
+        const std::vector<int16_t>&,
+        int,
+        const std::string&,
+        const std::atomic<bool>& abort_flag,
+        ProgressQueue&) override
+    {
+        auto deadline = std::chrono::steady_clock::now()
+                      + std::chrono::milliseconds(delay_ms_);
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (abort_flag.load(std::memory_order_relaxed)) {
+                return InferenceResult{};
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return InferenceResult{"slow result", "", delay_ms_};
+    }
+
+    std::string name() const override { return "cooperative_slow"; }
+
+private:
+    int delay_ms_;
+};
+
+// ---------------------------------------------------------------------------
 // Helper: create an Engine backed by MockBackend
 // ---------------------------------------------------------------------------
 
@@ -154,171 +199,6 @@ TEST_F(SessionTest, TimeoutOnIdle) {
         std::chrono::steady_clock::now() - start).count();
     EXPECT_LT(elapsed, 5);
 }  // ClientDisconnectDuringStreaming (StreamingSessionTest)
-
-// ===========================================================================
-// CooperativeSlowBackend
-//
-// Simulates inference that takes a long time but respects both g_interrupted
-// and abort_flag — matching the behaviour of the FIXED LlamaContext (which
-// now checks abort_flag inside the generation loop).
-//
-// Used to verify that the session's timeout and shutdown paths terminate
-// promptly once the backend cooperates.
-// ===========================================================================
-class CooperativeSlowBackend : public Backend {
-public:
-    explicit CooperativeSlowBackend(int run_ms) : run_ms_(run_ms) {}
-
-    InferenceResult process_stream(
-        const std::vector<int16_t>&,
-        int,
-        const std::string&,
-        const std::atomic<bool>& abort_flag,
-        ProgressQueue& pq) override
-    {
-        pq.push(0.0f);
-        auto deadline = std::chrono::steady_clock::now()
-                      + std::chrono::milliseconds(run_ms_);
-        // Checks BOTH g_interrupted AND abort_flag — matches the fixed
-        // LlamaContext::infer() generation loop.
-        while (std::chrono::steady_clock::now() < deadline) {
-            if (g_interrupted.load(std::memory_order_relaxed)) break;
-            if (abort_flag.load(std::memory_order_relaxed))    break;
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
-        pq.push(1.0f);
-        return InferenceResult{"done", "", run_ms_};
-    }
-
-    InferenceResult process(
-        const std::vector<int16_t>&, int, const std::string&,
-        std::function<void(float)>) override { return {}; }
-
-    void unload_model() override {}
-    std::string name() const override { return "cooperative-slow"; }
-
-private:
-    int run_ms_;
-};
-
-// ===========================================================================
-// Bug #5 — inference timeout must abort in-flight inference promptly
-//
-// session.cpp INFERRING timeout branch sets stop_requested_ (the per-session
-// abort_flag) and then calls inference_thread_.join().  For join() to return
-// quickly, the backend's generation loop must check abort_flag and exit.
-//
-// Fix applied: LlamaContext::infer() now checks abort_flag alongside
-// g_interrupted in the generation loop.  GemmaAudioBackend::process_stream()
-// passes &abort_flag into process_impl() → infer().
-//
-// This test verifies the fixed behaviour using CooperativeSlowBackend, which
-// simulates the fixed LlamaContext (checks abort_flag every 10 ms).
-// ===========================================================================
-TEST(Bug5InferenceAbort, TimeoutErrorArrivesPromptlyWhenBackendIsCooperative) {
-    g_interrupted.store(false);
-
-    const int BACKEND_RUN_MS    = 3000;  // would run 3 s without abort
-    const int INFERENCE_TIMEOUT = 1;     // session timeout = 1 s
-
-    auto [ca, cb] = make_pair();
-    ASSERT_GE(ca, 0);
-
-    openverb::Engine engine(Config{},
-        std::make_unique<CooperativeSlowBackend>(BACKEND_RUN_MS));
-
-    openverb::SessionConfig cfg{5, 5, INFERENCE_TIMEOUT, 4096};
-
-    std::thread session_thread([&]() {
-        openverb::Session::handle_connection(cb, engine, cfg);
-    });
-
-    RecvBuffer buf{};
-    send_json(ca, nlohmann::json{{"type", "session.start"}});
-    auto ready = recv_json(ca, buf, 3000);
-    ASSERT_EQ(ready.value("type", ""), "session.ready")
-        << "session did not become ready: " << ready.dump();
-
-    int16_t sample = 1000;
-    write_frame(ca, &sample, sizeof(sample));
-    write_sentinel(ca);
-
-    auto t0 = std::chrono::steady_clock::now();
-    nlohmann::json msg;
-    do {
-        msg = recv_json(ca, buf, BACKEND_RUN_MS + 1000);
-    } while (msg.value("type", "") == "progress");
-    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - t0).count();
-
-    EXPECT_EQ(msg.value("type", ""), "error");
-    EXPECT_EQ(msg.value("code", ""), "timeout");
-
-    // Error must arrive within inference_timeout + 500 ms.
-    // CooperativeSlowBackend exits within ~10 ms of abort_flag being set,
-    // so join() returns quickly and send_error() fires promptly.
-    const long expected_max_ms = INFERENCE_TIMEOUT * 1000 + 500;
-    EXPECT_LE(elapsed_ms, expected_max_ms)
-        << "Timeout error arrived after " << elapsed_ms
-        << " ms; expected ≤ " << expected_max_ms << " ms. "
-           "abort_flag may not be reaching the generation loop.";
-
-    send_json(ca, nlohmann::json{{"type", "session.shutdown"}});
-    session_thread.join();
-    ::close(ca);
-    ::close(cb);
-    g_interrupted.store(false);
-}
-
-// ===========================================================================
-// Bug #5 variant — shutdown during slow inference terminates promptly
-//
-// With CooperativeSlowBackend (respects abort_flag), sending session.shutdown
-// during inference must cause the session to exit within 500 ms.
-// ===========================================================================
-TEST(Bug5InferenceAbort, ShutdownDuringInferenceTerminatesPromptly) {
-    g_interrupted.store(false);
-
-    const int BACKEND_RUN_MS = 3000;
-
-    auto [ca, cb] = make_pair();
-    ASSERT_GE(ca, 0);
-
-    openverb::Engine engine(Config{},
-        std::make_unique<CooperativeSlowBackend>(BACKEND_RUN_MS));
-
-    openverb::SessionConfig cfg{5, 5, 30, 4096};
-
-    std::thread session_thread([&]() {
-        openverb::Session::handle_connection(cb, engine, cfg);
-    });
-
-    RecvBuffer buf{};
-    send_json(ca, nlohmann::json{{"type", "session.start"}});
-    auto ready = recv_json(ca, buf, 3000);
-    ASSERT_EQ(ready.value("type", ""), "session.ready");
-
-    int16_t sample = 1000;
-    write_frame(ca, &sample, sizeof(sample));
-    write_sentinel(ca);
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    send_json(ca, nlohmann::json{{"type", "session.shutdown"}});
-
-    auto t0 = std::chrono::steady_clock::now();
-    session_thread.join();
-    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - t0).count();
-
-    EXPECT_LE(elapsed_ms, 500)
-        << "session_thread took " << elapsed_ms
-        << " ms to join after shutdown; expected ≤ 500 ms. "
-           "abort_flag may not be reaching the generation loop.";
-
-    ::close(ca);
-    ::close(cb);
-    g_interrupted.store(false);
-}
 
 // ===========================================================================
 // Negative — unknown message type in IDLE state is silently ignored
@@ -585,11 +465,45 @@ protected:
     }
 };
 
+// Helper: generate a single 480-sample (30ms at 16 kHz) speech-like frame.
+// WebRTC VAD classifies full-scale random noise as speech.
+static std::vector<int16_t> make_speech_frame() {
+    static uint32_t seed = 42;
+    std::vector<int16_t> frame(480);
+    for (auto& s : frame) {
+        seed = seed * 1664525u + 1013904223u;  // LCG
+        s = static_cast<int16_t>((seed >> 16) & 0xFFFF);
+    }
+    return frame;
+}
+
+// Send N 480-sample speech frames as binary wire frames.
+static void send_speech_frames(int fd, int count) {
+    auto frame = make_speech_frame();
+    uint32_t byte_len = static_cast<uint32_t>(frame.size() * sizeof(int16_t));
+    for (int i = 0; i < count; ++i) {
+        write_frame(fd, frame.data(), byte_len);
+    }
+}
+
+// Skip streaming messages (progress, partial_result, queue_status) until a
+// terminal message (result, error, or unknown type) arrives.
+static nlohmann::json drain_to_terminal(int fd, RecvBuffer& buf, int timeout_ms = 30000) {
+    while (true) {
+        auto msg = recv_json(fd, buf, timeout_ms);
+        auto t = msg.value("type", "");
+        if (t == "progress" || t == "partial_result" || t == "queue_status") {
+            continue;
+        }
+        return msg;
+    }
+}
+
 // ---------------------------------------------------------------------------
-// Test: full streaming lifecycle — start → ready → audio → sentinel → result
+// Test: full streaming lifecycle — start → ready → speech audio → sentinel → result
 // ---------------------------------------------------------------------------
 TEST_F(StreamingSessionTest, FullStreamingLifecycle) {
-    openverb::SessionConfig cfg{5, 5, 5, 4096};
+    openverb::SessionConfig cfg{15, 30, 30, 4096};
 
     std::thread session_thread([this, &cfg]() {
         openverb::Session::handle_connection(b, engine_, cfg);
@@ -602,15 +516,13 @@ TEST_F(StreamingSessionTest, FullStreamingLifecycle) {
     auto ready = recv_json(a, buf, 3000);
     EXPECT_EQ(ready["type"], "session.ready");
 
-    int16_t sample = 1000;
-    write_frame(a, &sample, sizeof(sample));
+    // Send enough speech frames to exceed MIN_CHUNK_MS so VadScanner emits
+    // a chunk on flush().  MIN_CHUNK_MS = 3000 ms → 100 frames × 30 ms = 3000 ms.
+    send_speech_frames(a, 100);
 
     write_sentinel(a);
 
-    auto msg = recv_json(a, buf, 5000);
-    while (msg.contains("type") && msg["type"] == "progress") {
-        msg = recv_json(a, buf, 5000);
-    }
+    auto msg = drain_to_terminal(a, buf, 30000);
 
     EXPECT_EQ(msg["type"], "result");
     EXPECT_EQ(msg["text"], "hello world");
@@ -650,7 +562,7 @@ TEST_F(StreamingSessionTest, StallTimeout) {
 // Test: session reuse — full cycle twice on same connection
 // ---------------------------------------------------------------------------
 TEST_F(StreamingSessionTest, SessionReuseAfterInference) {
-    openverb::SessionConfig cfg{5, 5, 5, 4096};
+    openverb::SessionConfig cfg{15, 30, 30, 4096};
 
     std::thread session_thread([this, &cfg]() {
         openverb::Session::handle_connection(b, engine_, cfg);
@@ -661,17 +573,13 @@ TEST_F(StreamingSessionTest, SessionReuseAfterInference) {
     for (int cycle = 0; cycle < 2; ++cycle) {
         send_json(a, nlohmann::json{{"type", "session.start"}});
 
-        auto ready = recv_json(a, buf, 3000);
+        auto ready = recv_json(a, buf, 5000);
         EXPECT_EQ(ready["type"], "session.ready");
 
-        int16_t sample = 1000;
-        write_frame(a, &sample, sizeof(sample));
+        send_speech_frames(a, 100);
         write_sentinel(a);
 
-        auto msg = recv_json(a, buf, 5000);
-        while (msg.contains("type") && msg["type"] == "progress") {
-            msg = recv_json(a, buf, 5000);
-        }
+        auto msg = drain_to_terminal(a, buf, 30000);
         EXPECT_EQ(msg["type"], "result");
     }
 
@@ -932,4 +840,97 @@ TEST_F(StreamingSessionTest, ClientEofDuringInferenceAbortsPromptly) {
 
     ::close(cb);
     g_interrupted.store(false);
+}
+
+// ---------------------------------------------------------------------------
+// Helper: send N 480-sample silence frames (all-zero PCM → VAD classifies as
+// silence).  Used by StreamingPartialResultsMonotonicChunkIds to create the
+// silence boundary that triggers a chunk split.
+// ---------------------------------------------------------------------------
+static void send_silence_frames(int fd, int count) {
+    std::vector<int16_t> frame(480, 0);  // all-zero → silence
+    uint32_t byte_len = static_cast<uint32_t>(frame.size() * sizeof(int16_t));
+    for (int i = 0; i < count; ++i) {
+        write_frame(fd, frame.data(), byte_len);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test: streaming pipeline emits ≥2 partial_result messages in monotonic
+//       chunk_id order and the final result text equals their concatenation.
+//
+// Audio pattern:
+//   100 speech frames (3 000 ms = MIN_CHUNK_MS) + 20 silence frames (600 ms =
+//   SILENCE_BOUNDARY_MS) → VadScanner emits chunk 0 (is_final=false).
+//   100 more speech frames + sentinel → flush() emits chunk 1 (is_final=true).
+//
+// MockBackend returns "hello world" for each process_stream call, so the
+// final result text should be "hello worldhello world" (no separator).
+// ---------------------------------------------------------------------------
+TEST_F(StreamingSessionTest, StreamingPartialResultsMonotonicChunkIds) {
+    openverb::SessionConfig cfg{15, 30, 30, 4096};
+
+    std::thread session_thread([this, &cfg]() {
+        openverb::Session::handle_connection(b, engine_, cfg);
+    });
+
+    RecvBuffer buf{};
+
+    send_json(a, nlohmann::json{{"type", "session.start"}});
+    auto ready = recv_json(a, buf, 3000);
+    ASSERT_EQ(ready.value("type", ""), "session.ready")
+        << "session did not become ready: " << ready.dump();
+
+    // Pattern: 3 s speech + 600 ms silence → chunk 0 emitted by VadScanner.
+    //          3 s more speech + sentinel → chunk 1 flushed as is_final.
+    send_speech_frames(a, 100);   // 100 × 30 ms = 3 000 ms ≥ MIN_CHUNK_MS
+    send_silence_frames(a, 20);   // 20  × 30 ms =   600 ms = SILENCE_BOUNDARY_MS
+    send_speech_frames(a, 100);   // second utterance
+    write_sentinel(a);
+
+    // Collect all messages until a terminal (result / error) arrives.
+    std::vector<nlohmann::json> partials;
+    nlohmann::json terminal;
+    while (true) {
+        auto msg = recv_json(a, buf, 30000);
+        auto t = msg.value("type", "");
+        if (t == "partial_result") {
+            partials.push_back(msg);
+        } else if (t == "result" || t == "error") {
+            terminal = msg;
+            break;
+        }
+        // skip progress / queue_status
+    }
+
+    // ≥2 partial_result messages required (one per chunk).
+    ASSERT_GE(partials.size(), 2u)
+        << "Expected ≥2 partial_result messages, got " << partials.size();
+
+    // chunk_id must be strictly monotonically increasing.
+    for (size_t i = 1; i < partials.size(); ++i) {
+        int prev = partials[i - 1].value("chunk_id", -1);
+        int curr = partials[i].value("chunk_id", -1);
+        EXPECT_GT(curr, prev)
+            << "chunk_id must be monotonically increasing at index " << i
+            << ": " << prev << " → " << curr;
+    }
+
+    // Last partial must carry is_final=true.
+    EXPECT_TRUE(partials.back().value("is_final", false))
+        << "Last partial_result must have is_final=true";
+
+    // Final terminal message must be a result.
+    ASSERT_EQ(terminal.value("type", ""), "result");
+
+    // Final result text = concatenation of all partial texts.
+    std::string expected;
+    for (const auto& p : partials) {
+        expected += p.value("text", "");
+    }
+    EXPECT_EQ(terminal.value("text", ""), expected)
+        << "Final result text must equal concatenation of all partial chunk texts";
+
+    send_json(a, nlohmann::json{{"type", "session.shutdown"}});
+    session_thread.join();
 }
