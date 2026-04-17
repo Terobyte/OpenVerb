@@ -2,276 +2,204 @@
 
 ## Active Bugs
 
-### Bug 5 — Data race on `fd` between ioQueue and Phase 2 monitor Task
-- **File:** `app/OpenVerb/Engine/EngineClient.swift:30`
-- **Severity:** Medium
-- **Status:** Open
+### Bug 1 — `WaveformViewModel.updateAmplitude()` defers append to next run loop — stale amplitudes on immediate read
+- **File:** `app/OpenVerb/UI/WaveformView.swift:34`
+- **Severity:** Low
+- **Status:** Fixed
 
-`private var fd: Int32 = -1` is read/written from `ioQueue` (connect, disconnect, sendAudioFrame) and the Phase 2 monitor `Task.detached` (runPhase2Monitor → recvJSONSync) without synchronization. Non-atomic `Int32` accessed from multiple concurrency domains is a data race under the Swift memory model. Practically safe on ARM64 (atomic Int32 reads/writes), but formally UB.
+`updateAmplitude()` is `nonisolated` and wraps `amplitudes.append(rms)` in `DispatchQueue.main.async`. Even when called from a `@MainActor` context, the append is deferred to the next run-loop iteration. Any code that reads `amplitudes` synchronously after calling `updateAmplitude()` sees stale (empty) state. SwiftUI works in practice only because it observes `@Published` changes asynchronously, but synchronous reads (tests, any direct caller) are inconsistent.
 
-**Fix:** Wrap `fd` access through `ioQueue.sync` or use an atomic wrapper.
+**Fix:** Annotate `updateAmplitude()` with `@MainActor` and call `amplitudes.append(rms)` directly. Extract the pure RMS computation into a `nonisolated` helper and call it before the actor hop.
 
 ---
 
-### Bug 8 — `EngineManager.shutdown()` blocks MainActor for 500ms
-- **File:** `app/OpenVerb/Engine/EngineManager.swift:300-313`
+### Bug 48 — `handleWake()` → `ensureRunning()` self-deadlock: engine never restarts after wake
+- **File:** `app/OpenVerb/Engine/EngineManager.swift:504-527`
+- **Severity:** High
+- **Status:** Fixed
+- **Negative test:** `testBug48_handleWakePrematureStatusStarting` — fails while `status = .starting` present in handleWake()
+
+`handleWake()` sets `status = .starting` at line 506, then the wake Task calls `ensureRunning()` at line 519. Inside `ensureRunning()`, the dedup guard at line 223 sees `status == .starting` and enters the spin loop, interpreting this as "another `ensureRunning()` is already in flight." No other task will ever change status to `.running` — the only code that could do so is `ensureRunning()` itself, which is stuck in the loop. After 10 seconds the spin loop throws `launchTimeout` and the engine is never restarted.
+
+Trigger: system wake after the engine process died during sleep (jetsam, OOM kill). OpenVerb hangs for 10 seconds showing "Loading model..." then shows an error. User must relaunch the app.
+
+**Fix:** Don't pre-set `status = .starting` in `handleWake()` — let `ensureRunning()` own the status transition:
+```swift
+// handleWake(): remove the premature status = .starting
+status = .stopped  // or simply omit — ensureRunning handles it
+try await ensureRunning()
+```
+
+---
+
+### Bug 49 — `drainResult()` `.error` path missing `disconnect()` — stale socket causes unnecessary engine restart
+- **File:** `app/OpenVerb/App/OpenVerbApp.swift:768-774`
 - **Severity:** Medium
 - **Status:** Fixed
 
-`shutdown()` calls `waitForProcessExit(timeout: 0.5)` which spins `RunLoop` for up to 500ms on the MainActor. Freezes UI for half a second. Acceptable at app termination (`applicationWillTerminate`) but dangerous if called from any other context.
+The `.result` path in `drainResult()` calls `engineManager.disconnect()` (line 740), but the `.error` path does not. After an engine error, the socket fd remains open. On the next recording:
 
-**Fix:** Move `shutdown()` to a detached Task or background queue.
+1. `ensureRunning()` → `tryPing()` → `engineClient.connect()`
+2. `connectSync`: `guard fd == -1` — fd is NOT -1 (stale) → returns immediately without reconnecting
+3. If engine idle timeout expired (>15 s since error): `sendPing()` writes to stale socket → EPIPE → `tryPing()` fails → `sendSIGTERM()` kills engine → full restart (5+ s delay for model reload)
+4. If engine session still alive (<15 s): old connection is reused, but buffered data from the failed session may still sit in `recvBuffer`
+
+**Fix:** Add `engineManager.disconnect()` in the `.error` path, mirroring the `.result` path.
 
 ---
 
-### Bug 11 — RecordingWindow crossfade shows empty gap during animation
-- **File:** `app/OpenVerb/UI/RecordingWindow.swift:116-125`
+### Bug 31 — `PreferencesView` `keyNames` dictionary missing 10 ANSI punctuation keys
+- **File:** `app/OpenVerb/UI/PreferencesView.swift`
 - **Severity:** Low
-- **Status:** Open
-
-During the `.recording` → `.inferring` crossfade (150ms), both WaveformView and ProcessingView are partially transparent simultaneously, revealing the empty background. A matched fade-out/fade-in without overlap would look cleaner.
-
----
-
-### Bug 12 — `disconnect()` wakeup signal lost after `stopPhase2Monitor()`
-- **File:** `app/OpenVerb/Engine/EngineClient.swift:587-588` + `:150`
-- **Severity:** Low
-- **Status:** Open
-
-`stopPhase2Monitor()` sets `wakeRead = -1; wakeWrite = -1`. Subsequent `disconnect()` checks `self.wakeWrite >= 0` → false → no wakeup signal sent. The monitor task may linger in `poll()` for up to 100ms. Minor latency issue, not correctness.
-
----
-
-### Bug 16 — `drainResult` error path unconditionally tears down new recording after abort+restart
-- **File:** `app/OpenVerb/App/OpenVerbApp.swift:552-556`
-- **Severity:** High
-- **Status:** Open
-
-When `abortAndRestart()` disconnects the socket, the stale `drainResult` Task receives a `receiveMessage()` error. The catch block unconditionally executes `recordingWindow.hide()`, `audioSession.stop()`, and `hotkeyManager.removeEscapeMonitors()` — even if the state has already moved to `.preparing` or `.recording` for the new session. The guard `if appState.state == .inferring` only protects the `transition(to: .error)` call, not the teardown above it.
-
-**Repro:**
-1. ⌥Space → record → ⌥Space → inference starts
-2. ⌥Space again (abort+restart) → state moves to `.preparing`, new recording begins
-3. Old `drainResult` Task resumes from suspended `receiveMessage()`, catches the error
-4. `audioSession.stop()` / `recordingWindow.hide()` / `removeEscapeMonitors()` kill the new recording silently
-
-**Fix:** Wrap teardown in `guard appState.state == .inferring else { return }` before the UI cleanup calls.
-
----
-
-### Bug 17 — Phase 2 monitor fires `onError` after `stopPhase2Monitor()` during abort+restart
-- **File:** `app/OpenVerb/Engine/EngineClient.swift:501-521`, `app/OpenVerb/App/OpenVerbApp.swift:144-162`
-- **Severity:** High
-- **Status:** Open
-
-`stopPhase2Monitor()` sets `phase2MonitorStopped = true` and writes the wakeup byte, but does **not** wait for the monitor Task to finish. If the monitor is already inside `recvJSONSync()` (past the `stopped` check at line 504), the subsequent `disconnect()` closes the fd, causing `recvJSONSync()` to throw. The monitor catches the error, sets `phase2Error`, and calls `onError` — even though the stop was intentional.
-
-The `onError` handler in AppDelegate performs full session teardown (stop audio, hide window, remove monitors, transition to `.error(...)`, trigger `handleCrash()`). This overwrites the `.preparing` state from abort+restart and shows a spurious error to the user.
-
-**Fix:** Check `phase2MonitorStopped` inside the monitor's error catch before calling `onError`, or gate the AppDelegate `onError` handler on `appState.state`.
-
----
-
-### Bug 18 — `AppSettings` properties published but not all consumed
-- **File:** `app/OpenVerb/Settings/AppSettings.swift` vs consumers
-- **Severity:** Medium
-- **Status:** Partially fixed
-
-Originally six properties were unwired. Current state:
-
-| Property | Consumer | Status |
-|----------|----------|--------|
-| `hotkeyKeyCode` / `hotkeyModifiers` | `HotkeyManager` | **Fixed** — reads from `AppSettings.shared` in `register()`; Combine observer reinstalls tap on change |
-| `language` | `ContextBuilder.build(languageOverride:)` | **Fixed** — passed via `languageOverride: appSettings.language` in `connectAndRecord()` |
-| `includeClipboard` | `ContextBuilder.build(includeClipboard:)` | **Fixed** — passed via `includeClipboard: appSettings.includeClipboard` |
-| `modelDirectory` | `EngineManager` | **Partially fixed** — read once at `init()` as snapshot (see Bug 23 for live-update issue) |
-| `soundEffectsEnabled` | `NSSound.play()` calls | **Open** — sounds play unconditionally |
-| `showWaveform` | `RecordingWindow` / `RecordingContentView` | **Open** — waveform always visible |
-
-**Remaining fix:** Guard `NSSound` calls with `appSettings.soundEffectsEnabled`; gate waveform display on `appSettings.showWaveform`.
-
----
-
-### Bug 22 — `maxRecordingDuration` AppSettings property unconsumed — recordings never auto-stop
-- **File:** `app/OpenVerb/Settings/AppSettings.swift:109-115`, `app/OpenVerb/UI/PreferencesView.swift:96-104`
-- **Severity:** Medium
-- **Status:** Open
-
-`AppSettings.maxRecordingDuration` (default 60 s, UI: Stepper 1–300 s) is persisted and displayed in Preferences → General → Recording but no recording code ever reads it. `startRecording()` / `connectAndRecord()` never schedule a stop timer based on this value. Recordings run until the user manually presses ⌥Space, regardless of the setting.
-
-**Fix:** In `startRecording()`, after transitioning to `.preparing`, schedule a `Task.sleep(for:)` of `appSettings.maxRecordingDuration` seconds that calls `stopRecording()` if still in `.recording` state. Cancel the timer on `handleCancel()` / `abortAndRestart()`.
-
----
-
-### Bug 23 — `EngineManager.modelDirPath` is a snapshot — model directory changes in Preferences have no effect until app restart
-- **File:** `app/OpenVerb/Engine/EngineManager.swift:107-108`, `app/OpenVerb/UI/PreferencesView.swift:220-233`
-- **Severity:** Medium
 - **Status:** Fixed
 
-`modelDirPath` is declared `let` and initialised once from `AppSettings.shared.modelDirectory` in `EngineManager.init()`. The Preferences → Backend → Model → "Browse..." button writes a new path to `AppSettings`, but `EngineManager` never re-reads it. All subsequent `launchEngine()` calls (crash recovery, backend switch, sleep/wake) pass the original path to the engine subprocess. Changing the model directory in Preferences has no effect until the app is relaunched.
+`hotkeyDescription` has a `keyNames: [UInt16: String]` table mapping virtual key codes to printable labels. Ten ANSI punctuation codes are missing: `0x18` (=), `0x1B` (-), `0x1E` (]), `0x21` ([), `0x27` ('), `0x29` (;), `0x2A` (\\), `0x2B` (,), `0x2C` (/), `0x2F` (.). Hotkeys using these keys fall through to the `"Key(\(keyCode))"` fallback — users see labels like `⌥Key(24)` instead of `⌥=`.
 
-**Fix:** Change `modelDirPath` to a computed `var` that reads `AppSettings.shared.modelDirectory` (or pass the settings object into EngineManager and read it dynamically in `launchEngine()`).
+**Fix:** Add all 10 missing entries to the `keyNames` dictionary.
 
 ---
 
-### Bug 24 — `PreferencesWindowController.open()` creates an orphan `EngineManager` if weak reference is nil
-- **File:** `app/OpenVerb/UI/PreferencesView.swift:273-276`
+### Bug 32 — Audio frame ordering violation in `connectAndRecord()` [HIGH]
+- **File:** `app/OpenVerb/App/OpenVerbApp.swift`
+- **Severity:** High
+- **Status:** Active
+- **Negative test:** `testBug32_bufferedFramesCanArriveLaterThanLiveFrames` — fails while no `syncOnIOQueue`/`sendBufferedFrames`/`ioQueue.sync` fence is present
+
+`flushAndSetSendCallback()` activates the live send callback and returns buffered chunks atomically. The caller loops over those chunks and dispatches each via `sendAudioFrame` (`ioQueue.async`). Simultaneously, the audio tap fires its live callback which also dispatches to `ioQueue.async`. Both paths compete on the serial queue — a live frame from the audio thread can land in `ioQueue` before a buffered frame dispatched from the MainActor loop, delivering frames out of chronological order and degrading recognition quality.
+
+**Fix:** Add a public `syncOnIOQueue()` to `EngineClient` that executes `ioQueue.sync {}` as a fence (or expose `sendBufferedFrames(_:)` writing frames synchronously). Call it after the buffered-frames loop and before `startPhase2Monitor()`.
+
+---
+
+### Bug 36 — `baseAddress!` force-unwrap in `EngineClient` — crash on empty `Data` [MEDIUM]
+- **File:** `app/OpenVerb/Engine/EngineClient.swift:462`
 - **Severity:** Medium
-- **Status:** Open
+- **Status:** Fixed
+- **Negative test:** `testBug36_forceUnwrapBaseAddress` — fails while `baseAddress!` exists in EngineClient.swift
+
+`sendJSONSync`, `writeAudioFrameOrDrop`, and the disconnect sentinel all call `data.withUnsafeBytes { try writeFully($0.baseAddress!, count: $0.count) }`. Under Swift's `UnsafeRawBufferPointer` contract, `baseAddress` is `nil` for zero-byte buffers. An empty `Data` input — possible for a malformed `Encodable` or a zero-length audio frame — triggers a fatal crash with no diagnostic.
+
+**Fix:** Replace `$0.baseAddress!` with `guard let base = $0.baseAddress else { return }` at each call site, or add `guard !data.isEmpty else { return }` before `withUnsafeBytes`.
+
+---
+
+### Bug 38 — `ShortcutCaptureView` leaks `NSEvent` monitor on dealloc [MEDIUM]
+- **File:** `app/OpenVerb/Input/ShortcutRecorder.swift`
+- **Severity:** Medium
+- **Status:** Fixed
+- **Negative test:** `testBug38_shortcutCaptureViewMissingDeinit` — fails while `ShortcutCaptureView` has no `deinit`
+
+`startRecording()` installs a local `NSEvent` monitor. If the Preferences window closes while `isRecording == true` (user clicked the recorder but hasn't pressed a key yet), SwiftUI tears down the view without calling `stopRecording()`. `NSEvent` retains the monitor block — a new leak accumulates on every open-then-close-while-recording cycle.
+
+**Fix:** Add `deinit { if let m = localMonitor { NSEvent.removeMonitor(m) } }` to `ShortcutCaptureView`, or call `stopRecording()` from `deinit`.
+
+---
+
+### Bug 46 — `drainResult()` `.error` path skips crash recovery [MEDIUM]
+- **File:** `app/OpenVerb/App/OpenVerbApp.swift`
+- **Severity:** Medium
+- **Status:** Fixed
+- **Negative test:** `testBug46_drainResultErrorPathMissingCrashRecovery` — fails while `.error` case lacks `handleCrash()`
+
+When the engine sends a structured `.error` message (`model_load_failed`, `inference_failed`), `drainResult()` calls `handleEngineError()` and returns — without calling `engineManager.handleCrash()`. The engine is left dead. The next hotkey press must wait for `ensureRunning()` to detect and restart the dead engine, adding a visible 5+ s delay. The connection-error path a few lines above correctly dispatches `handleCrash()` with exponential backoff; the structured `.error` branch omits it.
+
+**Fix:** In the `.error` case, after `handleEngineError()`, add:
+```swift
+Task { [weak self] in try? await self?.engineManager.handleCrash() }
+```
+mirroring the connection-error path.
+
+---
+
+### Bug 51 — `handleCrash()` sends ping to active session socket after sleep — corrupts binary streaming
+- **File:** `app/OpenVerb/Engine/EngineManager.swift:356-399` + `app/OpenVerb/App/OpenVerbApp.swift` (all `handleCrash()` call sites)
+- **Severity:** High — **primary cause of intermittent "nothing records" symptom**
+- **Status:** Fixed
+
+After any engine error (duration_exceeded, inference_failed, connection timeout) `handleCrash()` is spawned as a background Task. It immediately disconnects and sleeps for `backoffDelay(1) = 1 second`, then calls `ensureRunning()` → `tryPing()` → `sendPing()`.
+
+The race:
+
+1. User receives engine error → `handleCrash()` Task spawned (sleeps 1 s).
+2. User presses ⌥Space again within ≤1 s → `connectAndRecord()` → `ensureRunning()` succeeds → new session starts on the existing fd (Bug 49 keeps it open) or a freshly reconnected fd.
+3. `handleCrash()` wakes after 1 s → `ensureRunning()` → `tryPing()` → `connectSync()` sees `fd != -1` (session active) → returns without creating a new socket → `sendPing()` dispatches `{"type":"ping"}\n` to `ioQueue`.
+4. On `ioQueue`: pending audio-frame writes drain first, then the 15-byte ping JSON is written to the active session socket.
+5. Engine is in `STREAMING_AUDIO` (binary protocol). It reads the first 4 bytes of the ping JSON (`{`, `"`, `t`, `y` = 0x7B227479 ≈ 2 billion) as a big-endian frame length. It then tries to receive ~2 GB of data. Remaining audio frames and the sentinel are absorbed as the frame body. After no new data for `stall_timeout_secs` (30 s) the engine sends a timeout error.
+6. User sees: waveform animated, pressed stop, waited ~30 s, got error. Recording produced no result.
+
+The bug fires whenever the pre-existing session takes > 1 s (i.e., the user records for more than 1 second after a prior error). For short recordings (< 1 s) the sentinel arrives before the ping, and the ping lands in INFERRING where it is silently ignored — so the session accidentally succeeds, explaining the "sometimes it works" observation.
+
+**Fix:** Gate `handleCrash()`'s final `ensureRunning()` on the `canRestartBackend` closure (which returns `appState.state == .idle`). If a new session has started during the sleep, skip the pre-warm — the new session's own `ensureRunning()` already handled reconnection.
 
 ```swift
-let em = self.engineManager ?? EngineManager()
+let delay = backoffDelay(attempt: crashCounter)
+try await Task.sleep(for: .seconds(delay))
+// Skip pre-warm if a new session is already active; pinging an active
+// session's socket corrupts the binary streaming protocol (Bug 51).
+guard canRestartBackend?() ?? true else { return }
+try await ensureRunning()
 ```
 
-`self.engineManager` is `weak`. If `open(engineManager:)` is ever called before a managed engine is stored, or if the weak reference is nil, a brand-new `EngineManager()` is created. This orphan:
-1. Calls `registerSleepWakeNotifications()` in its `init()` — installs **duplicate** `willSleep`/`didWake` observers that compete with the real engine manager.
-2. Has no engine subprocess — any `restartWithBackend()` call triggered from Preferences targets this orphan, not the actual running engine.
-3. Sets `backendOverride` on itself — has no effect on the real engine.
-
-The orphan is stored in `PreferencesWindowController.window` (indirect strong reference via NSWindow's `contentViewController`), keeping it alive as long as the Preferences window exists.
-
-**Fix:** Assert / crash in DEBUG if `self.engineManager` is nil. In production, guard early and log an error rather than creating an orphan.
-
 ---
 
-### Bug 25 — Backend switching in Preferences not gated on app state — kills active recording session silently
-- **File:** `app/OpenVerb/UI/PreferencesView.swift:115-131`, `app/OpenVerb/Engine/EngineManager.swift:399-411`
-- **Severity:** High
-- **Status:** Open
-
-The backend picker in Preferences can be changed at any time. When a new backend is selected, `restartWithBackend()` immediately:
-1. Sets `status = .starting`
-2. Calls `shutdown()` + SIGTERM on the engine subprocess
-3. Calls `ensureRunning()` (launches a new process with the new backend)
-
-If the user switches backend while in `.recording` or `.inferring` state:
-- The engine is killed mid-session
-- `drainResult()` receives a socket error — may hit Bug 16/17 paths depending on state
-- The active recording is lost with no user feedback beyond the status bar icon change
-
-**Fix:** Disable the backend picker (or show a tooltip) when `appState.state != .idle`. `EngineManager` does not hold a reference to `AppState`, so the guard must be added in `PreferencesView` using an `@ObservedObject var appState: AppState` that is passed into the view.
-
----
-
-### Bug 26 — `prompt_builder.h` `parse_context_json()` doc omits "clipboard" and "language" fields
-- **File:** `engine/src/context/prompt_builder.h:65-74`
-- **Severity:** Low
-- **Status:** Open
-
-The header comment for `parse_context_json()` lists only three keys in the expected schema:
-```cpp
-//   {
-//     "app":       "<bundle-id>",
-//     "window":    "<window-title>",
-//     "selected":  "<selected-text>"
-//   }
-```
-The implementation (prompt_builder.cpp:221–234) also reads `"clipboard"` and `"language"`, both of which are actively sent by `ContextBuilder.swift`. A developer reading only the header would not know to include these fields and would observe silent degradation (English-only output regardless of locale; no clipboard context in prompts).
-
-**Fix:** Add `"clipboard"` and `"language"` to the schema comment. The wire-format line at line 15 in the struct block already documents all five fields correctly — the `parse_context_json` doc block should match it.
-
----
-
-### Bug 27 — `recvJSONSync()` POLLHUP-before-POLLIN loses final engine messages
-- **File:** `app/OpenVerb/Engine/EngineClient.swift:277-280` + `:481-489`
-- **Severity:** Medium
-- **Status:** Open
-
-`recvJSONSync()` checks `POLLHUP | POLLERR` before `POLLIN`. When the engine sends a final message (error/result) and immediately closes the connection, `poll()` returns with both `POLLIN` and `POLLHUP` set. The POLLHUP branch fires first, throwing `connectionClosed` — the data sitting in the socket read buffer is never read. This causes the client to see a generic "connection dropped" error instead of the actual engine error with its diagnostic code and message. The Phase 2 monitor has the same issue at line 481.
-
-**Repro:**
-1. Engine encounters an internal error, sends `{"type":"error","code":"inference_failed","message":"..."}` then closes the client socket
-2. Client's `poll()` returns `POLLIN | POLLHUP`
-3. POLLHUP check fires first → throws `EngineClientError.connectionClosed`
-4. Error message is lost; user sees "Connection lost" instead of the real error
-
-**Fix:** Check `POLLIN` first and drain the socket. Only treat `POLLHUP` as a close after `read()` returns 0 (EOF after draining).
-
----
-
-### Bug 28 — Bug 2 regression: `socketReadLock` absent, Phase 2 monitor and `drainResult()` race on `fd`
-- **File:** `app/OpenVerb/Engine/EngineClient.swift:253-301` (recvJSONSync) + `:506-508` (monitor calls recvJSONSync)
-- **Severity:** High
-- **Status:** Open
-
-Bug 2 was marked "Fixed" with a `socketReadLock: NSLock` serializing the `poll()+read()+recvBuffer.append()` block. The lock is not present in the current code — either the fix was reverted during refactoring or never applied. `recvJSONSync()` is called concurrently from two threads:
-1. **ioQueue** — via `receiveMessage()` → `drainResult()`
-2. **Detached Task** — via Phase 2 monitor's `runPhase2Monitor()`
-
-The `recvLock` (NSLock) only protects `recvBuffer` mutations. The `poll()` and `read()` system calls on `self.fd` are unprotected. Two threads racing on `read()` can split a single message's bytes between them, producing two incomplete halves that neither thread can decode. Additionally, `stopPhase2Monitor()` does not wait for the monitor Task to exit — `drainResult()` starts reading immediately, overlapping with the monitor's final `recvJSONSync(timeoutMs: 100)` call.
-
-**Repro:**
-1. ⌥Space → record → ⌥Space → inference starts, Phase 2 monitor running
-2. ⌥Space again (stop recording) → `stopPhase2Monitor()` sets flag, sends wakeup byte
-3. `sendEndOfAudio()` → `drainResult()` dispatches `recvJSONSync()` to ioQueue
-4. Monitor's last `recvJSONSync(timeoutMs: 100)` is still inside `poll()` or `read()`
-5. Both threads race on `read(fd)` — kernel splits bytes between them
-6. One or both decode failures → spurious error or lost result
-
-**Fix:** Re-introduce `socketReadLock: NSLock` in `recvJSONSync()` wrapping the entire `poll()+read()+recvBuffer.append()` block. Alternatively, change `stopPhase2Monitor()` to await the monitor Task's completion before returning.
-
----
-
-### Bug 29 — `ModelDownloader.destinationURL` hardcoded, ignores `AppSettings.modelDirectory`
-- **File:** `app/OpenVerb/Model/ModelDownloader.swift:60-64`
+### Bug 52 — `connectAndRecord()` catch block missing `disconnect()` — stale fd left open on session-setup failure
+- **File:** `app/OpenVerb/App/OpenVerbApp.swift:684-708`
 - **Severity:** Medium
 - **Status:** Fixed
 
-Related to Bug 23 (EngineManager snapshot) but distinct: `ModelDownloader.init()` always constructs `destinationURL` from `~/.openverb/models/` without reading `AppSettings.shared.modelDirectory`. If the user changes the model directory in Preferences and then triggers a re-download (e.g. deletes the model and relaunches → onboarding), the download writes to `~/.openverb/models/` while `EngineManager` looks at the user's chosen directory. The model is downloaded but not found on the next launch.
+When `startSession()` or `receiveMessage(timeoutMs: 120_000)` (waiting for `session.ready`) throws inside `connectAndRecord()`, the catch block does not call `engineManager.disconnect()`. The fd remains open.
+
+`handleCrash()` is then spawned and immediately calls `engineClient.disconnect()`, but there is a narrow @MainActor window between the `appState.transition(to: .error(...))` and `handleCrash()` running where the user could press ⌥Space again. If they do, `connectAndRecord()` runs, `connectSync()` sees `fd != -1` and silently reuses the stale socket — which may be mid-way through an unexpected protocol state on the engine side.
+
+The interaction with Bug 51 is also present: the re-spawned `handleCrash()` after the second attempt will again race and send a ping mid-stream.
+
+**Fix:** Add `engineManager.disconnect()` in the catch block of `connectAndRecord()`, immediately before spawning `handleCrash()`:
 
 ```swift
-// Current (hardcoded):
-let modelDir = FileManager.default.homeDirectoryForCurrentUser
-    .appendingPathComponent(".openverb/models")
-
-// Should read from settings:
-let dir = AppSettings.shared.modelDirectory.isEmpty
-    ? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".openverb/models")
-    : URL(fileURLWithPath: AppSettings.shared.modelDirectory)
+} catch {
+    audioSession.stop()
+    hotkeyManager.removeEscapeMonitors()
+    engineManager.disconnect()   // ← add this
+    // ... existing error handling ...
+}
 ```
 
-**Fix:** Accept a `modelDirectory: URL` parameter in `init()`. Pass `AppSettings.shared.modelDirectory` from `showOnboarding()`.
-
 ---
 
-### Bug 30 — `TextInjector.injectPerCharacter()` missing focus transfer and panel dismissal
-- **File:** `app/OpenVerb/Output/TextInjector.swift:151-166`
+### Bug 53 — server.cpp: `session_thread_.join()` after `accept()` stalls new ping for up to 15 s when prior session never received client disconnect
+- **File:** `engine/src/ipc/server.cpp:237-239`
 - **Severity:** Medium
-- **Status:** Open
+- **Status:** Fixed (unreachable — Bugs 49 and 52 now always call disconnect() on error)
 
-Unlike `inject()`, `injectPerCharacter()` posts CGEvent keystrokes without:
-1. Hiding the recording window (`window.orderOut(nil)`)
-2. Activating the target app (`targetApp.activate(options: [])`)
-3. Waiting for focus transfer (50 ms delay)
+The IPC server calls `accept()` to get a new client fd, then immediately calls `session_thread_.join()` to wait for the previous session thread to exit before starting the new one. Under Bug 49 / Bug 52 conditions, the prior session on the engine side never received a client `close()` — it is alive in `IDLE` state polling the old socket fd for up to `idle_timeout_secs` (15 s).
 
-If called while the floating panel is still visible, OpenVerb's panel retains key-window status and all keystrokes are delivered to the wrong app (or to no app). The method signature doesn't accept `targetApp` or `window` parameters, making correct usage impossible for any caller.
+Sequence:
+1. Engine error → client does not call `disconnect()` (Bug 49/52) → engine session stays in IDLE on old fd.
+2. Next recording: client creates a **new** socket and connects (after `handleCrash()` disconnected and `ensureRunning()` creates a fresh connection).
+3. `accept()` returns the new fd.
+4. `session_thread_.join()` **blocks** until the old session exits. Old session is polling the old fd. Old fd is still open (client side → Bug 49, not closed). Old session waits 15 s for `idle_timeout_secs` before giving up.
+5. New client is accepted but not being served. `sendPing()` times out (5 s) → `tryPing()` returns false → `ensureRunning()` SIGTERMs the engine and does a full cold restart (5+ s model reload).
+6. User sees up to 20 s of "Preparing..." then either recovery or an error.
 
-The requirements (Step 49) note this is NOT auto-triggered and is explicitly callable only, but any future integration point requires focus transfer — the current API makes it impossible to do correctly.
+This bug only activates when Bug 49 or Bug 52 is present (client left the old fd open). Fixing those two bugs (always calling `disconnect()`) makes Bug 53 unreachable in practice because the old engine session receives `ConnectionClosed` immediately and exits, unblocking `join()` in < 1 ms.
 
-**Fix:** Add `targetApp: NSRunningApplication` and `window: RecordingWindow` parameters. Mirror the focus transfer sequence from `inject()` before the keystroke loop.
+**Fix (primary):** Fix Bugs 49 and 52 so the client always disconnects on error. This makes the old engine session exit immediately and unblocks `join()`.
+
+**Fix (defense-in-depth, C++ side):** After `accept()`, check if the previous session is still running before joining; if so, signal it via the engine's `g_interrupted` or a per-session stop flag before blocking in `join()`. This is a larger change and is not strictly necessary once Bugs 49/52 are fixed.
 
 ---
 
-### Bug 31 — `PreferencesView` hotkey key name table missing ANSI punctuation keys
-- **File:** `app/OpenVerb/UI/PreferencesView.swift:200-211`
-- **Severity:** Low
-- **Status:** Open
+### Bug 50 — `showConflictAlert()` doesn't persist selected hotkey — conflict dialog reappears every launch
+- **File:** `app/OpenVerb/Input/HotkeyManager.swift:365-385`
+- **Severity:** Medium
+- **Status:** Fixed
+- **Negative test:** `testBug50_conflictAlertDoesNotPersistHotkey` — fails while settings aren't written after installEventTap
 
-The `keyNames` dictionary in `hotkeyDescription` is missing ANSI key codes for common punctuation keys that the ShortcutRecorder can capture:
+When ⌥Space is already in use by another app, `showConflictAlert()` offers three alternatives and calls `installEventTap(key: newKey)`. This only updates the in-memory `hotKey` property — it never writes to `AppSettings.shared.hotkeyKeyCode` / `hotkeyModifiers`. On next launch, `register()` reads the original conflicting hotkey from UserDefaults, `installEventTap` fails, and the conflict dialog appears again. The user's choice is lost every time.
 
-| keyCode | Key | Current label |
-|---------|-----|---------------|
-| 0x18 | `=` | `Key(24)` |
-| 0x1B | `-` | `Key(27)` |
-| 0x1E | `]` | `Key(30)` |
-| 0x21 | `[` | `Key(33)` |
-| 0x27 | `'` | `Key(39)` |
-| 0x29 | `;` | `Key(41)` |
-| 0x2A | `\` | `Key(42)` |
-| 0x2B | `,` | `Key(43)` |
-| 0x2C | `/` | `Key(44)` |
-| 0x2F | `.` | `Key(47)` |
-
-If the user records a hotkey like ⌥`=` via ShortcutRecorder, the label reads "⌥Key(24)" instead of "⌥=". The `TextInjector.charToKeyCode` table has the same keys mapped correctly — only the Preferences display is incomplete.
-
-**Fix:** Add the missing entries to the `keyNames` dictionary in `PreferencesView`.
+**Fix:** Persist the selected alternative to AppSettings after installing the tap:
+```swift
+installEventTap(key: newKey)
+settings.hotkeyKeyCode = newKey.virtualKey
+settings.hotkeyModifiers = newKey.flags
+```
