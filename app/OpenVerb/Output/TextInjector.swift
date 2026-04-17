@@ -118,4 +118,106 @@ struct TextInjector {
             up.post(tap: .cghidEventTap)
         }
     }
+
+    // -----------------------------------------------------------------------
+    // CGEvent per-character fallback (MVP5)
+    //
+    // Used when ⌘V is blocked (some terminal emulators, secure input fields).
+    // Only supports ASCII printable characters — CJK/emoji have no ANSI key
+    // code and are silently skipped. ~5 ms per character (hardware event rate).
+    // -----------------------------------------------------------------------
+
+    /// Map a single character to its ANSI (keyCode, needsShift) tuple.
+    /// Returns nil for characters with no physical ANSI key position.
+    static func keyCodeForCharacter(_ char: String) -> (UInt16, Bool)? {
+        guard char.count == 1, let scalar = char.unicodeScalars.first else { return nil }
+        return Self.charToKeyCode[scalar]
+    }
+
+    /// Returns (keyCode, flags) with .maskShift set for uppercase/shifted chars.
+    ///
+    /// The charToKeyCode map stores lowercase key positions (needsShift always
+    /// false in the map). We look up the lowercase version of the character, then
+    /// derive shift from whether the original char differs from its lowercase form.
+    static func keyCodeAndFlags(for char: String) -> (UInt16, CGEventFlags)? {
+        guard let scalar = char.lowercased().unicodeScalars.first,
+              let (code, _) = Self.charToKeyCode[scalar] else { return nil }
+        let needsShift = char != char.lowercased()
+        let flags: CGEventFlags = needsShift ? .maskShift : CGEventFlags(rawValue: 0)
+        return (code, flags)
+    }
+
+    /// Inject text character by character via CGEvent keystrokes.
+    /// Slow (~5 ms/char) but works where ⌘V is blocked.
+    ///
+    /// Bug 30: hide the floating panel and activate the target app BEFORE
+    /// posting any keystrokes. Without this the panel keeps key-window
+    /// status and every character is delivered back to OpenVerb instead
+    /// of the user's app. Mirrors the focus-transfer order used by inject().
+    static func injectPerCharacter(
+        _ text: String,
+        targetApp: NSRunningApplication,
+        window: RecordingWindow
+    ) async {
+
+        // (0) guard: skip injection if target app was quit between recording
+        //     and injection.  Mirrors inject().
+        guard !targetApp.isTerminated else {
+            logger.warning("TextInjector: target app terminated before per-character injection — aborting")
+            window.orderOut(nil)
+            return
+        }
+
+        // (1) hide panel — releases key-window status so target app can refocus.
+        window.orderOut(nil)
+
+        // (2) activate target app.
+        if !targetApp.activate(options: []) {
+            logger.warning("TextInjector: activate() failed for \(targetApp.bundleIdentifier ?? targetApp.localizedName ?? "unknown")")
+        }
+
+        // (3) 50 ms focus-transfer delay — empirical minimum for reliable
+        //     keystroke delivery to the newly-frontmost app under load.
+        try? await Task.sleep(for: .milliseconds(50))
+
+        // (4) post one CGEvent pair per character.
+        for char in text {
+            guard let (keyCode, flags) = keyCodeAndFlags(for: String(char)) else {
+                logger.debug("TextInjector: skipping unsupported char: \(String(char))")
+                continue
+            }
+            if let down = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true) {
+                if flags != CGEventFlags(rawValue: 0) { down.flags = flags }
+                down.post(tap: .cghidEventTap)
+            }
+            if let up = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false) {
+                up.post(tap: .cghidEventTap)
+            }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
+    // ANSI key code lookup table (lowercase + special chars)
+    private static let charToKeyCode: [Unicode.Scalar: (UInt16, Bool)] = {
+        var map: [Unicode.Scalar: (UInt16, Bool)] = [:]
+        let keys: [(Unicode.Scalar, UInt16)] = [
+            ("a", 0x00), ("s", 0x01), ("d", 0x02), ("f", 0x03),
+            ("h", 0x04), ("g", 0x05), ("z", 0x06), ("x", 0x07),
+            ("c", 0x08), ("v", 0x09), ("b", 0x0B), ("q", 0x0C),
+            ("w", 0x0D), ("e", 0x0E), ("r", 0x0F), ("y", 0x10),
+            ("t", 0x11), ("1", 0x12), ("2", 0x13), ("3", 0x14),
+            ("4", 0x15), ("6", 0x16), ("5", 0x17), ("=", 0x18),
+            ("9", 0x19), ("7", 0x1A), ("-", 0x1B), ("8", 0x1C),
+            ("0", 0x1D), ("]", 0x1E), ("o", 0x1F), ("u", 0x20),
+            ("[", 0x21), ("i", 0x22), ("p", 0x23), ("l", 0x25),
+            ("j", 0x26), ("'", 0x27), ("k", 0x28), (";", 0x29),
+            ("\\", 0x2A), (",", 0x2B), ("/", 0x2C), ("n", 0x2D),
+            ("m", 0x2E), (".", 0x2F), ("`", 0x32),
+        ]
+        for (char, code) in keys { map[char] = (code, false) }
+        map[" "]  = (0x31, false)   // Space
+        map["\t"] = (0x30, false)   // Tab
+        map["\n"] = (0x24, false)   // Return
+        return map
+    }()
 }

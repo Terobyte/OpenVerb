@@ -79,6 +79,21 @@ final class AppState: ObservableObject {
     /// abort+restart window. Cleared when PREPARING→RECORDING.
     @Published private(set) var preparingSubtitle: String?
 
+    /// Remaining inference time in milliseconds as reported by the engine's
+    /// queue_status heartbeats.  Non-nil only while in .inferring state and
+    /// the engine has sent at least one queue_status message.  Cleared on
+    /// every transition to .idle.
+    @Published var remainingInferenceMs: Int?
+
+    /// Accumulated live partial transcript text from streaming partial_result
+    /// messages.  Updated while the hotkey is held (recording) and during
+    /// inference.  Cleared on every transition to .idle.
+    @Published var livePartialText: String = ""
+
+    /// The polished (LLM-cleaned) transcript text.  Set when the engine's
+    /// polished_result message arrives.  Cleared on transition to .idle.
+    @Published var polishedText: String?
+
     // -----------------------------------------------------------------------
     // Dependency injection for testing
     // -----------------------------------------------------------------------
@@ -186,6 +201,10 @@ final class AppState: ObservableObject {
             preparingSubtitleTimer?.cancel()
             preparingSubtitleTimer = nil
 
+            // Clear live transcript from previous session (abort+restart skips IDLE).
+            livePartialText = ""
+            polishedText = nil
+
             switch previous {
             case .idle:
                 // Fresh session: capture the frontmost app right now (before
@@ -254,6 +273,9 @@ final class AppState: ObservableObject {
             preparingSubtitle = nil
             autoClearTimer?.cancel()
             autoClearTimer = nil
+            remainingInferenceMs = nil
+            livePartialText = ""
+            polishedText = nil
 
         case .error:
             // Leaving PREPARING (or any state) for ERROR: stop the subtitle timer

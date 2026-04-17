@@ -27,7 +27,12 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
     /// SHA256 of the model file. Replaced by build-release.sh before signing.
     static let expectedSHA256 = "TBD_PIN_BEFORE_RELEASE"
 
-    static let modelURL = URL(string: "https://huggingface.co/ggml-org/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf")!
+    static let modelURL: URL = {
+        guard let url = URL(string: "https://huggingface.co/ggml-org/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf") else {
+            fatalError("ModelDownloader.modelURL is malformed — update the URL string")
+        }
+        return url
+    }()
 
     // -----------------------------------------------------------------------
     // Published state

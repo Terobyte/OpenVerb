@@ -51,6 +51,12 @@ final class ShortcutCaptureView: NSView {
 
     override var acceptsFirstResponder: Bool { true }
 
+    deinit {
+        if let monitor = localMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
+    }
+
     override func mouseDown(with event: NSEvent) {
         if !isRecording { startRecording() }
     }
@@ -111,4 +117,5 @@ final class ShortcutCaptureView: NSView {
             localMonitor = nil
         }
     }
+
 }

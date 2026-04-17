@@ -8,7 +8,10 @@ import os
 // from the AVAudioEngine tap callback (background audio thread) without await.
 //
 // Thread safety:
-//   • fd and recvBuffer are accessed under `ioQueue` (serial DispatchQueue).
+//   • fd is wrapped behind `fdLock` (Bug 5) — writes happen on ioQueue
+//     (connectSync / disconnect); reads also happen from the Phase 2 monitor's
+//     detached Task inside recvJSONSync, so the Int32 itself needs locked access.
+//   • recvBuffer is protected by recvLock.
 //   • sendAudioFrame dispatches fire-and-forget onto ioQueue.
 //   • phase2Error is protected by phase2Lock (NSLock).
 //   • onError closure must capture [weak self] to prevent retain cycles.
@@ -27,9 +30,26 @@ final class EngineClient {
     // Private state
     // -----------------------------------------------------------------------
 
-    private var fd: Int32 = -1
+    /// Bug 5: storage for the socket fd is wrapped behind `fdLock` so concurrent
+    /// readers (Phase 2 monitor's detached Task calling recvJSONSync) and the
+    /// ioQueue writer (connectSync / disconnect) never race on the Int32 itself.
+    /// The `fd` computed property below provides transparent locked access so
+    /// existing call sites do not need to change.
+    private let fdLock = NSLock()
+    private var _fd: Int32 = -1
+    private var fd: Int32 {
+        get { fdLock.lock(); defer { fdLock.unlock() }; return _fd }
+        set { fdLock.lock(); defer { fdLock.unlock() }; _fd = newValue }
+    }
+
     private var recvBuffer = RecvAccumulator()
     private let recvLock = NSLock()
+
+    /// Serializes the poll()+read(fd)+append() syscall cycle inside recvJSONSync.
+    /// Bug 28: without this, drainResult (ioQueue) and the Phase 2 monitor
+    /// (detached Task) race on read(fd) and can split a single JSON message's
+    /// bytes between them, producing two undecodable halves.
+    private let socketReadLock = NSLock()
 
     /// Serial queue for all fd write operations and connect/disconnect.
     private let ioQueue = DispatchQueue(label: "io.openverb.engineclient",
@@ -48,6 +68,18 @@ final class EngineClient {
     /// Called when an error or fatal warning arrives during Phase 2 streaming.
     /// Caller MUST capture [weak self] in the closure to avoid retain cycles.
     var onError: ((ServerMessage) -> Void)?
+
+    /// Called each time a partial_result message arrives from the engine.
+    /// (text, chunkId, isFinal)
+    var onPartialResult: ((String, Int, Bool) -> Void)?
+
+    /// Called each time a queue_status message arrives from the engine.
+    /// (pending, inFlight, etaMs) — inFlight is true when the worker is actively processing a chunk.
+    var onQueueStatus: ((Int, Bool, Int) -> Void)?
+
+    /// Called when the engine's LLM polish pass has produced a cleaned transcript.
+    /// The caller should replace the pending injected text with the polished version.
+    var onPolishedResult: ((String) -> Void)?
 
     // -----------------------------------------------------------------------
     // RecvAccumulator — buffers partial reads across receiveMessage() calls.
@@ -210,7 +242,7 @@ final class EngineClient {
         var combined = Data(header)
         combined.append(payload)
         return try combined.withUnsafeBytes { raw -> Bool in
-            let base = raw.baseAddress!
+            guard let base = raw.baseAddress else { return true }
             var offset = 0
             var remaining = raw.count
             while remaining > 0 {
@@ -243,7 +275,10 @@ final class EngineClient {
         guard fd >= 0 else { throw EngineClientError.notConnected }
         var data = try JSONEncoder().encode(msg)
         data.append(UInt8(ascii: "\n"))
-        try data.withUnsafeBytes { try writeFully($0.baseAddress!, count: $0.count) }
+        try data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            try writeFully(base, count: raw.count)
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -260,6 +295,24 @@ final class EngineClient {
         }
         recvLock.unlock()
 
+        // Bug 28: serialize the poll()+read(fd)+append() cycle so two entrants
+        // (ioQueue drainResult + detached Phase 2 monitor) cannot split a
+        // single message's bytes between them.
+        socketReadLock.lock()
+        defer { socketReadLock.unlock() }
+
+        // Re-check buffer: another caller may have drained a whole message into
+        // recvBuffer while we were blocked on socketReadLock. Handing it back
+        // without entering poll() preserves FIFO delivery.
+        recvLock.lock()
+        if let msg = recvBuffer.extractMessage() {
+            recvLock.unlock(); return msg
+        }
+        recvLock.unlock()
+
+        // fd may have been closed by disconnect() while we waited.
+        guard fd >= 0 else { throw EngineClientError.notConnected }
+
         let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000.0)
         var chunk = [UInt8](repeating: 0, count: 4096)
 
@@ -271,13 +324,18 @@ final class EngineClient {
             let pr = poll(&pfd, 1, Int32(remaining * 1000))
             if pr == 0 { throw EngineClientError.timeout }
             if pr < 0 { throw EngineClientError.systemError(errno: errno) }
-            // POLLHUP or POLLERR means the peer closed or reset the connection —
-            // treat this as a dropped connection immediately rather than looping
-            // until the deadline expires.
-            if pfd.revents & Int16(POLLHUP | POLLERR) != 0 {
-                throw EngineClientError.connectionClosed
+            // Bug 27: check POLLIN BEFORE treating POLLHUP/POLLERR as EOF.
+            // poll() can return revents = POLLIN | POLLHUP when the engine
+            // writes its final message and immediately closes the socket —
+            // throwing connectionClosed on POLLHUP first would discard the
+            // unread bytes still sitting in the kernel's receive buffer.
+            // The actual EOF signal is read() returning 0 (handled below).
+            guard pfd.revents & Int16(POLLIN) != 0 else {
+                if pfd.revents & Int16(POLLHUP | POLLERR) != 0 {
+                    throw EngineClientError.connectionClosed
+                }
+                continue
             }
-            guard pfd.revents & Int16(POLLIN) != 0 else { continue }
 
             let n = read(fd, &chunk, chunk.count)
             if n == 0 { throw EngineClientError.connectionClosed }
@@ -413,7 +471,10 @@ final class EngineClient {
         ioQueue.async {
             guard self.fd >= 0 else { return }
             var sentinel: [UInt8] = [0, 0, 0, 0]
-            try? sentinel.withUnsafeBytes { try self.writeFully($0.baseAddress!, count: $0.count) }
+            try? sentinel.withUnsafeBytes { raw in
+                guard let base = raw.baseAddress else { return }
+                try self.writeFully(base, count: raw.count)
+            }
         }
     }
 
@@ -482,10 +543,7 @@ final class EngineClient {
                 logger.error("Phase 2 monitor: engine connection dropped (POLLHUP/POLLERR)")
                 let errMsg = ServerMessage.error(code: "connection_closed",
                                                  message: "Engine connection dropped mid-recording")
-                phase2Lock.lock()
-                phase2Error = errMsg
-                phase2Lock.unlock()
-                onError?(errMsg)
+                callOnErrorIfLive(errMsg)
                 return
             }
             guard pfds[0].revents & Int16(POLLIN) != 0 else {
@@ -508,18 +566,12 @@ final class EngineClient {
                 data = try recvJSONSync(timeoutMs: 100)
             } catch {
                 logger.error("Phase 2 monitor: fatal read error — aborting stream: \(error)")
-                // Bug 17: re-check stopped — disconnect() after stopPhase2Monitor() closes
-                // fd intentionally, causing recvJSONSync to throw. Don't call onError for that.
-                phase2Lock.lock()
-                stopped = phase2MonitorStopped
-                phase2Lock.unlock()
-                if stopped { return }
+                // Bug 17: callOnErrorIfLive re-checks phase2MonitorStopped so an
+                // intentional disconnect() (which closes fd and causes recvJSONSync
+                // to throw) does not surface as a spurious error.
                 let errMsg = ServerMessage.error(code: "stream_read_error",
                                                  message: "Phase 2 monitor read failed: \(error)")
-                phase2Lock.lock()
-                phase2Error = errMsg
-                phase2Lock.unlock()
-                onError?(errMsg)
+                callOnErrorIfLive(errMsg)
                 return
             }
 
@@ -527,10 +579,7 @@ final class EngineClient {
                 logger.error("Phase 2 monitor: fatal protocol violation — non-JSON byte — aborting stream")
                 let errMsg = ServerMessage.error(code: "protocol_violation",
                                                  message: "Unexpected non-JSON byte in Phase 2 stream")
-                phase2Lock.lock()
-                phase2Error = errMsg
-                phase2Lock.unlock()
-                onError?(errMsg)
+                callOnErrorIfLive(errMsg)
                 return
             }
 
@@ -547,10 +596,9 @@ final class EngineClient {
 
             switch msg {
             case .error:
-                phase2Lock.lock()
-                phase2Error = msg
-                phase2Lock.unlock()
-                onError?(msg)
+                // Bug 17: use helper so a late .error arriving after
+                // stopPhase2Monitor() does not fire onError spuriously.
+                callOnErrorIfLive(msg)
                 return
 
             case .warning(let code, let message):
@@ -580,16 +628,35 @@ final class EngineClient {
         return phase2Error
     }
 
+    /// Bug 17: invoke onError only if the monitor hasn't been stopped yet.
+    /// Re-reads phase2MonitorStopped under phase2Lock to close the race where
+    /// stopPhase2Monitor() flipped the flag while we were mid-message. Also
+    /// stores phase2Error atomically with the stopped check so the two fields
+    /// never disagree.
+    private func callOnErrorIfLive(_ msg: ServerMessage) {
+        phase2Lock.lock()
+        let stopped = phase2MonitorStopped
+        if !stopped { phase2Error = msg }
+        phase2Lock.unlock()
+        if stopped { return }
+        onError?(msg)
+    }
+
     func stopPhase2Monitor() {
         // #21: write under phase2Lock.
         phase2Lock.lock()
         phase2MonitorStopped = true
         phase2Lock.unlock()
 
-        // Signal the monitor to wake up and exit immediately.
-        if wakeWrite >= 0 {
-            var b: UInt8 = 0
-            _ = Darwin.write(wakeWrite, &b, 1)
+        // Bug 33 fix: dispatch the wakeup write via ioQueue so that all
+        // accesses to wakeWrite/wakeRead are serialised on one queue.
+        // Previously this read wakeWrite directly on MainActor while
+        // disconnect() wrote wakeWrite = -1 on ioQueue — undefined behaviour.
+        ioQueue.async { [self] in
+            if wakeWrite >= 0 {
+                var b: UInt8 = 0
+                _ = Darwin.write(wakeWrite, &b, 1)
+            }
         }
         // #19: do NOT block waiting for the monitor task to finish.
         // phase2MonitorStopped=true prevents it from processing further data.

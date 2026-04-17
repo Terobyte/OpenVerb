@@ -34,6 +34,11 @@ enum ServerMessage {
     case warning(code: String, message: String)
     case partialResult(text: String, chunkId: Int, isFinal: Bool)
     case queueStatus(pending: Int, inFlight: Int, etaMs: Int)
+    /// Signals that the LLM polish pass has started.  The client should show
+    /// a "Полирую…" state while waiting for polishedResult.
+    case polishStarted
+    /// The polished (cleaned) transcript text is ready.
+    case polishedResult(text: String)
 }
 
 // ---------------------------------------------------------------------------
@@ -144,6 +149,14 @@ extension ServerMessage {
             }
             let p = try decoder.decode(Payload.self, from: data)
             return .queueStatus(pending: p.pending, inFlight: p.in_flight, etaMs: p.eta_ms)
+
+        case "polish_started":
+            return .polishStarted
+
+        case "polished_result":
+            struct Payload: Decodable { let text: String }
+            let p = try decoder.decode(Payload.self, from: data)
+            return .polishedResult(text: p.text)
 
         default:
             throw EngineProtocolError.unknownType(probe.type)

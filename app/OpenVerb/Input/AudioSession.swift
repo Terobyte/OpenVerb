@@ -137,38 +137,71 @@ final class AudioSession {
                                    waveformCallback: waveformCallback)
         }
 
-        do {
-            try audioEngine.start()
-        } catch {
-            // Roll back the tap we just installed so the next start() call
-            // does not hit the "already has tap" AVAudioEngine assertion.
-            inputNode.removeTap(onBus: 0)
-            throw error
-        }
-
-        // Engine started successfully — now it is safe to claim we are capturing.
+        // Cold-start fix: set _isCapturing BEFORE audioEngine.start() so tap
+        // callbacks that fire during the synchronous audio-unit activation
+        // inside start() are not discarded by the `guard _isCapturing` check
+        // in processTapBuffer. On a cold process, AU activation can dispatch
+        // the first few buffers before start() returns — the old order
+        // (_isCapturing = true set after start()) silently dropped them,
+        // producing an "empty first recording" symptom that cleared on the
+        // second attempt once the AU was warm.
         lock.lock()
         _isCapturing = true
         lock.unlock()
+
+        do {
+            try audioEngine.start()
+        } catch {
+            // Roll back: tap removed AND flag reset so the next start() call
+            // sees a clean state and does not hit the "already has tap"
+            // AVAudioEngine assertion.
+            inputNode.removeTap(onBus: 0)
+            lock.lock()
+            _isCapturing = false
+            lock.unlock()
+            throw error
+        }
 
         logger.info("AudioSession started (hardware: \(hardwareFormat.sampleRate, format: .fixed(precision: 0)) Hz)")
     }
 
     // -----------------------------------------------------------------------
-    // flushAndSetSendCallback — atomic flush + handoff to live streaming.
+    // flushPreBuffer — atomically copy + clear the pre-buffer.
     //
-    // Returns the pre-buffered chunks in chronological order.
-    // After this returns, every new chunk goes to sendCallback instead of
-    // preBuffer.
+    // Does NOT set sendCallback, so audio-thread tap callbacks continue to
+    // accumulate into preBuffer after this returns.  Call commitSendCallback
+    // once all returned frames have been enqueued on ioQueue.
+    //
+    // Bug 32 fix: separating flush from callback activation ensures that
+    // buffered frames are submitted to ioQueue BEFORE any live frame can be
+    // dispatched by the audio thread, preserving chronological order.
     // -----------------------------------------------------------------------
 
-    func flushAndSetSendCallback(_ callback: @escaping (Data) -> Void) -> [Data] {
+    func flushPreBuffer() -> [Data] {
         lock.lock()
         let flushed = preBuffer
         preBuffer.removeAll()
-        sendCallback = callback
         lock.unlock()
         return flushed
+    }
+
+    // -----------------------------------------------------------------------
+    // commitSendCallback — atomically set the live send callback and drain any
+    // frames that accumulated since flushPreBuffer() returned.
+    //
+    // Returns the interim frames (arrived after flushPreBuffer, before this
+    // call).  Caller must enqueue them on ioQueue after the earlier batch.
+    // The window where interim frames can arrive is nanoseconds wide (audio
+    // tap fires every ~128 ms), so in practice this slice is always empty.
+    // -----------------------------------------------------------------------
+
+    func commitSendCallback(_ callback: @escaping (Data) -> Void) -> [Data] {
+        lock.lock()
+        let interim = preBuffer
+        preBuffer.removeAll()
+        sendCallback = callback
+        lock.unlock()
+        return interim
     }
 
     // -----------------------------------------------------------------------

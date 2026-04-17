@@ -28,23 +28,18 @@ final class WaveformViewModel: ObservableObject {
     private let maxBars = 30
 
     /// Computes RMS amplitude from a PCM Int16 mono chunk and appends it to
-    /// the ring buffer.  May be called from any thread; dispatches to main.
-    nonisolated func updateAmplitude(_ data: Data) {
-        let rms = WaveformViewModel.computeRMS(data)
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.amplitudes.append(rms)
-            if self.amplitudes.count > self.maxBars {
-                self.amplitudes.removeFirst()
-            }
+    /// the ring buffer synchronously on the MainActor.
+    func updateAmplitude(_ data: Data) {
+        let rms = Self.computeRMS(data)
+        amplitudes.append(rms)
+        if amplitudes.count > maxBars {
+            amplitudes.removeFirst()
         }
     }
 
     /// Resets the amplitude ring buffer (call on IDLE→PREPARING).
     func reset() {
-        DispatchQueue.main.async { [weak self] in
-            self?.amplitudes.removeAll()
-        }
+        amplitudes.removeAll()
     }
 
     // -----------------------------------------------------------------------

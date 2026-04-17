@@ -56,6 +56,7 @@ struct ContextBuilder {
         targetApp: AppIdentifiable?,
         accessibilityApp: NSRunningApplication? = nil,
         pasteboard: PasteboardReadable = NSPasteboard.general,
+        accessibilityReader: AccessibilityReadable = AccessibilityReader(),
         includeClipboard: Bool = true,
         languageOverride: String? = nil
     ) async -> [String: String] {
@@ -77,8 +78,14 @@ struct ContextBuilder {
             context["language"] = Locale.current.language.languageCode?.identifier ?? "en"
         }
 
-        // "window" — always empty string in MVP3 (Accessibility API deferred to MVP4).
-        context["window"] = ""
+        // "window" — from Accessibility API; empty string if unavailable.
+        // When accessibilityApp is nil: skip — reading OpenVerb's own window title
+        // is useless and would confuse the model.
+        if let app = accessibilityApp {
+            context["window"] = accessibilityReader.readWindowTitle(for: app) ?? ""
+        } else {
+            context["window"] = ""
+        }
 
         // "clipboard" — read from pasteboard if enabled; omit if nil or empty.
         if includeClipboard,
@@ -87,7 +94,27 @@ struct ContextBuilder {
             context["clipboard"] = truncateToUTF8Bytes(clip, limit: clipboardByteLimit)
         }
 
-        // "selected" is set from Accessibility API — deferred to MVP4.
+        // "selected" — from Accessibility API; omit entirely if nil/empty.
+        // NOTE: engine reads "selected" (not "selection") — see prompt_builder.cpp.
+        // When accessibilityApp is nil, skip: reading OpenVerb's own selection is useless.
+        if let app = accessibilityApp,
+           let sel = accessibilityReader.readSelectedText(for: app), !sel.isEmpty {
+            context["selected"] = truncateToUTF8Bytes(sel, limit: clipboardByteLimit)
+        }
+
+        // "surrounding_before" / "surrounding_after" — text flanking the cursor
+        // in the focused text field.  Used by the engine's Context struct to
+        // provide insertion-point context for smarter formatting (Phase 8, step 66).
+        // Omit when empty — no-op for apps that do not expose the full field value.
+        if let app = accessibilityApp {
+            let (before, after) = accessibilityReader.readCursorSurroundingText(for: app)
+            if !before.isEmpty {
+                context["surrounding_before"] = truncateToUTF8Bytes(before, limit: clipboardByteLimit)
+            }
+            if !after.isEmpty {
+                context["surrounding_after"] = truncateToUTF8Bytes(after, limit: clipboardByteLimit)
+            }
+        }
 
         return context
     }

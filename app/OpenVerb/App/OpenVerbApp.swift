@@ -50,17 +50,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // -----------------------------------------------------------------------
     // Long-lived state objects (all @MainActor)
+    //
+    // Bug 43 fix: use lazy var instead of IUO (!) so that any accidental
+    // pre-launch access produces a safely-initialized default object rather
+    // than a nil-dereference crash.  applicationDidFinishLaunching still
+    // assigns concrete instances (overriding the lazy defaults for the ones
+    // that need cross-object wiring), preserving the existing init order.
     // -----------------------------------------------------------------------
 
-    private var appState:        AppState!
-    private var engineManager:   EngineManager!
-    private var hotkeyManager:   HotkeyManager!
-    private var audioSession:    AudioSession!
-    private var waveformVM:      WaveformViewModel!
-    private var processingVM:    ProcessingViewModel!
-    private var recordingWindow: RecordingWindow!
-    private var statusBar:       StatusBarItem!
-    private var appSettings:     AppSettings!
+    private lazy var appState      = AppState()
+    private lazy var engineManager = EngineManager()
+    private lazy var hotkeyManager = HotkeyManager()
+    private lazy var audioSession  = AudioSession()
+    private lazy var waveformVM    = WaveformViewModel()
+    private lazy var processingVM  = ProcessingViewModel()
+    private lazy var appSettings   = AppSettings.shared
+    private lazy var recordingWindow = RecordingWindow(
+        appState:    appState,
+        waveformVM:  waveformVM,
+        processingVM: processingVM,
+        settings:    appSettings
+    )
+    private lazy var statusBar = StatusBarItem(appState: appState, engineManager: engineManager)
     private var onboardingWindow: NSWindow?
 
     // -----------------------------------------------------------------------
@@ -74,6 +85,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// generation no longer matches self.drainGeneration returns silently
     /// instead of tearing down the (new) session. MainActor-isolated — no lock.
     private var drainGeneration: UInt64 = 0
+
+    /// Bug 22: auto-stop timer scheduled when entering .recording. Cancelled
+    /// on every transition out of .recording (stopRecording / handleCancel /
+    /// abortAndRestart / engine error) so a stale timer cannot fire into a
+    /// later session. MainActor-isolated — no lock needed.
+    private var maxDurationTimer: Task<Void, Never>?
+
+    /// 1-second countdown tick timer, active only while in .inferring with a live ETA.
+    /// Fires processingVM.tick() each second to decrement the countdown label.
+    private var etaTickTimer: Timer?
 
     // -----------------------------------------------------------------------
     // applicationDidFinishLaunching — initialise objects then branch:
@@ -93,6 +114,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // always created on the main thread / MainActor.
         appState      = AppState()
         engineManager = EngineManager()
+        // Bug 25: bind defense-in-depth guard so EngineManager refuses any
+        // programmatic restartWithBackend() while a session is active.
+        engineManager.canRestartBackend = { [weak appState] in
+            appState?.state == .idle
+        }
         hotkeyManager = HotkeyManager()
         audioSession  = AudioSession()
         waveformVM    = WaveformViewModel()
@@ -101,10 +127,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // RecordingWindow needs the view-model references — created first
         // so it's ready before the first ⌥Space press.
+        // Bug 18: pass appSettings so the panel can gate WaveformView on
+        // AppSettings.showWaveform live (no app restart required).
         recordingWindow = RecordingWindow(
             appState:    appState,
             waveformVM:  waveformVM,
-            processingVM: processingVM
+            processingVM: processingVM,
+            settings:    appSettings
         )
 
         // First-launch detection: if no .gguf model exists, run onboarding
@@ -200,6 +229,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // Tear down the live recording session before transitioning to
                 // the error state — mirrors handleCancel() and drainResult() error
                 // paths for consistent cleanup regardless of how the error arrived.
+                // Bug 22: cancel the duration timer if it was still pending.
+                self.maxDurationTimer?.cancel()
+                self.maxDurationTimer = nil
                 self.audioSession.stop()
                 self.recordingWindow.hide()
                 self.hotkeyManager.removeEscapeMonitors()
@@ -211,6 +243,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 } catch {
                     logger.error("Crash recovery failed after Phase 2 error: \(error)")
                 }
+            }
+        }
+
+        // ---- Step 26b: Wire queue_status ETA into AppState ----
+        // onQueueStatus fires from drainResult() during .inferring so we can
+        // show a live countdown of remaining inference time.
+        engineManager.engineClient.onQueueStatus = { [weak self] _, _, etaMs in
+            Task { @MainActor [weak self] in
+                guard let self, self.appState.state == .inferring else { return }
+                self.appState.remainingInferenceMs = etaMs
+                self.processingVM.updateEta(ms: etaMs)
+            }
+        }
+
+        // ---- Step 26c: Wire partial_result forwarding ----
+        // onPartialResult fires from drainResult() during .inferring.  Updates
+        // livePartialText for opt-in live subtitle rendering in RecordingWindow.
+        engineManager.engineClient.onPartialResult = { [weak self] text, _, _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.appState.livePartialText += text
+            }
+        }
+
+        // ---- Step 26d: Wire polished_result forwarding ----
+        // onPolishedResult fires when the engine's LLM polish pass completes.
+        // Stores the polished text on AppState for potential re-injection.
+        engineManager.engineClient.onPolishedResult = { [weak self] text in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.appState.polishedText = text
             }
         }
 
@@ -291,6 +354,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         engineManager.shutdown()
         engineManager.disconnect()
+    }
+
+    // -----------------------------------------------------------------------
+    // playSound — Bug 18: gate every NSSound call on AppSettings.soundEffectsEnabled.
+    // The user-facing preference was previously read but never consulted by any
+    // playback site, so toggling it had no effect.
+    // -----------------------------------------------------------------------
+
+    private func playSound(_ name: String) {
+        guard appSettings.soundEffectsEnabled else { return }
+        NSSound(named: name)?.play()
     }
 
     // -----------------------------------------------------------------------
@@ -380,7 +454,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // ---- Step 32: Recording start sound ----
-        NSSound(named: "Tink")?.play()
+        playSound("Tink")
 
         // ---- Step 33: Show recording window ----
         recordingWindow.show()
@@ -405,11 +479,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // -----------------------------------------------------------------------
 
     private func stopRecording() {
+        // Bug 22: leaving .recording — cancel the auto-stop timer so it does
+        // not fire during INFERRING or carry into the next session.
+        maxDurationTimer?.cancel()
+        maxDurationTimer = nil
         audioSession.stop()
         engineManager.engineClient.stopPhase2Monitor()
         engineManager.engineClient.sendEndOfAudio()
         appState.transition(to: .inferring)
-        NSSound(named: "Pop")?.play()
+        playSound("Pop")
         // Escape monitors remain active during INFERRING so the user can still
         // press Escape (ignored during INFERRING) and they carry forward into
         // the next PREPARING/RECORDING cycle after abort-and-restart.
@@ -421,6 +499,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { [weak self] in
             if self?.appState.state == .inferring {
                 self?.processingVM.startSpinnerFallback()
+            }
+        }
+
+        // ---- ETA tick timer: decrement countdown each second during inferring ----
+        etaTickTimer?.invalidate()
+        etaTickTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.appState.state == .inferring else {
+                    self?.etaTickTimer?.invalidate()
+                    self?.etaTickTimer = nil
+                    return
+                }
+                self.processingVM.tick()
             }
         }
 
@@ -446,6 +537,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // -----------------------------------------------------------------------
 
     private func abortAndRestart() {
+        // Bug 22: leaving the active recording — kill the duration timer.
+        maxDurationTimer?.cancel()
+        maxDurationTimer = nil
+        etaTickTimer?.invalidate()
+        etaTickTimer = nil
+        processingVM.resetEta()
         audioSession.stop()
         // #30: stop Phase 2 monitor before disconnect() so the monitor does not
         // detect the fd close as POLLHUP and trigger spurious crash recovery.
@@ -471,6 +568,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // (53) Re-run session-start flow from audioSession.start() onward;
             //      state is already PREPARING and targetApp is preserved.
             processingVM.reset()
+            waveformVM.reset()
 
             do {
                 try audioSession.start(waveformCallback: { [weak self] chunk in
@@ -482,7 +580,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
 
-            NSSound(named: "Tink")?.play()
+            playSound("Tink")
             recordingWindow.show()
 
             // Re-arm Escape monitors for the new PREPARING→RECORDING cycle.
@@ -506,6 +604,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             logger.debug("Escape ignored during INFERRING")
             return
         }
+        // Bug 22: cancel the auto-stop timer if Escape interrupts recording.
+        maxDurationTimer?.cancel()
+        maxDurationTimer = nil
         audioSession.stop()
         // #31: stop Phase 2 monitor before disconnect() so the monitor does not
         // detect the fd close as POLLHUP and trigger spurious crash recovery.
@@ -536,7 +637,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         appState.transition(to: .error(userMessage))
-        NSSound(named: "Basso")?.play()
+        playSound("Basso")
         logger.error("Engine error \(code): \(message)")
     }
 
@@ -589,11 +690,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
 
-            // Atomically flush pre-buffer and begin live streaming.
-            let buffered = audioSession.flushAndSetSendCallback { [weak self] chunk in
+            // Bug 32 fix: flush pre-buffer BEFORE activating the live callback
+            // so all buffered frames reach ioQueue before any live frame can be
+            // dispatched by the audio thread (sendAudioFrame → ioQueue.async).
+            let buffered = audioSession.flushPreBuffer()
+            for chunk in buffered {
+                engineManager.engineClient.sendAudioFrame(chunk)
+            }
+            // Atomically activate live streaming and drain any frames that
+            // arrived in the nanosecond gap since flushPreBuffer() returned.
+            let liveCallback: (Data) -> Void = { [weak self] chunk in
                 self?.engineManager.engineClient.sendAudioFrame(chunk)
             }
-            for chunk in buffered {
+            let interim = audioSession.commitSendCallback(liveCallback)
+            for chunk in interim {
                 engineManager.engineClient.sendAudioFrame(chunk)
             }
             engineManager.engineClient.startPhase2Monitor()
@@ -601,9 +711,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             appState.transition(to: .recording)
             logger.info("Engine ready; streamed \(buffered.count) pre-buffered chunk(s)")
 
+            // Bug 22: enforce AppSettings.maxRecordingDuration. The user-facing
+            // "Max Recording Duration" preference was previously persisted but
+            // never consulted, so recordings ran until manual stop. Schedule a
+            // single-shot Task that triggers the normal stopRecording() flow
+            // when the duration elapses while still in .recording.
+            let limit = appSettings.maxRecordingDuration
+            maxDurationTimer?.cancel()
+            maxDurationTimer = Task { [weak self] in
+                do {
+                    try await Task.sleep(for: .seconds(limit))
+                } catch {
+                    return  // Cancelled — session ended before the limit fired.
+                }
+                guard !Task.isCancelled else { return }
+                guard let self else { return }
+                if self.appState.state == .recording {
+                    logger.info("Max recording duration (\(limit)s) reached — auto-stopping")
+                    self.stopRecording()
+                }
+            }
+
         } catch {
             audioSession.stop()
             hotkeyManager.removeEscapeMonitors()
+            // Bug 52: close the stale fd immediately so the next connectAndRecord()
+            // does not reuse it.  handleCrash() also disconnects, but there is a
+            // narrow window between appState.transition(to: .error) below and the
+            // Task executing where a rapid ⌥Space could call connectSync() and
+            // silently reuse the open fd.
+            engineManager.disconnect()
             logger.error("Engine connect failed: \(error)")
             if appState.state != .idle {
                 // Surface structured server error info when the engine rejected
@@ -649,13 +786,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // Only tear down if this session is still active — abort+restart
                 // moves to .preparing before this catch fires, so we must not clobber it.
                 if appState.state == .inferring {
+                    etaTickTimer?.invalidate()
+                    etaTickTimer = nil
+                    processingVM.resetEta()
                     recordingWindow.hide()
                     audioSession.stop()
                     // #33: remove Escape monitors on error path — monitors were left
                     // registered, staying active indefinitely after the session failed.
                     hotkeyManager.removeEscapeMonitors()
                     appState.transition(to: .error("Connection lost"))
-                    NSSound(named: "Basso")?.play()
+                    playSound("Basso")
                     // Invoke crash recovery (exponential backoff) so the engine is
                     // ready for the next session without a manual restart.
                     Task { [weak self] in
@@ -674,10 +814,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .progress(let percent):
                 processingVM.updateProgress(percent)
 
+            case .partialResult(let text, let chunkId, let isFinal):
+                // Forward to the registered callback (live text / livePartialText).
+                engineManager.engineClient.onPartialResult?(text, chunkId, isFinal)
+
+            case .queueStatus(let pending, let inFlight, let etaMs):
+                // Forward to the ETA callback (sets remainingInferenceMs on AppState).
+                engineManager.engineClient.onQueueStatus?(pending, inFlight > 0, etaMs)
+
+            case .polishStarted:
+                processingVM.enterPolishing()
+
+            case .polishedResult(let text):
+                processingVM.exitPolishing()
+                engineManager.engineClient.onPolishedResult?(text)
+
             case .result(let text, let command):
                 // Disconnect so the engine detects EOF and returns to IDLE,
                 // freeing the socket slot before any async injection work begins.
                 engineManager.disconnect()
+                maxDurationTimer?.cancel()
+                maxDurationTimer = nil
+                etaTickTimer?.invalidate()
+                etaTickTimer = nil
+                processingVM.resetEta()
                 // Command takes priority over text.
                 if let cmd = command, !cmd.action.isEmpty {
                     if let target = appState.targetApp {
@@ -706,10 +866,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 logger.warning("Engine warning \(code): \(message)")
 
             case .error(let code, let message):
+                Task { [weak self] in try? await self?.engineManager.handleCrash() }
                 // Error ends the session.
                 recordingWindow.hide()
+                engineManager.disconnect()
                 audioSession.stop()
                 hotkeyManager.removeEscapeMonitors()
+                maxDurationTimer?.cancel()
+                maxDurationTimer = nil
+                etaTickTimer?.invalidate()
+                etaTickTimer = nil
+                processingVM.resetEta()
                 handleEngineError(.error(code: code, message: message))
                 return
 

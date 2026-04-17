@@ -22,6 +22,21 @@ final class ProcessingViewModel: ObservableObject {
 
     @Published private(set) var displayedPercent: Double = 0.0
     @Published private(set) var showSpinner: Bool = false
+    @Published private(set) var isPolishing: Bool = false
+
+    // -----------------------------------------------------------------------
+    // ETA countdown — set by updateEta(), decremented by tick(), cleared by
+    // resetEta().  Non-nil only while waiting for streaming inference to finish.
+    // -----------------------------------------------------------------------
+
+    @Published private(set) var etaSeconds: Int?
+
+    /// Human-readable countdown string, e.g. "~3 сек".
+    /// Nil when no ETA is known (falls back to spinner / ring in the view).
+    var etaText: String? {
+        guard let s = etaSeconds, s > 0 else { return nil }
+        return "~\(s) сек"
+    }
 
     private var spinnerTask: Task<Void, Never>?
 
@@ -38,6 +53,49 @@ final class ProcessingViewModel: ObservableObject {
     }
 
     // -----------------------------------------------------------------------
+    // updateEta — refresh the ETA from a queue_status heartbeat (ms → seconds).
+    // -----------------------------------------------------------------------
+
+    func updateEta(ms: Int) {
+        let secs = max(0, (ms + 999) / 1000)  // round up to nearest second
+        etaSeconds = secs > 0 ? secs : nil
+        // Cancel spinner fallback — we have a real countdown now.
+        spinnerTask?.cancel()
+        spinnerTask = nil
+        showSpinner = false
+    }
+
+    // -----------------------------------------------------------------------
+    // tick — called every second by a Timer in OpenVerbApp to decrement ETA.
+    // -----------------------------------------------------------------------
+
+    func tick() {
+        guard let s = etaSeconds else { return }
+        etaSeconds = s > 1 ? s - 1 : nil
+    }
+
+    // -----------------------------------------------------------------------
+    // resetEta — clears the countdown (e.g. when inference finishes or aborts).
+    // -----------------------------------------------------------------------
+
+    func resetEta() {
+        etaSeconds = nil
+    }
+
+    // -----------------------------------------------------------------------
+    // enterPolishing / exitPolishing — show "Полирую…" state while the engine
+    // runs the LLM cleanup pass on the raw transcript.
+    // -----------------------------------------------------------------------
+
+    func enterPolishing() {
+        isPolishing = true
+    }
+
+    func exitPolishing() {
+        isPolishing = false
+    }
+
+    // -----------------------------------------------------------------------
     // reset — MUST be called on every IDLE→PREPARING transition.
     // -----------------------------------------------------------------------
 
@@ -46,6 +104,8 @@ final class ProcessingViewModel: ObservableObject {
         spinnerTask = nil
         displayedPercent = 0.0
         showSpinner = false
+        etaSeconds = nil
+        isPolishing = false
     }
 
     // -----------------------------------------------------------------------
@@ -53,6 +113,8 @@ final class ProcessingViewModel: ObservableObject {
     // -----------------------------------------------------------------------
 
     func startSpinnerFallback() {
+        // If an ETA is already showing, no spinner fallback needed.
+        guard etaSeconds == nil else { return }
         spinnerTask?.cancel()
         spinnerTask = Task { [weak self] in
             do {
@@ -60,7 +122,10 @@ final class ProcessingViewModel: ObservableObject {
             } catch {
                 return
             }
-            self?.showSpinner = true
+            // Only show spinner if ETA still not known after 2 s.
+            if self?.etaSeconds == nil {
+                self?.showSpinner = true
+            }
         }
     }
 }
@@ -75,7 +140,21 @@ struct ProcessingView: View {
 
     var body: some View {
         ZStack {
-            if viewModel.showSpinner {
+            if viewModel.isPolishing {
+                // Polish pass in progress — show "Полирую…" label.
+                Text("Полирую…")
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .foregroundColor(.white)
+                    .frame(height: 40)
+                    .transition(.opacity)
+            } else if let eta = viewModel.etaText {
+                // Countdown label — shows ~N сек while streaming inference drains.
+                Text(eta)
+                    .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                    .foregroundColor(.white)
+                    .frame(height: 40)
+                    .transition(.opacity)
+            } else if viewModel.showSpinner {
                 // Indeterminate spinner — no progress messages received.
                 IndeterminateRing()
                     .frame(width: 36, height: 36)
@@ -87,6 +166,8 @@ struct ProcessingView: View {
         }
         .frame(height: 40)
         .animation(.easeInOut(duration: 0.2), value: viewModel.displayedPercent)
+        .animation(.easeInOut(duration: 0.3), value: viewModel.etaText)
+        .animation(.easeInOut(duration: 0.2), value: viewModel.isPolishing)
     }
 }
 

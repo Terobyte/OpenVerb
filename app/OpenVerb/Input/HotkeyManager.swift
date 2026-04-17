@@ -103,6 +103,13 @@ final class HotkeyManager {
         }
     }
 
+    /// Updates the active hotkey and reinstalls the CGEvent tap immediately.
+    /// Call from a Combine observer to apply Preferences changes live without
+    /// requiring an app restart.
+    func configure(keyCode: CGKeyCode, modifiers: CGEventFlags) {
+        installEventTap(key: HotKey(virtualKey: keyCode, flags: modifiers))
+    }
+
     private func installEventTap(key: HotKey) {
         // Remove any existing tap first.
         removeEventTap()
@@ -242,14 +249,11 @@ final class HotkeyManager {
 
     deinit {
         // removeEventTap and removeEscapeMonitors touch AppKit/CF objects.
-        // In practice HotkeyManager lives for the app's lifetime, but clean up
-        // defensively here (must be called on main thread during normal teardown).
-        // MainActor.assumeIsolated is safe inside the Thread.isMainThread guard.
-        if Thread.isMainThread {
-            MainActor.assumeIsolated {
-                removeEventTap()
-                removeEscapeMonitors()
-            }
+        // HotkeyManager is owned exclusively by @MainActor objects so deinit
+        // always runs on the main actor — unconditional cleanup is safe.
+        MainActor.assumeIsolated {
+            removeEventTap()
+            removeEscapeMonitors()
         }
     }
 
@@ -359,24 +363,26 @@ final class HotkeyManager {
     }
 
     private func showConflictAlert() {
+        guard let newKey = pickAlternativeHotkey() else { return }
+        logger.info("Switching hotkey to alternative: \(newKey.virtualKey)")
+        installEventTap(key: newKey)
+        settings.hotkeyKeyCode = newKey.virtualKey
+        settings.hotkeyModifiers = newKey.flags
+    }
+
+    private func pickAlternativeHotkey() -> HotKey? {
         let alert = NSAlert()
         alert.messageText = "⌥Space Is Already in Use"
         alert.informativeText = "Another app is using ⌥Space. Choose an alternative hotkey:"
-
         let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 200, height: 26))
         popup.addItems(withTitles: ["⌥` (backtick)", "⌃Space", "⌥⇧Space"])
         alert.accessoryView = popup
-
         alert.addButton(withTitle: "Use Selected Key")
         alert.addButton(withTitle: "Cancel")
-
-        if alert.runModal() == .alertFirstButtonReturn {
-            let alternatives: [HotKey] = [.altBacktick, .ctrlSpace, .altShiftSpace]
-            let selected = popup.indexOfSelectedItem
-            guard selected >= 0 && selected < alternatives.count else { return }
-            let newKey = alternatives[selected]
-            logger.info("Switching hotkey to alternative \(selected)")
-            installEventTap(key: newKey)
-        }
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        let alternatives: [HotKey] = [.altBacktick, .ctrlSpace, .altShiftSpace]
+        let selected = popup.indexOfSelectedItem
+        guard selected >= 0 && selected < alternatives.count else { return nil }
+        return alternatives[selected]
     }
 }

@@ -28,10 +28,12 @@ final class StatusBarItem {
     // -----------------------------------------------------------------------
 
     private let item: NSStatusItem
-    private var engineObserver: Any?
     private var pulseTimer: Timer?
     private var pulsePhase: Bool = false
     private weak var engineManager: EngineManager?
+    /// Bug 25: retained so the Preferences window can observe session state
+    /// and gate the backend picker.
+    private weak var appState: AppState?
 
     // -----------------------------------------------------------------------
     // Init
@@ -40,6 +42,7 @@ final class StatusBarItem {
     init(appState: AppState, engineManager: EngineManager) {
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         self.engineManager = engineManager
+        self.appState = appState
         buildMenu()
         applyIcon(for: appState.state)
     }
@@ -206,6 +209,13 @@ final class StatusBarItem {
     }
 
     @objc private func showPreferences() {
-        PreferencesWindowController.shared.open(engineManager: engineManager)
+        guard let appState else {
+            // appState was deallocated — cannot open Preferences without it
+            // (backend picker gating depends on observing AppState).
+            return
+        }
+        PreferencesWindowController.shared.open(
+            engineManager: engineManager,
+            appState: appState)
     }
 }

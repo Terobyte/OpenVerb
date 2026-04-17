@@ -131,6 +131,88 @@ final class ContextBuilderTests: XCTestCase {
         XCTAssertEqual(lang, expected, "language should default to current locale")
     }
 
+    func testLanguageOverrideUsedWhenProvided() async {
+        let ctx = await ContextBuilder.build(
+            targetApp: MockAppIdentifiable(bundleIdentifier: "com.apple.Notes", localizedName: "Notes"),
+            languageOverride: "ru"
+        )
+        XCTAssertEqual(ctx["language"], "ru")
+    }
+
+    // -----------------------------------------------------------------------
+    // MARK: clipboard toggle
+    // -----------------------------------------------------------------------
+
+    func testClipboardOmittedWhenToggleOff() async {
+        let pb = MockPasteboard()
+        pb.content = "some clipboard text"
+        let ctx = await ContextBuilder.build(
+            targetApp: MockAppIdentifiable(bundleIdentifier: "com.apple.Notes", localizedName: "Notes"),
+            pasteboard: pb,
+            includeClipboard: false
+        )
+        XCTAssertNil(ctx["clipboard"])
+    }
+
+    // -----------------------------------------------------------------------
+    // MARK: Accessibility — window + selected text
+    // -----------------------------------------------------------------------
+
+    func testWindowTitlePopulatedFromAccessibility() async {
+        let mock = MockAccessibilityReader()
+        mock.windowTitle = "Inbox — Mail"
+        let mockApp = NSRunningApplication.current
+        let ctx = await ContextBuilder.build(
+            targetApp: MockAppIdentifiable(bundleIdentifier: "com.apple.mail", localizedName: "Mail"),
+            accessibilityApp: mockApp,
+            pasteboard: MockPasteboard(),
+            accessibilityReader: mock
+        )
+        XCTAssertEqual(ctx["window"], "Inbox — Mail")
+    }
+
+    func testSelectionPopulatedFromAccessibility() async {
+        let mock = MockAccessibilityReader()
+        mock.selectedText = "selected words"
+        let mockApp = NSRunningApplication.current
+        let ctx = await ContextBuilder.build(
+            targetApp: MockAppIdentifiable(bundleIdentifier: "com.apple.Notes", localizedName: "Notes"),
+            accessibilityApp: mockApp,
+            pasteboard: MockPasteboard(),
+            accessibilityReader: mock
+        )
+        XCTAssertEqual(ctx["selected"], "selected words")
+    }
+
+    func testSelectionTruncatedTo10KB() async {
+        let mock = MockAccessibilityReader()
+        // Pure ASCII (1 byte/char) so utf8.count == character count — equality is exact.
+        mock.selectedText = String(repeating: "x", count: 15_000)
+        let mockApp = NSRunningApplication.current
+        let ctx = await ContextBuilder.build(
+            targetApp: MockAppIdentifiable(bundleIdentifier: "com.apple.Notes", localizedName: "Notes"),
+            accessibilityApp: mockApp,
+            pasteboard: MockPasteboard(),
+            accessibilityReader: mock
+        )
+        XCTAssertEqual(ctx["selected"]?.utf8.count, 10_240)
+    }
+
+    func testWindowEmptyWhenAccessibilityDenied() async {
+        let mock = MockAccessibilityReader()
+        mock.windowTitle = nil
+        mock.selectedText = nil
+        let mockApp = NSRunningApplication.current
+        let ctx = await ContextBuilder.build(
+            targetApp: MockAppIdentifiable(bundleIdentifier: "com.apple.Terminal", localizedName: "Terminal"),
+            accessibilityApp: mockApp,
+            pasteboard: MockPasteboard(),
+            accessibilityReader: mock
+        )
+        XCTAssertEqual(ctx["window"], "")
+        XCTAssertNil(ctx["selected"])
+    }
+
     // -----------------------------------------------------------------------
     // MARK: truncateToUTF8Bytes helper
     // -----------------------------------------------------------------------

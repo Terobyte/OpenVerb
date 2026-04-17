@@ -44,18 +44,27 @@ final class AppSettings: ObservableObject {
     /// Defaults to `.standard` in production; inject a ephemeral suite in tests.
     private let defaults: UserDefaults
 
+    /// Set to true during reset() to suppress didSet → UserDefaults writes.
+    private var isResetting = false
+
     // -----------------------------------------------------------------------
     // Published settings — Hotkey
     // -----------------------------------------------------------------------
 
     /// Virtual key code for the global recording hotkey (default: Space = 0x31).
     @Published var hotkeyKeyCode: UInt16 = 0x31 {
-        didSet { defaults.set(Int(hotkeyKeyCode), forKey: Key.hotkeyKeyCode) }
+        didSet {
+            guard !isResetting else { return }
+            defaults.set(Int(hotkeyKeyCode), forKey: Key.hotkeyKeyCode)
+        }
     }
 
     /// Modifier flags for the global recording hotkey (default: Option).
     @Published var hotkeyModifiers: CGEventFlags = .maskAlternate {
-        didSet { defaults.set(Int(hotkeyModifiers.rawValue), forKey: Key.hotkeyModifiers) }
+        didSet {
+            guard !isResetting else { return }
+            defaults.set(Int(hotkeyModifiers.rawValue), forKey: Key.hotkeyModifiers)
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -64,7 +73,10 @@ final class AppSettings: ObservableObject {
 
     /// Inference backend used by the engine.
     @Published var backend: BackendType = .gemmaAudio {
-        didSet { defaults.set(backend.rawValue, forKey: Key.backend) }
+        didSet {
+            guard !isResetting else { return }
+            defaults.set(backend.rawValue, forKey: Key.backend)
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -74,7 +86,10 @@ final class AppSettings: ObservableObject {
     /// Preferred language code for speech recognition (e.g. "en", "de", "fr").
     /// When nil the setting falls back to the system locale on next init.
     @Published var language: String? {
-        didSet { defaults.set(language, forKey: Key.language) }
+        didSet {
+            guard !isResetting else { return }
+            defaults.set(language, forKey: Key.language)
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -83,12 +98,31 @@ final class AppSettings: ObservableObject {
 
     /// Whether to play sound effects on recording start / stop.
     @Published var soundEffectsEnabled: Bool {
-        didSet { defaults.set(soundEffectsEnabled, forKey: Key.soundEffectsEnabled) }
+        didSet {
+            guard !isResetting else { return }
+            defaults.set(soundEffectsEnabled, forKey: Key.soundEffectsEnabled)
+        }
     }
 
     /// Whether to show the floating waveform during recording.
     @Published var showWaveform: Bool {
-        didSet { defaults.set(showWaveform, forKey: Key.showWaveform) }
+        didSet {
+            guard !isResetting else { return }
+            defaults.set(showWaveform, forKey: Key.showWaveform)
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Published settings — Live Transcript
+    // -----------------------------------------------------------------------
+
+    /// Whether to show a live partial transcript below the waveform during
+    /// recording.  Off by default — can be distracting for short dictations.
+    @Published var showLiveTranscript: Bool = false {
+        didSet {
+            guard !isResetting else { return }
+            defaults.set(showLiveTranscript, forKey: Key.showLiveTranscript)
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -97,7 +131,10 @@ final class AppSettings: ObservableObject {
 
     /// Whether to include clipboard context when building the prompt.
     @Published var includeClipboard: Bool = true {
-        didSet { defaults.set(includeClipboard, forKey: Key.includeClipboard) }
+        didSet {
+            guard !isResetting else { return }
+            defaults.set(includeClipboard, forKey: Key.includeClipboard)
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -108,8 +145,12 @@ final class AppSettings: ObservableObject {
     /// Values are clamped to 1...300.  Default is 60.
     @Published var maxRecordingDuration: Int {
         didSet {
+            guard !isResetting else { return }
             let clamped = maxRecordingDuration.clamped(to: 1...300)
-            if clamped != maxRecordingDuration { maxRecordingDuration = clamped }
+            if clamped != maxRecordingDuration {
+                maxRecordingDuration = clamped
+                return // didSet re-fires with clamped value; UserDefaults write happens there
+            }
             defaults.set(maxRecordingDuration, forKey: Key.maxRecordingDuration)
         }
     }
@@ -120,7 +161,10 @@ final class AppSettings: ObservableObject {
 
     /// Directory where GGUF models are stored.
     @Published var modelDirectory: String = "" {
-        didSet { defaults.set(modelDirectory, forKey: Key.modelDirectory) }
+        didSet {
+            guard !isResetting else { return }
+            defaults.set(modelDirectory, forKey: Key.modelDirectory)
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -134,6 +178,7 @@ final class AppSettings: ObservableObject {
         static let language              = "app.settings.language"
         static let soundEffectsEnabled   = "app.settings.soundEffectsEnabled"
         static let showWaveform          = "app.settings.showWaveform"
+        static let showLiveTranscript    = "showLiveTranscript"
         static let includeClipboard      = "includeClipboard"
         static let maxRecordingDuration  = "app.settings.maxRecordingDuration"
         static let modelDirectory        = "modelDirectory"
@@ -183,6 +228,11 @@ final class AppSettings: ObservableObject {
         self.showWaveform = defaults.object(forKey: Key.showWaveform) as? Bool
             ?? Default.showWaveform
 
+        // Live transcript
+        if defaults.object(forKey: Key.showLiveTranscript) != nil {
+            showLiveTranscript = defaults.bool(forKey: Key.showLiveTranscript)
+        }
+
         // Clipboard
         if defaults.object(forKey: Key.includeClipboard) != nil {
             includeClipboard = defaults.bool(forKey: Key.includeClipboard)
@@ -207,13 +257,16 @@ final class AppSettings: ObservableObject {
     // -----------------------------------------------------------------------
 
     func reset() {
-        // Set in-memory properties to defaults first (didSet writes to UserDefaults).
+        isResetting = true
+        defer { isResetting = false }
+        // Set in-memory properties to defaults first (didSet writes skipped while resetting).
         hotkeyKeyCode = 0x31
         hotkeyModifiers = .maskAlternate
         backend = .gemmaAudio
         language = Locale.current.language.languageCode?.identifier
         soundEffectsEnabled = Default.soundEffectsEnabled
         showWaveform = Default.showWaveform
+        showLiveTranscript = false
         includeClipboard = Default.includeClipboard
         maxRecordingDuration = Default.maxRecordingDuration
         modelDirectory = FileManager.default.homeDirectoryForCurrentUser
@@ -226,6 +279,7 @@ final class AppSettings: ObservableObject {
         defaults.removeObject(forKey: Key.language)
         defaults.removeObject(forKey: Key.soundEffectsEnabled)
         defaults.removeObject(forKey: Key.showWaveform)
+        defaults.removeObject(forKey: Key.showLiveTranscript)
         defaults.removeObject(forKey: Key.includeClipboard)
         defaults.removeObject(forKey: Key.maxRecordingDuration)
         defaults.removeObject(forKey: Key.modelDirectory)

@@ -89,6 +89,35 @@ final class AppStateTests: XCTestCase {
         XCTAssertNil(sut.targetApp)
     }
 
+    // -----------------------------------------------------------------------
+    // MARK: remainingInferenceMs — Phase 7, step 51
+    // -----------------------------------------------------------------------
+
+    func testRemainingInferenceMsIsNilInitially() {
+        XCTAssertNil(sut.remainingInferenceMs,
+                     "remainingInferenceMs must be nil before any session")
+    }
+
+    func testRemainingInferenceMsCanBeSet() {
+        sut.transition(to: .preparing)
+        sut.transition(to: .recording)
+        sut.transition(to: .inferring)
+        sut.remainingInferenceMs = 3000
+        XCTAssertEqual(sut.remainingInferenceMs, 3000,
+                       "remainingInferenceMs must reflect the assigned value")
+    }
+
+    func testRemainingInferenceMsClearedOnIdleTransition() {
+        sut.transition(to: .preparing)
+        sut.transition(to: .recording)
+        sut.transition(to: .inferring)
+        sut.remainingInferenceMs = 5000
+        XCTAssertEqual(sut.remainingInferenceMs, 5000)
+        sut.transition(to: .idle)
+        XCTAssertNil(sut.remainingInferenceMs,
+                     "remainingInferenceMs must be cleared when transitioning to .idle")
+    }
+
     func testRecordingToIdleCancelClearsTargetApp() {
         sut.transition(to: .preparing)
         sut.transition(to: .recording)
@@ -330,6 +359,64 @@ final class AppStateTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(120))
         XCTAssertEqual(sut.preparingSubtitle, "Preparing...",
                        "Subtitle must reappear after preparingSubtitleDelay in the new session")
+    }
+
+    // -----------------------------------------------------------------------
+    // MARK: 5-second auto-clear timer
+    // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // MARK: livePartialText and polishedText (Phase 8)
+    // -----------------------------------------------------------------------
+
+    func testLivePartialTextIsEmptyInitially() {
+        XCTAssertEqual(sut.livePartialText, "",
+                       "livePartialText must be empty string initially")
+    }
+
+    func testLivePartialTextClearedOnIdleTransition() {
+        sut.transition(to: .preparing)
+        sut.transition(to: .recording)
+        sut.livePartialText = "hello world"
+        sut.transition(to: .inferring)
+        sut.transition(to: .idle)
+        XCTAssertEqual(sut.livePartialText, "",
+                       "livePartialText must be cleared on transition to .idle")
+    }
+
+    func testLivePartialTextClearedOnPreparingAbortRestart() {
+        sut.transition(to: .preparing)
+        sut.transition(to: .recording)
+        sut.livePartialText = "partial text"
+        sut.transition(to: .inferring)
+        sut.transition(to: .preparing)  // abort+restart
+        XCTAssertEqual(sut.livePartialText, "",
+                       "livePartialText must be cleared on INFERRING→PREPARING (abort+restart)")
+    }
+
+    func testPolishedTextNilInitially() {
+        XCTAssertNil(sut.polishedText,
+                     "polishedText must be nil initially")
+    }
+
+    func testPolishedTextClearedOnIdleTransition() {
+        sut.transition(to: .preparing)
+        sut.transition(to: .recording)
+        sut.transition(to: .inferring)
+        sut.polishedText = "polished"
+        sut.transition(to: .idle)
+        XCTAssertNil(sut.polishedText,
+                     "polishedText must be cleared on transition to .idle")
+    }
+
+    func testPolishedTextClearedOnPreparingAbortRestart() {
+        sut.transition(to: .preparing)
+        sut.transition(to: .recording)
+        sut.transition(to: .inferring)
+        sut.polishedText = "cleaned"
+        sut.transition(to: .preparing)
+        XCTAssertNil(sut.polishedText,
+                     "polishedText must be cleared on INFERRING→PREPARING")
     }
 
     // -----------------------------------------------------------------------

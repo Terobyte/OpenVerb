@@ -15,8 +15,8 @@ import SwiftUI
 //     .regularMaterial for vibrancy in both light and dark mode.
 //   • Content: hosts RecordingContentView (WaveformView + ProcessingView)
 //     wrapped in NSHostingView.
-//   • Crossfade: RECORDING→INFERRING fades WaveformView out and ProcessingView
-//     in over 150 ms via SwiftUI .transition(.opacity).
+//   • Crossfade: RECORDING→INFERRING fades ProcessingView in over WaveformView
+//     (0.15 s easeIn), then removes WaveformView (0.05 s easeOut) — no gap.
 // ---------------------------------------------------------------------------
 
 final class RecordingWindow: NSPanel {
@@ -27,7 +27,8 @@ final class RecordingWindow: NSPanel {
 
     init(appState: AppState,
          waveformVM: WaveformViewModel,
-         processingVM: ProcessingViewModel) {
+         processingVM: ProcessingViewModel,
+         settings: AppSettings) {
 
         // Window dimensions include padding for the shadow (visual content is
         // ~300×80 pt; shadow padding adds ~20 pt on each side → 340×120 pt).
@@ -49,10 +50,13 @@ final class RecordingWindow: NSPanel {
         self.appearance = nil    // Inherit system appearance.
         self.collectionBehavior = [.canJoinAllSpaces, .stationary]
 
+        // Bug 18: pass AppSettings into the SwiftUI content so showWaveform
+        // gates the WaveformView and live-updates when the user toggles it.
         let content = RecordingContentView(
             appState: appState,
             waveformVM: waveformVM,
-            processingVM: processingVM
+            processingVM: processingVM,
+            settings: settings
         )
         self.contentView = NSHostingView(rootView: content)
     }
@@ -103,6 +107,13 @@ struct RecordingContentView: View {
     @ObservedObject var appState: AppState
     @ObservedObject var waveformVM: WaveformViewModel
     @ObservedObject var processingVM: ProcessingViewModel
+    /// Bug 18: read showWaveform live so toggling the preference takes effect
+    /// during the next recording without an app restart.
+    @ObservedObject var settings: AppSettings
+
+    @State private var showRecording = false
+    @State private var showInferring = false
+    @State private var previousState: AppState.State = .idle
 
     var body: some View {
         ZStack {
@@ -114,21 +125,15 @@ struct RecordingContentView: View {
 
             VStack(spacing: 8) {
                 ZStack {
-                    if appState.state == .recording {
+                    if showRecording && settings.showWaveform {
                         WaveformView(viewModel: waveformVM)
                             .transition(.opacity)
                     }
-                    if appState.state == .inferring {
+                    if showInferring {
                         ProcessingView(viewModel: processingVM)
                             .transition(.opacity)
                     }
                 }
-                // Bug 11 fix: sequential crossfade instead of simultaneous to
-                // eliminate the visible gap where both views are mid-opacity.
-                // Outgoing view fades out first (easeOut 0.1 s), then the
-                // incoming view fades in with a 0.1 s delay (easeIn 0.1 s).
-                .animation(.easeOut(duration: 0.1), value: appState.state == .recording)
-                .animation(.easeIn(duration: 0.1).delay(0.1), value: appState.state == .inferring)
 
                 if let subtitle = appState.preparingSubtitle {
                     Text(subtitle)
@@ -137,8 +142,50 @@ struct RecordingContentView: View {
                         .transition(.opacity)
                         .animation(.easeInOut(duration: 0.15), value: appState.preparingSubtitle)
                 }
+
+                // Live partial transcript — opt-in via showLiveTranscript.
+                // Shows accumulated text below the waveform during recording
+                // and inference so the user can see what was recognized.
+                if settings.showLiveTranscript,
+                   !appState.livePartialText.isEmpty,
+                   (showRecording || showInferring) {
+                    Text(appState.livePartialText)
+                        .font(.system(size: 11, weight: .regular, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .truncationMode(.head)
+                        .frame(maxWidth: 280, alignment: .center)
+                        .transition(.opacity)
+                        .animation(.easeInOut(duration: 0.1), value: appState.livePartialText)
+                }
             }
         }
         .frame(width: 340, height: 120)
+        .onAppear {
+            syncDisplayState(with: appState.state)
+            previousState = appState.state
+        }
+        .onChange(of: appState.state) { newState in
+            if previousState == .recording, newState == .inferring {
+                withAnimation(.easeIn(duration: 0.15)) {
+                    showInferring = true
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
+                    withAnimation(.easeOut(duration: 0.05)) {
+                        showRecording = false
+                    }
+                }
+            } else {
+                syncDisplayState(with: newState)
+            }
+            previousState = newState
+        }
+    }
+
+    private func syncDisplayState(with state: AppState.State) {
+        let isRec = state == .recording
+        let isInf = state == .inferring
+        if showRecording != isRec { showRecording = isRec }
+        if showInferring != isInf { showInferring = isInf }
     }
 }

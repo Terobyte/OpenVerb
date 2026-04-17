@@ -4,9 +4,11 @@ import XCTest
 final class MockAccessibilityReader: AccessibilityReadable {
     var windowTitle: String?
     var selectedText: String?
+    var cursorSurroundingText: (before: String, after: String) = ("", "")
 
     func readWindowTitle(for app: NSRunningApplication) -> String? { windowTitle }
     func readSelectedText(for app: NSRunningApplication) -> String? { selectedText }
+    func readCursorSurroundingText(for app: NSRunningApplication) -> (before: String, after: String) { cursorSurroundingText }
 }
 
 final class AccessibilityReaderTests: XCTestCase {

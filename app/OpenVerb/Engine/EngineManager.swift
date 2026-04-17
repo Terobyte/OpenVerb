@@ -68,6 +68,11 @@ final class EngineManager: ObservableObject {
     /// Injected for unit testing; production code uses `.default`.
     let fileManager: FileManager
 
+    /// Bug 25: defense-in-depth guard for `restartWithBackend`. Returns true
+    /// when the caller is allowed to proceed. Injected by AppDelegate to bind
+    /// `appState.state == .idle`. nil closure ≡ "always allow" for tests.
+    var canRestartBackend: (() -> Bool)?
+
     // -----------------------------------------------------------------------
     // Crash recovery state
     // -----------------------------------------------------------------------
@@ -216,9 +221,10 @@ final class EngineManager: ObservableObject {
         // All checks and the status = .starting assignment below are synchronous
         // on @MainActor, so no interleave is possible between them.
         guard status != .starting else {
-            // #43 (app): add a 10 s timeout so that if the first caller's Task
-            // is cancelled without updating status, this loop does not spin forever.
-            let spinDeadline = Date().addingTimeInterval(10.0)
+            // Bug 45 fix: cap at 2 s (was 10 s) so that if the first caller's
+            // Task stalls (engine launched but never responds to ping), the
+            // MainActor is frozen for at most 2 s instead of 10 s.
+            let spinDeadline = Date().addingTimeInterval(2.0)
             while status == .starting && Date() < spinDeadline {
                 try await Task.sleep(for: .milliseconds(50))
             }
@@ -389,6 +395,14 @@ final class EngineManager: ObservableObject {
         let delay = backoffDelay(attempt: crashCounter)
         logger.info("Engine crashed; retrying in \(delay, format: .fixed(precision: 0)) s")
         try await Task.sleep(for: .seconds(delay))
+        // Bug 51: skip pre-warm if a new session started during the sleep.
+        // Pinging an active session's socket injects JSON into the binary
+        // PCM stream, corrupting the protocol (engine reads 4 bytes of the
+        // ping JSON as a frame length ≈ 2 GB and blocks indefinitely).
+        guard canRestartBackend?() ?? true else {
+            logger.info("handleCrash: session active — skipping pre-warm ping")
+            return
+        }
         try await ensureRunning()
     }
 
@@ -396,6 +410,13 @@ final class EngineManager: ObservableObject {
     /// Sets backendOverride so launchEngine() passes --backend to the subprocess,
     /// then shuts down and restarts via ensureRunning().
     func restartWithBackend(_ backend: BackendType) async {
+        // Bug 25: refuse restart while a session is active. UI should have
+        // disabled the Preferences picker, but programmatic callers (tests,
+        // future MCP hooks, auto-switch suggestions) are guarded here.
+        guard canRestartBackend?() ?? true else {
+            logger.warning("restartWithBackend skipped: session active")
+            return
+        }
         AppSettings.shared.backend = backend
         backendOverride = backend.rawValue
         status = .starting
@@ -491,7 +512,6 @@ final class EngineManager: ObservableObject {
 
     @objc func handleWake() {
         logger.info("System wake — reconnecting to engine")
-        status = .starting
         onWakeStarted?()
         Task { [weak self] in
             guard let self else { return }
