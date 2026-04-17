@@ -48,6 +48,18 @@
 #define DEFAULT_CTX_SIZE          4096
 
 // ---------------------------------------------------------------------------
+// Streaming chunked inference constants
+// ---------------------------------------------------------------------------
+
+#define MIN_CHUNK_MS              3000
+#define MAX_CHUNK_MS              20000
+#define SILENCE_BOUNDARY_MS       600
+#define CHUNK_QUEUE_MAX_DEPTH     8
+#define QUEUE_STATUS_HEARTBEAT_MS 500
+#define DEFAULT_CHUNK_INFER_SPEED 0.5
+#define INFER_SPEED_EWMA_ALPHA    0.3
+
+// ---------------------------------------------------------------------------
 // User-facing defaults (DEFAULT_ prefix — can vary per workflow / user pref)
 // ---------------------------------------------------------------------------
 
