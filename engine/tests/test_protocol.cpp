@@ -204,3 +204,36 @@ TEST_F(SocketPairTest, SendErrorRoundtrip) {
     EXPECT_EQ(r["code"], "session_limit");
     EXPECT_EQ(r["message"], "engine busy");
 }
+
+TEST_F(SocketPairTest, SendPartialResultRoundtrip) {
+    send_partial_result(a, 3, "hello world", true);
+
+    RecvBuffer buf{};
+    auto r = recv_json(b, buf, 5000);
+    EXPECT_EQ(r["type"], "partial_result");
+    EXPECT_EQ(r["chunk_id"], 3);
+    EXPECT_EQ(r["text"], "hello world");
+    EXPECT_EQ(r["is_final"], true);
+}
+
+TEST_F(SocketPairTest, SendPartialResultNotFinal) {
+    send_partial_result(a, 0, "hello", false);
+
+    RecvBuffer buf{};
+    auto r = recv_json(b, buf, 5000);
+    EXPECT_EQ(r["type"], "partial_result");
+    EXPECT_EQ(r["chunk_id"], 0);
+    EXPECT_EQ(r["text"], "hello");
+    EXPECT_EQ(r["is_final"], false);
+}
+
+TEST_F(SocketPairTest, SendQueueStatusRoundtrip) {
+    send_queue_status(a, 3, 1, 5000);
+
+    RecvBuffer buf{};
+    auto r = recv_json(b, buf, 5000);
+    EXPECT_EQ(r["type"], "queue_status");
+    EXPECT_EQ(r["pending"], 3);
+    EXPECT_EQ(r["in_flight"], 1);
+    EXPECT_EQ(r["eta_ms"], 5000);
+}

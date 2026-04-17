@@ -221,3 +221,21 @@ void send_warning(int fd, const char* code, const std::string& message) {
         send_json(fd, w);
     } catch (...) {}
 }
+
+void send_partial_result(int fd, int chunk_id, const std::string& text, bool is_final) {
+    nlohmann::json msg;
+    msg["type"]     = "partial_result";
+    msg["chunk_id"] = chunk_id;
+    msg["text"]     = text;
+    msg["is_final"] = is_final;
+    send_json(fd, msg);
+}
+
+void send_queue_status(int fd, int pending, int in_flight, int eta_ms) {
+    nlohmann::json msg;
+    msg["type"]      = "queue_status";
+    msg["pending"]   = pending;
+    msg["in_flight"] = in_flight;
+    msg["eta_ms"]    = eta_ms;
+    send_json(fd, msg);
+}

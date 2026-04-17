@@ -36,3 +36,5 @@ void                     read_exact(int fd, uint8_t* buf, size_t n, int timeout_
 std::vector<uint8_t>     recv_binary_frame(int fd, RecvBuffer& buf, int timeout_ms = 15000);
 void                     send_error(int fd, ErrorCode code, const std::string& message);
 void                     send_warning(int fd, const char* code, const std::string& message);
+void                     send_partial_result(int fd, int chunk_id, const std::string& text, bool is_final);
+void                     send_queue_status(int fd, int pending, int in_flight, int eta_ms);
