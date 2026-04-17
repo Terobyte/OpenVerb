@@ -94,6 +94,46 @@ final class EngineProtocolTests: XCTestCase {
     }
 
     // -----------------------------------------------------------------------
+    // MARK: partial_result and queue_status decoding
+    // -----------------------------------------------------------------------
+
+    func testDecodePartialResult() throws {
+        let json = #"{"type":"partial_result","chunk_id":3,"text":"hello world","is_final":true}"# + "\n"
+        let msg = try ServerMessage.fromJSON(json.utf8Data)
+        guard case .partialResult(let text, let chunkId, let isFinal) = msg else {
+            XCTFail("Expected .partialResult, got \(msg)")
+            return
+        }
+        XCTAssertEqual(text, "hello world")
+        XCTAssertEqual(chunkId, 3)
+        XCTAssertTrue(isFinal)
+    }
+
+    func testDecodePartialResultNotFinal() throws {
+        let json = #"{"type":"partial_result","chunk_id":0,"text":"hi","is_final":false}"# + "\n"
+        let msg = try ServerMessage.fromJSON(json.utf8Data)
+        guard case .partialResult(let text, let chunkId, let isFinal) = msg else {
+            XCTFail("Expected .partialResult, got \(msg)")
+            return
+        }
+        XCTAssertEqual(text, "hi")
+        XCTAssertEqual(chunkId, 0)
+        XCTAssertFalse(isFinal)
+    }
+
+    func testDecodeQueueStatus() throws {
+        let json = #"{"type":"queue_status","pending":3,"in_flight":1,"eta_ms":5000}"# + "\n"
+        let msg = try ServerMessage.fromJSON(json.utf8Data)
+        guard case .queueStatus(let pending, let inFlight, let etaMs) = msg else {
+            XCTFail("Expected .queueStatus, got \(msg)")
+            return
+        }
+        XCTAssertEqual(pending, 3)
+        XCTAssertEqual(inFlight, 1)
+        XCTAssertEqual(etaMs, 5000)
+    }
+
+    // -----------------------------------------------------------------------
     // MARK: Command action is nil/empty → result has no command
     // -----------------------------------------------------------------------
 

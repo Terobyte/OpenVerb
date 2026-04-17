@@ -32,6 +32,8 @@ enum ServerMessage {
     case error(code: String, message: String)
     /// Warning does NOT end the session; client logs and continues streaming.
     case warning(code: String, message: String)
+    case partialResult(text: String, chunkId: Int, isFinal: Bool)
+    case queueStatus(pending: Int, inFlight: Int, etaMs: Int)
 }
 
 // ---------------------------------------------------------------------------
@@ -124,6 +126,24 @@ extension ServerMessage {
             struct Payload: Decodable { let code: String; let message: String }
             let p = try decoder.decode(Payload.self, from: data)
             return .warning(code: p.code, message: p.message)
+
+        case "partial_result":
+            struct Payload: Decodable {
+                let chunk_id: Int
+                let text: String
+                let is_final: Bool
+            }
+            let p = try decoder.decode(Payload.self, from: data)
+            return .partialResult(text: p.text, chunkId: p.chunk_id, isFinal: p.is_final)
+
+        case "queue_status":
+            struct Payload: Decodable {
+                let pending: Int
+                let in_flight: Int
+                let eta_ms: Int
+            }
+            let p = try decoder.decode(Payload.self, from: data)
+            return .queueStatus(pending: p.pending, inFlight: p.in_flight, etaMs: p.eta_ms)
 
         default:
             throw EngineProtocolError.unknownType(probe.type)
