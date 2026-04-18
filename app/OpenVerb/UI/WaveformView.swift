@@ -78,7 +78,7 @@ struct WaveformView: View {
                     .frame(width: 4, height: barHeight(paddedAmplitudes[i]))
             }
         }
-        .frame(height: 40)
+        .frame(height: 44)
         .animation(.linear(duration: 0.05), value: viewModel.amplitudes)
     }
 
@@ -96,15 +96,17 @@ struct WaveformView: View {
     }
 
     private func barHeight(_ amplitude: CGFloat) -> CGFloat {
-        // Map 0.0–1.0 amplitude to 4–36 pt bar height.
+        // Linear map 0.0–1.0 → 4–40 pt so low amplitudes still show visible
+        // variation (max(6, x*44) makes all bars flat below amplitude ~0.14).
         let clamped = min(max(amplitude, 0), 1)
-        return 4 + clamped * 32
+        return 4 + clamped * 36
     }
 
     private var barGradient: LinearGradient {
+        // Moss green palette from the recording-hud design system.
         LinearGradient(
-            colors: [Color(red: 0.0, green: 0.78, blue: 0.85),
-                     Color(red: 0.13, green: 0.53, blue: 0.96)],
+            colors: [Color(red: 0.337, green: 0.455, blue: 0.251),          // moss-500 #567540
+                     Color(red: 0.623, green: 0.714, blue: 0.533)],          // moss-300 #9FB788
             startPoint: .bottom,
             endPoint: .top
         )

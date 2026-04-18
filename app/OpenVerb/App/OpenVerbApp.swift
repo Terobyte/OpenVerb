@@ -135,6 +135,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             processingVM: processingVM,
             settings:    appSettings
         )
+        // Wire the HUD's Stop button to the same stopRecording() path as ⌥Space.
+        recordingWindow.onStop = { [weak self] in self?.stopRecording() }
 
         // First-launch detection: if no .gguf model exists, run onboarding
         // wizard instead of the normal startup path. Onboarding calls
