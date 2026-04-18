@@ -220,11 +220,7 @@ std::string Engine::polish_text(const std::string& raw, const Context& ctx) {
     }
 
     try {
-        InferenceResult result = be->process(
-            /*samples=*/{},
-            /*sample_rate=*/SAMPLE_RATE,
-            /*context_json=*/prompt,
-            /*progress=*/nullptr);
+        InferenceResult result = be->process_text(prompt, nullptr);
         if (!result.text.empty()) return result.text;
     } catch (const std::exception&) {
         // Polish failure is non-fatal — return raw transcript.

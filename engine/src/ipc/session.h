@@ -42,8 +42,10 @@ private:
 
     void run(int fd, Engine& engine, const SessionConfig& cfg);
 
-    // Signals stop_requested_ and wakes any waiters.
-    // Worker teardown (worker_thread_ join) is handled inline in run().
+    // Signals stop, shuts down chunk_queue_, and joins worker_thread_ if
+    // still running.  Called from ~Session() as a safety net for the
+    // uncaught-exception path; run() joins the worker inline on all normal
+    // and expected-exception exits.
     void stop();
 
     // ---------------------------------------------------------------------------

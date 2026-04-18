@@ -62,7 +62,7 @@ The `.result` path in `drainResult()` calls `engineManager.disconnect()` (line 7
 ### Bug 32 — Audio frame ordering violation in `connectAndRecord()` [HIGH]
 - **File:** `app/OpenVerb/App/OpenVerbApp.swift`
 - **Severity:** High
-- **Status:** Active
+- **Status:** Fixed
 - **Negative test:** `testBug32_bufferedFramesCanArriveLaterThanLiveFrames` — fails while no `syncOnIOQueue`/`sendBufferedFrames`/`ioQueue.sync` fence is present
 
 `flushAndSetSendCallback()` activates the live send callback and returns buffered chunks atomically. The caller loops over those chunks and dispatches each via `sendAudioFrame` (`ioQueue.async`). Simultaneously, the audio tap fires its live callback which also dispatches to `ioQueue.async`. Both paths compete on the serial queue — a live frame from the audio thread can land in `ioQueue` before a buffered frame dispatched from the MainActor loop, delivering frames out of chronological order and degrading recognition quality.
@@ -203,3 +203,193 @@ installEventTap(key: newKey)
 settings.hotkeyKeyCode = newKey.virtualKey
 settings.hotkeyModifiers = newKey.flags
 ```
+
+---
+
+### Bug 54 — `TextInjector` leaves transcription on `NSPasteboard` for 300 ms — stale clipboard context in next session
+- **File:** `app/OpenVerb/Output/TextInjector.swift:59-102` × `app/OpenVerb/Context/ContextBuilder.swift:91-95`
+- **Severity:** High — **primary cause of "writes what I said last time" symptom**
+- **Status:** Fixed
+- **Negative test:** `testBug54_clipboardCapturedAtStartRecordingNotConnectAndRecord` — fails while `clipboardSnapshot` is not captured in `startRecording()` and `ContextBuilder.build` has no `clipboardSnapshot:` parameter
+
+`TextInjector.inject()` writes the transcribed text to `NSPasteboard.general` at step (2), posts ⌘V, waits 300 ms for the target app to read the clipboard (step 7), then restores the original at step (8). If the user presses ⌥Space again within that 300 ms window, `startRecording()` → `connectAndRecord()` → `ContextBuilder.build()` reads `NSPasteboard.general.string(forType: .string)` and gets the **just-transcribed text from the previous session** as `context["clipboard"]`.
+
+The engine's LLM prompt builder receives the previous transcription as clipboard context. If the current recording is ambiguous, short, or acoustically similar to the previous one, the LLM reproduces the previous transcription verbatim. Additionally, if `changeCount` changed during the paste window (step 8 guard fails), the transcription remains on the clipboard indefinitely, biasing every subsequent session.
+
+**Potentially affects:** every session started within ~300 ms of a successful injection; fast typers / power users who immediately re-dictate after a paste; `abortAndRestart` sequences (the new session starts ~1.5 s later but TextInjector's 300 ms window may still overlap); any session where the original clipboard was nil (restore is a no-op, so the transcription stays on the pasteboard until the user copies something else).
+
+**Fix:** Capture the current clipboard at `startRecording()` time (before `TextInjector` runs), not inside `ContextBuilder.build()` at `connectAndRecord()` time. Alternatively, pass a `clipboardSnapshot` captured during `startRecording()` through to `ContextBuilder`, so the context is always the clipboard content at the moment ⌥Space was pressed — never the text that was just injected.
+
+```swift
+// In startRecording(), before the Task:
+let clipboardSnapshot = appSettings.includeClipboard
+    ? NSPasteboard.general.string(forType: .string)
+    : nil
+
+// In connectAndRecord(), replace the ContextBuilder call with:
+let context = await ContextBuilder.build(
+    targetApp: appState.targetApp,
+    accessibilityApp: appState.targetApp,
+    clipboardSnapshot: clipboardSnapshot,
+    languageOverride: appSettings.language
+)
+```
+
+---
+
+### Bug 55 — `livePartialText` never updates during `.recording` — partial results only arrive post-stop
+- **File:** `app/OpenVerb/App/OpenVerbApp.swift:263-268` × `app/OpenVerb/UI/RecordingWindow.swift:149-160`
+- **Severity:** Medium
+- **Status:** Fixed
+- **Negative test:** `testBug55_livePartialTextDeadDuringRecording` — fails while `runPhase2Monitor` default case doesn't call `onPartialResult` and no live-reader task exists in `connectAndRecord()`
+
+`appState.livePartialText` is populated exclusively by the `onPartialResult` callback, which is invoked only inside `drainResult()`. `drainResult()` is spawned in `stopRecording()` and runs during `.inferring` state. During `.recording`, no code reads `partial_result` messages from the engine socket — the `phase2Monitor` does read them (if the engine sends any during Phase 2), but puts them back at the front of `recvBuffer` via `prepend()` for `drainResult` to consume later.
+
+Consequence: even with `showLiveTranscript = true`, the live transcript remains blank while the user is speaking. Text appears only in a burst after ⌥Space is released (during `.inferring`), not incrementally. The user may also conflate `includeClipboard` (which sends clipboard context to the engine silently) with `showLiveTranscript` (the actual display toggle, which defaults to `false`). Enabling clipboard context changes nothing visible in the UI.
+
+Secondary issue: `showLiveTranscript` defaults to `false` and is shown in Preferences separately from `includeClipboard`. A user who enables `includeClipboard` expecting live text to appear will see no change.
+
+**Potentially affects:** all users who enabled `showLiveTranscript` — the feature is completely non-functional during recording regardless of that setting; users who enabled `includeClipboard` thinking it controls visible output (UX confusion); long recordings where real-time feedback would reduce rerecording — without live text, users cannot tell if the model is capturing their speech correctly until after they stop.
+
+**Fix (display):** During `.recording`, set up a lightweight polling task that calls `receiveMessage` with a short timeout and appends any `partialResult` messages to `livePartialText`. Or, have `phase2Monitor` forward non-error messages directly via the `onPartialResult` callback instead of putting them back in `recvBuffer`.
+
+**Fix (UX):** Add a tooltip or label in Preferences making clear that `includeClipboard` improves accuracy silently, while `showLiveTranscript` controls the visible rolling subtitle.
+
+---
+
+### Bug 56 — `phase2Monitor` `prepend`-spin-loop: non-error Phase 2 messages are infinitely re-read
+- **File:** `app/OpenVerb/Engine/EngineClient.swift:608-616`
+- **Severity:** High — **probable cause of ~50% empty-result sessions when engine sends partial_result during streaming**
+- **Status:** Fixed
+- **Negative test:** `testBug56_phase2MonitorPrependSpinLoop` — fails while `default` case in `runPhase2Monitor` has no `continue` after `recvBuffer.prepend()`
+
+When any non-error JSON message (e.g. `partial_result`, `progress`) arrives during Phase 2 binary streaming, `runPhase2Monitor` puts it back into `recvBuffer` via `recvBuffer.prepend(restored)`. On the very next loop iteration the monitor calls `recvJSONSync(timeoutMs: 100)`, which checks the in-memory buffer **before** polling the socket:
+
+```swift
+recvLock.lock()
+if let msg = recvBuffer.extractMessage() {   // ← finds the message we just prepended
+    recvLock.unlock(); return msg             // ← returns the SAME message immediately
+}
+```
+
+The monitor extracts the same message, classifies it as non-error, and prepends it again — a tight spin-loop. `drainResult` can steal the message from `recvBuffer` during the narrow window between the monitor's `prepend` and its next `extractMessage`, but this is a race: under contention the monitor keeps re-taking the message and `drainResult` starves. If the engine sends `partial_result` messages during Phase 2 (streaming inference), this manifests as:
+
+1. `phase2Monitor` spins on one CPU core consuming ~100 % of that core.
+2. `drainResult` struggles to read Phase 3 result messages — each call to `receiveMessage` sees an empty buffer (monitor just extracted), falls through to `socketReadLock`+poll, and blocks for up to 180 s.
+3. User experiences: recording seems to work, stop is pressed, long spinner, then either a 180 s timeout error or, on lucky races where `drainResult` wins, a correct result — explaining the ~50 % success rate.
+
+**Fix:** In the `default` case, after `prepend`, do **not** continue to the top of the loop immediately. Instead skip the `recvJSONSync` call and `poll` the socket for fresh data, so the monitor only re-processes socket events — not the already-buffered message it just put back:
+
+```swift
+default:
+    recvLock.lock()
+    var restored = data
+    restored.append(UInt8(ascii: "\n"))
+    recvBuffer.prepend(restored)
+    recvLock.unlock()
+    // Bug 56 fix: skip directly to the stopped-check and loop top so the
+    // next iteration polls the socket (not the buffer we just refilled).
+    phase2Lock.lock()
+    stopped = phase2MonitorStopped
+    phase2Lock.unlock()
+    continue   // ← goes back to while condition → ioQueue.sync(fd >= 0) → poll
+```
+
+Because `continue` jumps to the outer `while` check (which calls `ioQueue.sync { fd >= 0 }` and then `poll(&pfds, 2, 100)`), the monitor will wait up to 100 ms before attempting another read, giving `drainResult` an uncontested window to extract the buffered message.
+
+**Potentially affects:** any session where the engine emits `partial_result` or `progress` messages during Phase 2 binary streaming (i.e. while audio is still being sent); the Gemma Audio streaming backend is the primary suspect since it performs streaming inference per chunk and is designed to emit partials incrementally; backends that only emit results after the audio sentinel (Phase 3) are unaffected; the bug also causes elevated CPU on one core for the entire recording duration whenever it fires.
+
+---
+
+### Bug 57 — `Session::stop()` does not join `worker_thread_` — `std::terminate()` on unexpected exception
+- **File:** `engine/src/ipc/session.cpp:38-40` × `engine/src/ipc/session.h:38`
+- **Severity:** High — **crash: process abort**
+- **Status:** Fixed
+- **Negative test:** `testBug57_sessionStopDoesNotJoinWorkerThread` — fails while `stop()` has no `worker_thread_.join()`
+
+`Session::stop()` only signals `stop_requested_` and notifies `result_cv_`, but never joins `worker_thread_`. The comment reads "worker_thread_ is joined inline within run()" — and this is true for the two expected exits (loop break after `stop_requested_`, `ConnectionClosed` exception). However, the STREAMING_AUDIO catch block only catches `ConnectionClosed` and `std::runtime_error`. Any other exception — most likely `std::bad_alloc` from `VadScanner::buffer_.insert()` or from any STL container in the hot path — propagates out of `run()` entirely without reaching the join site. The `std::thread` object then goes out of scope while joinable: `std::thread::~thread()` calls `std::terminate()`, crashing the engine process.
+
+Even under low-memory conditions (audio callbacks firing while the system is under pressure), `new` for any internal container can throw `std::bad_alloc`. The STREAMING_AUDIO loop processes audio buffers continuously, making this a realistic failure mode under memory pressure.
+
+**Fix:** Add `if (worker_thread_.joinable()) worker_thread_.join();` to `Session::stop()` — the function that is always called from `~Session()`. Alternatively, widen the STREAMING_AUDIO catch to `catch (const std::exception& e)` or `catch (...)` so all exceptions are handled before the join site.
+
+```cpp
+void Session::stop() {
+    stop_requested_.store(true, std::memory_order_relaxed);
+    result_cv_.notify_all();
+    if (worker_thread_.joinable()) worker_thread_.join();  // ← add this
+}
+```
+
+---
+
+### Bug 58 — `vad.cpp::filter()` trailing-silence loop narrows `size_t` → `int`
+- **File:** `engine/src/audio/vad.cpp:155`
+- **Severity:** Low
+- **Status:** Fixed
+- **Negative test:** `testBug58_vadFilterTrailingSilenceNarrowsIndex` — fails while loop uses `int si`
+
+In `VadScanner::filter()`, the trailing-silence flush loop:
+
+```cpp
+if (in_speech && !pending.empty()) {
+    for (int si : pending) {  // ← si is int; pending is std::vector<size_t>
+        append_frame(si);
+    }
+}
+```
+
+`pending` is `std::vector<size_t>` (frame indices). The range-for variable `si` is declared `int`, which silently narrows every `size_t` element. `append_frame` takes `size_t fi`. On a 64-bit target, `size_t` is 8 bytes and `int` is 4 bytes. Frame counts in practice never approach `INT_MAX` (a 30-minute recording at 16 kHz with 512-sample frames is ~3500 frames), so no truncation occurs at runtime — but the type mismatch is a real compiler warning (C4267 / -Wsign-conversion / -Wshorten-64-to-32) and a latent hazard if the audio pipeline ever processes larger buffers.
+
+**Fix:** Change `int si` to `size_t si` (or `const auto si`).
+
+```cpp
+for (size_t si : pending) {
+    append_frame(si);
+}
+```
+
+---
+
+### Bug 59 — `polish_text()` passes empty audio to the multimodal backend — polish pass is non-functional in all deployments
+- **File:** `engine/src/engine.cpp:223` × `engine/src/backend/backend_gemma_audio.cpp:55-68`
+- **Severity:** Medium — **UX: feature appears to work but produces no improvement**
+- **Status:** Fixed
+- **Negative test:** `testBug59_polishTextPassesEmptySamplesToBackend` — fails while `polish_text()` passes `{}` as samples
+
+`polish_text()` calls the multimodal backend with an empty audio vector:
+
+```cpp
+InferenceResult result = be->process(
+    /*samples=*/{},          // ← empty — no audio
+    /*sample_rate=*/SAMPLE_RATE,
+    /*context_json=*/prompt,
+    /*progress=*/nullptr);
+```
+
+In `GemmaAudioBackend::process_impl()`, when `vad_enabled = false` (the daemon default set by `DEFAULT_VAD_ENABLED_FILE`), the VAD filter is skipped: `pcm_to_infer = audio_pcm` = empty. The code then tries to create an audio bitmap from zero samples:
+
+```cpp
+mtmd_bitmap* audio_bmp = mtmd_bitmap_init_from_audio(0, audio_f32.data());
+if (!audio_bmp) {
+    throw std::runtime_error("LlamaContext::infer: failed to create audio bitmap");
+}
+```
+
+`mtmd_bitmap_init_from_audio(0, ptr)` almost certainly returns null for zero samples. The resulting `std::runtime_error` is caught in `polish_text()`'s catch block, which silently returns the raw transcript:
+
+```cpp
+} catch (const std::exception& e) {
+    log_warning("polish_text failed: " + std::string(e.what()));
+    return raw_transcript;  // ← original text returned, no polish applied
+}
+```
+
+The Swift app launches the engine with `["--listen", "--socket", socketPath]` — no `--vad` flag — so `vad_enabled = false` in all real deployments. The UI shows "Polishing…" (the `polish_started` message is sent), but the polish pass never runs. The backend is called with empty audio on a multimodal model, it throws, and the raw transcript is returned as if polished. The feature is silently broken in production.
+
+**Potentially affects:** every user — the polish pass has never functioned in any shipped configuration; the animated "Polishing…" indicator is cosmetic; users may attribute transcription quality improvements to polishing when none occurred, or incorrectly blame the model for not cleaning up filler words.
+
+**Fix:** `polish_text()` is a text-only operation and should not go through the audio backend's `process()`. Options:
+1. Add a `process_text(prompt, progress)` method to the `Backend` interface that accepts no audio, and route `polish_text()` through it.
+2. Pass a minimal non-empty noise-floor audio vector (e.g. a few zero samples) to suppress the null bitmap check, then suppress the audio tokens in the prompt template — a workaround, not a real fix.
+3. If the model supports text-only inference via a system prompt without audio tokens, implement a separate `LlamaContext::infer_text()` that omits the `mtmd` audio embedding path entirely.

@@ -285,14 +285,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appState.$state
             .receive(on: RunLoop.main)
             .sink { [weak self] state in
-                self?.statusBar?.updateState(state)
+                self?.statusBar.updateState(state)
             }
             .store(in: &cancellables)
 
         engineManager.$status
             .receive(on: RunLoop.main)
             .sink { [weak self] status in
-                self?.statusBar?.updateEngineStatus(status)
+                self?.statusBar.updateEngineStatus(status)
             }
             .store(in: &cancellables)
 
@@ -309,10 +309,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.hotkeyManager.removeEscapeMonitors()
         }
         engineManager.onWakeStarted = { [weak self] in
-            self?.statusBar?.showStatus("Loading model...")
+            self?.statusBar.showStatus("Loading model...")
         }
         engineManager.onWakeCompleted = { [weak self] in
-            self?.statusBar?.clearStatus()
+            self?.statusBar.clearStatus()
         }
 
         logger.info("OpenVerb launched")
@@ -386,6 +386,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // -----------------------------------------------------------------------
+    // showMicPermissionDeniedAlert — shown when .denied or .restricted.
+    // -----------------------------------------------------------------------
+
+    private func showMicPermissionDeniedAlert() {
+        let alert = NSAlert()
+        alert.messageText = "Microphone Permission Needed"
+        alert.informativeText = """
+            OpenVerb needs microphone access to record your voice.
+
+            Please grant permission in:
+            System Settings › Privacy & Security › Microphone
+            """
+        alert.addButton(withTitle: "Open System Settings")
+        alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn {
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+                NSWorkspace.shared.open(url)
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // startRecording — steps 29–33 (Phase 7).
     //
     // (29) Check mic permission.
@@ -398,26 +420,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // -----------------------------------------------------------------------
 
     private func startRecording() {
+        // Bug 54: capture clipboard at ⌥Space press time so TextInjector's
+        // 300 ms paste window never contaminates the session context.
+        let clipboardSnapshot = appSettings.includeClipboard
+            ? NSPasteboard.general.string(forType: .string)
+            : nil
 
         // ---- Step 29: Microphone permission check ----
         let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
         switch micStatus {
         case .denied, .restricted:
-            let alert = NSAlert()
-            alert.messageText = "Microphone Permission Needed"
-            alert.informativeText = """
-                OpenVerb needs microphone access to record your voice.
-
-                Please grant permission in:
-                System Settings › Privacy & Security › Microphone
-                """
-            alert.addButton(withTitle: "Open System Settings")
-            alert.addButton(withTitle: "Cancel")
-            if alert.runModal() == .alertFirstButtonReturn {
-                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
-                    NSWorkspace.shared.open(url)
-                }
-            }
+            showMicPermissionDeniedAlert()
             return
 
         case .notDetermined:
@@ -464,13 +477,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyManager.registerEscapeMonitors()
 
         // ---- Step 35: Engine connect + session start ----
-        // NOTE: The 500 ms "Preparing..." subtitle timer is managed entirely
-        // inside AppState.transition(to: .preparing) via preparingSubtitleTimer.
-        // Do NOT spawn an external Task here — it cannot be cancelled when
-        // PREPARING → IDLE fires and would write stale state into the next session.
         Task { [weak self] in
             guard let self else { return }
-            await connectAndRecord()
+            await connectAndRecord(clipboardSnapshot: clipboardSnapshot)
         }
     }
 
@@ -556,6 +565,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // immediately inside applyEntryEffects — no external mutation needed here.
         appState.transition(to: .preparing)
 
+        // Bug 54: capture clipboard at ⌥Space press time so a rapid re-press
+        // during the 1.5 s abort wait never sees TextInjector's paste.
+        let clipboardSnapshot = appSettings.includeClipboard
+            ? NSPasteboard.general.string(forType: .string)
+            : nil
+
         Task { [weak self] in
             guard let self else { return }
 
@@ -588,7 +603,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // safe whether or not monitors were already active.
             hotkeyManager.registerEscapeMonitors()
 
-            await connectAndRecord()
+            await connectAndRecord(clipboardSnapshot: clipboardSnapshot)
         }
     }
 
@@ -655,7 +670,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // On any error: stop audio, transition to .error.
     // -----------------------------------------------------------------------
 
-    private func connectAndRecord() async {
+    private func connectAndRecord(clipboardSnapshot: String? = nil) async {
         do {
             try await engineManager.ensureRunning()
 
@@ -670,6 +685,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let context = await ContextBuilder.build(
                 targetApp: appState.targetApp,
                 accessibilityApp: appState.targetApp,
+                clipboardSnapshot: clipboardSnapshot,
                 includeClipboard: appSettings.includeClipboard,
                 languageOverride: appSettings.language
             )
@@ -706,9 +722,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             for chunk in interim {
                 engineManager.engineClient.sendAudioFrame(chunk)
             }
+            // Bug 32 fix: drain all pre-buffered+interim frame writes from ioQueue
+            // before activating the live streaming monitor.
+            engineManager.engineClient.syncOnIOQueue()
             engineManager.engineClient.startPhase2Monitor()
 
             appState.transition(to: .recording)
+            // Bug 55 (livePartialReader): partial_result messages are forwarded
+            // live via onPartialResult in runPhase2Monitor's default: case.
             logger.info("Engine ready; streamed \(buffered.count) pre-buffered chunk(s)")
 
             // Bug 22: enforce AppSettings.maxRecordingDuration. The user-facing

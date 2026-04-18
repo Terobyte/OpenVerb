@@ -66,6 +66,21 @@ public:
         ProgressQueue&               progress_queue) = 0;
 
     // -----------------------------------------------------------------------
+    // process_text — run text-only inference (no audio input).
+    //
+    //   prompt   — full text prompt; passed directly to the model without
+    //              audio tokenisation.
+    //   progress — optional progress callback; nullptr = no-op.
+    //
+    // Used by Engine::polish_text() which is a text-only operation.
+    // Default implementation returns an empty result (safe no-op for mocks
+    // and backends that do not support text-only inference).
+    // -----------------------------------------------------------------------
+    virtual InferenceResult process_text(
+        const std::string&         prompt,
+        std::function<void(float)> progress) { (void)prompt; (void)progress; return InferenceResult{}; }
+
+    // -----------------------------------------------------------------------
     // name — short identifier for this backend (e.g. "gemma_audio").
     // -----------------------------------------------------------------------
     virtual std::string name() const = 0;

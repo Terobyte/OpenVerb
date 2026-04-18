@@ -47,8 +47,10 @@ Session::~Session() {
 
 void Session::stop() {
     stop_requested_.store(true, std::memory_order_relaxed);
+    pipeline_active_.store(false, std::memory_order_relaxed);
+    chunk_queue_.shutdown();
     result_cv_.notify_all();
-    // worker_thread_ is joined inline within run().
+    if (worker_thread_.joinable()) worker_thread_.join();
 }
 
 // ---------------------------------------------------------------------------

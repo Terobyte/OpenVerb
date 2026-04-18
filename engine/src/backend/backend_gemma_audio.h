@@ -73,6 +73,10 @@ public:
 
     void unload_model() override;
 
+    InferenceResult process_text(
+        const std::string&         prompt,
+        std::function<void(float)> progress) override;
+
     InferenceResult process_stream(
         const std::vector<int16_t>&  audio_pcm,
         int                          sample_rate,

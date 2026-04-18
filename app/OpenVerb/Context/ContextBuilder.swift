@@ -57,6 +57,7 @@ struct ContextBuilder {
         accessibilityApp: NSRunningApplication? = nil,
         pasteboard: PasteboardReadable = NSPasteboard.general,
         accessibilityReader: AccessibilityReadable = AccessibilityReader(),
+        clipboardSnapshot: String? = nil,
         includeClipboard: Bool = true,
         languageOverride: String? = nil
     ) async -> [String: String] {
@@ -87,11 +88,14 @@ struct ContextBuilder {
             context["window"] = ""
         }
 
-        // "clipboard" — read from pasteboard if enabled; omit if nil or empty.
-        if includeClipboard,
-           let clip = pasteboard.string(forType: .string),
-           !clip.isEmpty {
-            context["clipboard"] = truncateToUTF8Bytes(clip, limit: clipboardByteLimit)
+        // "clipboard" — use pre-captured snapshot when available (Bug 54 fix: avoids
+        // reading TextInjector's paste as clipboard context on rapid re-press), or
+        // fall back to live pasteboard read for backwards-compatible callers.
+        if includeClipboard {
+            let clip = clipboardSnapshot ?? pasteboard.string(forType: .string)
+            if let c = clip, !c.isEmpty {
+                context["clipboard"] = truncateToUTF8Bytes(c, limit: clipboardByteLimit)
+            }
         }
 
         // "selected" — from Accessibility API; omit entirely if nil/empty.

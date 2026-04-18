@@ -153,7 +153,7 @@ std::vector<int16_t> Vad::filter(const AudioData& audio,
     // If audio ends while still inside a speech region, flush any buffered
     // trailing silence (it's within the silence_ms limit).
     if (in_speech && !pending.empty()) {
-        for (int si : pending) {
+        for (size_t si : pending) {
             append_frame(si);
         }
     }

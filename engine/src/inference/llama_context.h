@@ -80,6 +80,23 @@ public:
                       const std::atomic<bool>*    abort_flag = nullptr);
 
     // ------------------------------------------------------------------------
+    // infer_text — run text-only inference without audio input.
+    //
+    //   text_prompt        — full text content for the user turn.
+    //   generation_suffix  — optional suffix appended after the user turn.
+    //   progress           — optional progress callback; nullptr = no-op.
+    //   abort_flag         — when non-null, exits early if set to true.
+    //
+    // Builds a Gemma 4 chat prompt without the <__media__> audio placeholder
+    // and evaluates it using the standard llama tokenisation path.
+    // Throws std::runtime_error on failure.
+    // ------------------------------------------------------------------------
+    std::string infer_text(const std::string&      text_prompt,
+                            const std::string&      generation_suffix,
+                            ProgressCallback        progress   = nullptr,
+                            const std::atomic<bool>* abort_flag = nullptr);
+
+    // ------------------------------------------------------------------------
     // has_audio_support — true if the loaded mmproj supports audio input.
     // ------------------------------------------------------------------------
     bool has_audio_support() const;

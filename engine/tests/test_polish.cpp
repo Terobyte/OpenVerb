@@ -10,6 +10,10 @@
 #include <string>
 #include <vector>
 
+// g_interrupted is defined in main.cpp which is excluded from the library.
+// Every test binary linking openverb-engine-lib must define it here.
+std::atomic<bool> g_interrupted{false};
+
 // ---------------------------------------------------------------------------
 // MockPolishBackend — simulates the polish inference path.
 //
@@ -36,6 +40,14 @@ public:
     }
 
     void unload_model() override {}
+
+    InferenceResult process_text(
+        const std::string& prompt,
+        std::function<void(float)>) override
+    {
+        last_prompt = prompt;
+        return InferenceResult{output, "", 5};
+    }
 
     InferenceResult process_stream(
         const std::vector<int16_t>&,

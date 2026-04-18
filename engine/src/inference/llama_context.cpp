@@ -541,3 +541,179 @@ std::string LlamaContext::infer(const std::string&         text_prompt,
     std::string cleaned = strip_thinking_block(output);
     return strip_gemma_control_tokens(cleaned);
 }
+
+// ---------------------------------------------------------------------------
+// infer_text — text-only inference without audio input.
+//
+// Builds a Gemma 4 chat prompt without the <__media__> audio marker,
+// tokenises with the standard llama vocabulary (no mtmd), evaluates the
+// prompt tokens in batches of 512, then runs the same autoregressive
+// generation loop as infer().
+// ---------------------------------------------------------------------------
+
+std::string LlamaContext::infer_text(const std::string&       text_prompt,
+                                      const std::string&       generation_suffix,
+                                      ProgressCallback         progress,
+                                      const std::atomic<bool>* abort_flag) {
+    const llama_vocab* vocab = llama_model_get_vocab(impl_->model);
+
+    // -----------------------------------------------------------------------
+    // Step 1: Build Gemma 4 text-only chat prompt (no audio marker)
+    // -----------------------------------------------------------------------
+    std::string full_prompt;
+    full_prompt.reserve(text_prompt.size() + generation_suffix.size() + 64);
+    full_prompt += "<start_of_turn>user\n/no_think\n";
+    if (!text_prompt.empty()) {
+        full_prompt += text_prompt;
+        full_prompt += "\n";
+    }
+    if (!generation_suffix.empty()) {
+        full_prompt += generation_suffix;
+    }
+    full_prompt += "<end_of_turn>\n<start_of_turn>model\n";
+
+    // -----------------------------------------------------------------------
+    // Step 2: Tokenise the prompt
+    // -----------------------------------------------------------------------
+    std::vector<llama_token> tokens(full_prompt.size() + 64);
+    {
+        int n = llama_tokenize(vocab,
+                               full_prompt.c_str(),
+                               static_cast<int32_t>(full_prompt.size()),
+                               tokens.data(),
+                               static_cast<int32_t>(tokens.size()),
+                               /*add_special=*/ true,
+                               /*parse_special=*/ true);
+        if (n < 0) {
+            tokens.resize(static_cast<size_t>(-n));
+            n = llama_tokenize(vocab,
+                               full_prompt.c_str(),
+                               static_cast<int32_t>(full_prompt.size()),
+                               tokens.data(),
+                               static_cast<int32_t>(tokens.size()),
+                               true, true);
+        }
+        if (n <= 0)
+            throw std::runtime_error(
+                "LlamaContext::infer_text: tokenization failed");
+        tokens.resize(static_cast<size_t>(n));
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 3: Clear KV cache and reset sampler
+    // -----------------------------------------------------------------------
+    llama_memory_clear(llama_get_memory(impl_->lctx), false);
+    llama_sampler_reset(impl_->sampler);
+
+    if (g_interrupted.load(std::memory_order_relaxed)) return "";
+    if (abort_flag && abort_flag->load(std::memory_order_relaxed)) return "";
+
+    // -----------------------------------------------------------------------
+    // Step 4: Evaluate prompt tokens in batches of up to 512
+    // -----------------------------------------------------------------------
+    constexpr int PROMPT_BATCH_CAP = 512;
+    llama_pos n_past = 0;
+    {
+        llama_batch pbatch = llama_batch_init(PROMPT_BATCH_CAP, 0, 1);
+        struct PBatchGuard {
+            llama_batch& b;
+            ~PBatchGuard() { llama_batch_free(b); }
+        } pbg{pbatch};
+
+        const int n_prompt = static_cast<int>(tokens.size());
+        for (int i = 0; i < n_prompt; ) {
+            if (g_interrupted.load(std::memory_order_relaxed)) return "";
+            if (abort_flag && abort_flag->load(std::memory_order_relaxed)) return "";
+
+            const int bn = std::min(PROMPT_BATCH_CAP, n_prompt - i);
+            pbatch.n_tokens = bn;
+            for (int j = 0; j < bn; ++j) {
+                pbatch.token[j]     = tokens[static_cast<size_t>(i + j)];
+                pbatch.pos[j]       = n_past + static_cast<llama_pos>(j);
+                pbatch.n_seq_id[j]  = 1;
+                pbatch.seq_id[j][0] = 0;
+                pbatch.logits[j]    = (i + j == n_prompt - 1) ? 1 : 0;
+            }
+            const int32_t rc = llama_decode(impl_->lctx, pbatch);
+            if (rc != 0)
+                throw std::runtime_error(
+                    "LlamaContext::infer_text: prompt eval failed (rc=" +
+                    std::to_string(rc) + ")");
+            n_past += static_cast<llama_pos>(bn);
+            i += bn;
+        }
+    }  // pbatch freed here
+
+    // -----------------------------------------------------------------------
+    // Step 5: Autoregressive generation loop
+    // -----------------------------------------------------------------------
+    constexpr int MAX_NEW_TOKENS = 512;
+
+    llama_batch gbatch = llama_batch_init(1, 0, 1);
+    struct GBatchGuard {
+        llama_batch& b;
+        ~GBatchGuard() { llama_batch_free(b); }
+    } gbg{gbatch};
+
+    std::string output;
+    output.reserve(512);
+
+    auto last_progress_tp = std::chrono::steady_clock::now();
+    if (progress) progress(0.0f);
+
+    for (int i = 0; i < MAX_NEW_TOKENS; ++i) {
+        if (g_interrupted.load(std::memory_order_relaxed)) break;
+        if (abort_flag && abort_flag->load(std::memory_order_relaxed)) break;
+
+        const llama_token token_id =
+            llama_sampler_sample(impl_->sampler, impl_->lctx, -1);
+        llama_sampler_accept(impl_->sampler, token_id);
+        if (llama_vocab_is_eog(vocab, token_id)) break;
+
+        char   piece_buf[64];
+        int32_t piece_len = llama_token_to_piece(
+            vocab, token_id, piece_buf, sizeof(piece_buf) - 1, 0, false);
+        if (piece_len < 0) {
+            std::vector<char> dyn(static_cast<size_t>(-piece_len) + 1);
+            piece_len = llama_token_to_piece(
+                vocab, token_id,
+                dyn.data(), static_cast<int32_t>(dyn.size()) - 1, 0, false);
+            if (piece_len > 0) {
+                dyn[piece_len] = '\0';
+                output.append(dyn.data(), piece_len);
+            }
+        } else if (piece_len > 0) {
+            piece_buf[piece_len] = '\0';
+            output.append(piece_buf, piece_len);
+        }
+
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - last_progress_tp).count();
+        if (progress && elapsed_ms >= 500) {
+            progress(std::min(1.0f,
+                static_cast<float>(i + 1) / static_cast<float>(MAX_NEW_TOKENS)));
+            last_progress_tp = now;
+        }
+
+        gbatch.n_tokens    = 1;
+        gbatch.token[0]    = token_id;
+        gbatch.pos[0]      = n_past++;
+        gbatch.n_seq_id[0] = 1;
+        gbatch.seq_id[0][0]= 0;
+        gbatch.logits[0]   = 1;
+        const int32_t drc = llama_decode(impl_->lctx, gbatch);
+        if (drc != 0)
+            throw std::runtime_error(
+                "LlamaContext::infer_text: llama_decode failed at token " +
+                std::to_string(i) + " (rc=" + std::to_string(drc) + ")");
+    }
+
+    if (progress) progress(1.0f);
+
+    // -----------------------------------------------------------------------
+    // Step 6: Clean up raw model output (same as infer())
+    // -----------------------------------------------------------------------
+    std::string cleaned = strip_thinking_block(output);
+    return strip_gemma_control_tokens(cleaned);
+}

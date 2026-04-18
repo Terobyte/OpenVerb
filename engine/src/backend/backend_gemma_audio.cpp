@@ -131,6 +131,23 @@ void GemmaAudioBackend::unload_model()
 }
 
 // ---------------------------------------------------------------------------
+// process_text — text-only inference, no audio (used by polish_text pass)
+// ---------------------------------------------------------------------------
+
+InferenceResult GemmaAudioBackend::process_text(
+    const std::string&         prompt,
+    std::function<void(float)> progress)
+{
+    if (!llama_) throw std::runtime_error("model not loaded");
+    const auto t_start = std::chrono::steady_clock::now();
+    const std::string raw_output = llama_->infer_text(prompt, "", progress, nullptr);
+    const auto t_end   = std::chrono::steady_clock::now();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        t_end - t_start);
+    return InferenceResult{raw_output, "", elapsed.count()};
+}
+
+// ---------------------------------------------------------------------------
 // process_stream — like process() but with abort support and ProgressQueue
 // ---------------------------------------------------------------------------
 

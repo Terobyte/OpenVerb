@@ -487,6 +487,13 @@ final class EngineClient {
     // before each sendAudioFrame via checkPhase2Error().
     // -----------------------------------------------------------------------
 
+    /// Bug 32 fix: execute a synchronous fence on ioQueue to guarantee all
+    /// previously-dispatched sendAudioFrame writes complete before any live
+    /// audio frame can overtake them on the serial queue.
+    func syncOnIOQueue() {
+        ioQueue.sync {}
+    }
+
     func startPhase2Monitor() {
         // #21: protect phase2MonitorStopped with phase2Lock — it is written
         // here (MainActor) and read from a detached background Task.
@@ -606,14 +613,14 @@ final class EngineClient {
                 // Continue streaming — warning does not end the session.
 
             default:
-                // Non-error message arrived during Phase 2 — put it back for
-                // the main receive loop to read.
-                recvLock.lock()
-                var restored = data
-                restored.append(UInt8(ascii: "\n"))
-                recvBuffer.prepend(restored)
-                recvLock.unlock()
-                // Do NOT return here — keep monitoring for errors.
+                if case .partialResult(let t, let id, let f) = msg {
+                    onPartialResult?(t, id, f)  // Bug 55: live forwarding
+                } else {
+                    recvLock.lock()
+                    var r = data; r.append(UInt8(ascii: "\n"))
+                    recvBuffer.prepend(r); recvLock.unlock()
+                }
+                continue  // Bug 56: poll next, don't re-read just-prepended msg
             }
 
             phase2Lock.lock()
