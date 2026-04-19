@@ -40,6 +40,21 @@ import AppKit
 //   Bug 57 — Session::stop() missing worker_thread_.join() → std::terminate [HIGH]
 //   Bug 58 — vad.cpp trailing-silence loop narrows size_t → int       [LOW]
 //   Bug 59 — polish_text() passes empty audio to backend → polish non-functional [MED]
+//   Bug 60 — STREAMING_AUDIO catch blocks missing stop_requested_ before join() [HIGH]
+//   Bug 61 — connectAndRecord() calls handleCrash() on user cancel             [MED]
+//   Bug C1 — worker_thread_ lambda captures `this` and `engine` by reference   [CRIT]
+//   Bug C2 — session_thread_ lambda captures IpcServer `this` directly         [CRIT]
+//   Bug H1 — stop_requested_ store uses memory_order_relaxed in stop()         [HIGH]
+//   Bug H6 — VadScanner push_frame/flush unsynchronised — data race            [HIGH]
+//   Bug H7 — ChunkQueue::reset() clears shut_ without notifying waiters        [HIGH]
+//   Bug C9 — ring_buffer write() returns 0 silently — no drop diagnostic       [CRIT]
+//   Bug C8 — unload_model() leaves hollow backend_; stale shared_ptr races     [MED]
+//   Bug NEW-1 — buf.accumulated not cleared before binary mode → framing corruption [MED]
+//   Bug 62  — injectPerCharacter missing flags on key-up → Shift sticks           [HIGH]
+//   Bug 63  — ModelDownloader.download() re-entrance cancels in-flight download   [MED]
+//   Bug 64  — ModelDownloader non-atomic remove+move → model lost on crash        [MED]
+//   Bug 65  — VadScanner.flush() bypasses MIN_CHUNK_MS → short utterances emitted [MED]
+//   Bug 66  — waveformCallback called on audio tap thread → @Published race       [MED]
 // ---------------------------------------------------------------------------
 
 final class OpenBugsNegativeTests: XCTestCase {
@@ -1690,6 +1705,411 @@ final class OpenBugsNegativeTests: XCTestCase {
             "interface that omits audio tokenisation, and route polish_text() through it.")
     }
 
+    // =======================================================================
+    // Bug 60 — STREAMING_AUDIO catch blocks missing stop_requested_ before
+    //          join() — session thread blocks for full inference duration
+    //          on disconnect                                          [HIGH]
+    //
+    // Both catch blocks (ConnectionClosed + std::runtime_error) inside the
+    // STREAMING_AUDIO state call worker_thread_.join() without first setting
+    // stop_requested_ = true. The worker thread's inference loop checks
+    // abort_flag = &stop_requested_ at every token decode step. Without the
+    // flag, the thread runs the current chunk's inference to completion —
+    // 1–30 s for a Gemma 4 chunk — before join() returns.
+    //
+    // EXPECTED: stop_requested_.store(true, ...) appears before join() in
+    //           both STREAMING_AUDIO catch blocks (matches Session::stop()).
+    // ACTUAL:   Both blocks go straight to pipeline_active_/shutdown/join
+    //           without setting stop_requested_.
+    // =======================================================================
+
+    func testBug60_streamingCleanupMissingStopRequested() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/ipc/session.cpp"
+        guard let content = readSource("engine/src/ipc/session.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read session.cpp"); return
+        }
+        // Scope to the STREAMING_AUDIO case body in the state machine.
+        // Use the opening brace form to skip the earlier `case State::STREAMING_AUDIO:`
+        // match inside state_name() and the WAITING_READY catch that has no pipeline.
+        guard let streamingRange = content.range(of: "case State::STREAMING_AUDIO: {") else {
+            XCTFail("Cannot find STREAMING_AUDIO state body in session.cpp"); return
+        }
+        let streamingSection = String(content[streamingRange.lowerBound...])
+
+        // Locate the ConnectionClosed catch block inside STREAMING_AUDIO.
+        guard let closedRange = streamingSection.range(of: "catch (const ConnectionClosed&)") else {
+            XCTFail("Cannot find ConnectionClosed catch in STREAMING_AUDIO section"); return
+        }
+        let closedBlock = substring(streamingSection, from: closedRange.lowerBound, length: 300)
+        let closedSetsFlag = closedBlock.contains("stop_requested_.store(true")
+        XCTAssertTrue(closedSetsFlag,
+            "Bug 60 CONFIRMED (ConnectionClosed path): worker_thread_.join() is " +
+            "called without first setting stop_requested_ = true. The inference " +
+            "worker checks abort_flag at every token decode step; without the flag " +
+            "it runs to completion (1–30 s) before join() returns. " +
+            "Fix: add stop_requested_.store(true, std::memory_order_relaxed) " +
+            "before pipeline_active_.store(false) in the ConnectionClosed catch block.")
+
+        // Also verify the std::runtime_error catch block.
+        guard let rteRange = streamingSection.range(of: "catch (const std::runtime_error& e)") else {
+            XCTFail("Cannot find runtime_error catch in STREAMING_AUDIO section"); return
+        }
+        let rteBlock = substring(streamingSection, from: rteRange.lowerBound, length: 300)
+        let rteSetsFlag = rteBlock.contains("stop_requested_.store(true")
+        XCTAssertTrue(rteSetsFlag,
+            "Bug 60 CONFIRMED (runtime_error path): same missing stop_requested_ " +
+            "before join() in the timeout/stall catch block. " +
+            "Fix: add stop_requested_.store(true, std::memory_order_relaxed) " +
+            "before pipeline_active_.store(false) in the runtime_error catch block.")
+    }
+
+    // =======================================================================
+    // Bug 61 — connectAndRecord() calls handleCrash() on user-initiated
+    //          cancellation — Escape key exhausts crash budget on healthy
+    //          engine                                                [MED]
+    //
+    // The catch block in connectAndRecord() calls handleCrash() for every
+    // thrown error, including CancellationError raised when the user presses
+    // Escape during PREPARING. handleCrash() increments crashCounter
+    // unconditionally. With maxCrashes=3 / 60 s, three Escape presses lock
+    // the app into a permanent error state on a fully healthy engine.
+    //
+    // EXPECTED: handleCrash() is called only when appState.state != .idle
+    //           (i.e. only for genuine engine errors, not user cancellations).
+    // ACTUAL:   handleCrash() is called unconditionally outside the guard.
+    // =======================================================================
+
+    func testBug61_userCancelDoesNotIncrementCrashCounter() {
+        guard let content = readSource("OpenVerb/App/OpenVerbApp.swift") else {
+            XCTFail("Cannot read OpenVerbApp.swift"); return
+        }
+        // Locate the connectAndRecord function definition (not a call site).
+        guard let fnDefRange = content.range(of: "func connectAndRecord(") else {
+            XCTFail("Cannot find connectAndRecord function definition"); return
+        }
+        // Scope to the function body (up to the next top-level function).
+        let afterFn = String(content[fnDefRange.lowerBound...])
+        guard let drainRange = afterFn.range(of: "func drainResult(") else {
+            XCTFail("Cannot find drainResult boundary"); return
+        }
+        let fnBody = String(afterFn[afterFn.startIndex..<drainRange.lowerBound])
+
+        // The catch block in connectAndRecord must NOT call handleCrash()
+        // before (outside) the `if appState.state != .idle` guard.
+        //
+        // Find the catch boundary and the guard position, then verify ordering.
+        guard let catchPos = fnBody.range(of: "} catch {") else {
+            XCTFail("Cannot find catch block in connectAndRecord"); return
+        }
+        let catchOnward = String(fnBody[catchPos.lowerBound...])
+
+        guard let guardPos = catchOnward.range(of: "if appState.state != .idle") else {
+            XCTFail("Cannot find non-idle guard in connectAndRecord catch"); return
+        }
+        // Text between the catch opener and the guard must not call handleCrash().
+        // Use the qualified call `engineManager.handleCrash()` to avoid matching
+        // comments that reference handleCrash() by name.
+        let beforeGuard = String(catchOnward[catchOnward.startIndex..<guardPos.lowerBound])
+        let calledBeforeGuard = beforeGuard.contains("engineManager.handleCrash()")
+        XCTAssertFalse(calledBeforeGuard,
+            "Bug 61 CONFIRMED: handleCrash() is called unconditionally in the " +
+            "connectAndRecord() catch block, before (or outside) the " +
+            "`if appState.state != .idle` guard. When the user presses Escape " +
+            "during PREPARING, handleCancel() transitions appState to .idle, then " +
+            "this catch fires and increments crashCounter on a healthy engine. " +
+            "After 3 Escape presses within 60 s the engine enters permanent error " +
+            "state (EngineManagerError.crashLoop). " +
+            "Fix: move the handleCrash() Task inside the non-idle guard so it " +
+            "only fires for genuine engine errors.")
+    }
+
+    // =======================================================================
+    // Bug C1 — worker_thread_ lambda captures `this` (Session) and `engine`
+    //          (Engine&) by reference — use-after-free if session or engine
+    //          is destroyed before the worker exits                    [CRIT]
+    //
+    // worker_thread_ = std::thread([this, fd, &engine]() { ... });
+    // `this` is a Session on the IpcServer stack frame; `engine` is an
+    // Engine& (IpcServer member).  Both are captured by reference in a
+    // std::thread that may outlive them when an exception path bypasses the
+    // normal join sequence.
+    //
+    // EXPECTED: the lambda captures engine by value (shared ownership) or the
+    //           Session header exposes a static factory that guarantees
+    //           lifetime ordering before thread creation.
+    // ACTUAL:   `[this, fd, &engine]` — raw lvalue-reference capture.
+    // =======================================================================
+
+    func testBugC1_workerThreadCapturesEngineByReference() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/ipc/session.cpp"
+        guard let content = readSource("engine/src/ipc/session.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read session.cpp"); return
+        }
+
+        // Locate the worker_thread_ assignment.
+        guard let assignRange = content.range(of: "worker_thread_ = std::thread(") else {
+            XCTFail("Cannot find worker_thread_ = std::thread( in session.cpp"); return
+        }
+        let threadLambda = substring(content, from: assignRange.lowerBound, length: 200)
+
+        // The buggy pattern: captures engine by lvalue reference inside the lambda.
+        // A fixed version would use value capture, shared_ptr, or no engine capture.
+        let capturesEngineByRef = threadLambda.contains("&engine")
+        XCTAssertFalse(capturesEngineByRef,
+            "Bug C1 CONFIRMED: worker_thread_ lambda uses `[this, fd, &engine]`. " +
+            "Capturing engine (an Engine& parameter) by lvalue reference means the " +
+            "worker thread holds a raw alias into the IpcServer's engine_ member. " +
+            "If the IpcServer is destroyed before the worker thread exits, the reference " +
+            "dangles. Although ~Session() calls stop() → join(), exceptions in adjacent " +
+            "paths can break the ordering guarantee. " +
+            "Fix: pass engine by value (requires Engine to be movable) or introduce a " +
+            "std::shared_ptr<Engine> so the worker captures a copy of the shared ownership.")
+    }
+
+    // =======================================================================
+    // Bug C2 — session_thread_ lambda in IpcServer captures `this` directly —
+    //          use-after-free if IpcServer is destroyed mid-session    [CRIT]
+    //
+    // session_thread_ = std::thread([this, client_fd, now_sec]() { ... });
+    // All IpcServer member accesses inside the lambda (engine_, session_active_,
+    // pressure_critical_active_, last_inference_sec_, LOG_*) go through the
+    // captured `this`.  If IpcServer is destroyed before the thread exits,
+    // every one of those accesses is undefined behaviour.
+    //
+    // EXPECTED: the lambda captures a std::shared_ptr<IpcServer> (or uses
+    //           a weak_ptr with a lock) so the IpcServer cannot be freed
+    //           while the thread runs.
+    // ACTUAL:   bare `[this, client_fd, now_sec]` — raw pointer capture.
+    // =======================================================================
+
+    func testBugC2_sessionThreadCapturesIpcServerThisDirectly() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/ipc/server.cpp"
+        guard let content = readSource("engine/src/ipc/server.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read server.cpp"); return
+        }
+
+        guard let assignRange = content.range(of: "session_thread_ = std::thread(") else {
+            XCTFail("Cannot find session_thread_ = std::thread( in server.cpp"); return
+        }
+        let threadLambda = substring(content, from: assignRange.lowerBound, length: 200)
+
+        // The fix must capture shared ownership, not a raw `this` pointer.
+        let hasRawThisCapture = threadLambda.contains("[this,") || threadLambda.contains("[this]")
+        let hasSharedOwnership = threadLambda.contains("shared_ptr")
+            || threadLambda.contains("weak_ptr")
+            || threadLambda.contains("shared_from_this")
+
+        XCTAssertTrue(!hasRawThisCapture || hasSharedOwnership,
+            "Bug C2 CONFIRMED: session_thread_ lambda uses `[this, client_fd, now_sec]`. " +
+            "Every access to engine_, session_active_, pressure_critical_active_, and " +
+            "LOG_* inside the lambda goes through the captured raw `this`. " +
+            "IpcServer::stop() joins session_thread_ before the destructor completes, " +
+            "which normally prevents a dangling use. However, if stop() is never called " +
+            "(e.g., start() throws after the thread is launched), the destructor skips " +
+            "the join and the thread outlives the IpcServer object. " +
+            "hasRawThisCapture=\(hasRawThisCapture), hasSharedOwnership=\(hasSharedOwnership). " +
+            "Fix: make IpcServer inherit from std::enable_shared_from_this<IpcServer> and " +
+            "capture `auto self = shared_from_this()` in the lambda, or use a std::weak_ptr " +
+            "with a lock guard that returns early if the server is gone.")
+    }
+
+    // =======================================================================
+    // Bug H1 — stop_requested_ store in stop() uses memory_order_relaxed —
+    //          inference worker may process extra chunks before noticing  [HIGH]
+    //
+    // stop() stores stop_requested_ = true with memory_order_relaxed.
+    // The inference worker passes stop_requested_ as an abort_flag to
+    // engine.process_stream(), which reads it with relaxed ordering inside
+    // the token-decode loop.  Relaxed stores/loads have no happens-before
+    // guarantee across threads — the worker may execute multiple additional
+    // decode steps before the cache-line update propagates.
+    //
+    // EXPECTED: stop() uses memory_order_release; the inference loop reads
+    //           abort_flag with memory_order_acquire, establishing the
+    //           synchronises-with relationship that guarantees visibility.
+    // ACTUAL:   both the store in stop() and the stores on exception paths
+    //           use memory_order_relaxed.
+    // =======================================================================
+
+    func testBugH1_stopRequestedStoreUsesRelaxedOrdering() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/ipc/session.cpp"
+        guard let content = readSource("engine/src/ipc/session.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read session.cpp"); return
+        }
+
+        guard let stopRange = content.range(of: "void Session::stop()") else {
+            XCTFail("Cannot find Session::stop() in session.cpp"); return
+        }
+        let stopBody = substring(content, from: stopRange.lowerBound, length: 300)
+
+        // The bug: stop_requested_ is stored with relaxed ordering.
+        // The fix: use memory_order_release so the worker's acquire-load
+        //          synchronises-with this store.
+        let usesRelaxedStore = stopBody.contains(
+            "stop_requested_.store(true, std::memory_order_relaxed)")
+        XCTAssertFalse(usesRelaxedStore,
+            "Bug H1 CONFIRMED: Session::stop() stores stop_requested_ with " +
+            "memory_order_relaxed. The inference token-decode loop reads abort_flag " +
+            "(= &stop_requested_) — also with relaxed ordering. Without a " +
+            "release/acquire pair, there is no synchronises-with relationship: the " +
+            "CPU is free to delay the cache-line write for an unbounded number of " +
+            "decode steps. In practice, on strongly-ordered x86/ARM64 this is " +
+            "unlikely to matter, but it is undefined behaviour under the C++11 " +
+            "memory model and fails -fsanitize=thread. " +
+            "Fix: change to memory_order_release in stop() and memory_order_acquire " +
+            "in the abort_flag read inside the inference loop.")
+    }
+
+    // =======================================================================
+    // Bug H6 — VadScanner::push_frame() and flush() access buffer_ms_,
+    //          silence_ms_, in_speech_ without any synchronisation       [HIGH]
+    //
+    // push_frame() is called from the real-time audio capture thread;
+    // flush() is called from the session main thread (inside the
+    // zero-length-sentinel handler).  Both read and write buffer_ms_,
+    // silence_ms_, and in_speech_ without a mutex or atomic.  Concurrent
+    // execution produces torn reads and writes — undefined behaviour under
+    // the C++ memory model.
+    //
+    // EXPECTED: VadScanner has a std::mutex (or equivalent) protecting all
+    //           accesses to buffer_ms_, silence_ms_, in_speech_, and
+    //           buffer_, or the ownership model prevents concurrent calls.
+    // ACTUAL:   vad_scanner.cpp has no mutex or atomic member accesses.
+    // =======================================================================
+
+    func testBugH6_vadScannerHasNoSynchronization() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/audio/vad_scanner.cpp"
+        guard let content = readSource("engine/src/audio/vad_scanner.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read vad_scanner.cpp"); return
+        }
+
+        // The fix must introduce synchronisation — either a mutex lock guard
+        // around push_frame/flush/reset bodies, or atomic member variables,
+        // or documentation that the caller guarantees single-threaded access
+        // (which contradicts the audio-thread vs main-thread split).
+        let hasMutex = content.contains("std::mutex")
+            || content.contains("std::lock_guard")
+            || content.contains("std::unique_lock")
+        let hasAtomic = content.contains("std::atomic")
+
+        XCTAssertTrue(hasMutex || hasAtomic,
+            "Bug H6 CONFIRMED: vad_scanner.cpp has no mutex or atomic protection " +
+            "(hasMutex=\(hasMutex), hasAtomic=\(hasAtomic)). " +
+            "push_frame() is called from the CoreAudio real-time thread; flush() and " +
+            "reset() are called from the session main thread inside the state machine. " +
+            "Concurrent access to buffer_ms_, silence_ms_, in_speech_, and buffer_ " +
+            "is a data race: undefined behaviour under C++11, detected by TSan, and " +
+            "capable of producing incorrect VAD boundaries or memory corruption " +
+            "(buffer_.insert() is not thread-safe). " +
+            "Fix: add `std::mutex mu_` to VadScanner and acquire it at the top of " +
+            "push_frame(), flush(), and reset().")
+    }
+
+    // =======================================================================
+    // Bug H7 — ChunkQueue::reset() clears the shutdown flag but does not
+    //          notify threads blocked in pop() — lost-wakeup hang       [HIGH]
+    //
+    // shutdown() sets shut_=true and calls notify_all() on both CVs.
+    // Any thread waiting in pop() will wake, re-check the condition
+    // `!queue_.empty() || shut_`, and return nullopt.
+    //
+    // But if reset() runs between the notify_all() and the woken thread's
+    // condition re-check (inside the CV's internal lock), the thread sees
+    // shut_=false and queue_.empty() → the condition is false → it re-waits
+    // indefinitely.  A subsequent push() will eventually wake it, but if
+    // no more chunks arrive (abort-and-restart scenario) the thread hangs
+    // forever.
+    //
+    // EXPECTED: reset() calls not_empty_.notify_all() after clearing shut_
+    //           so that any thread which was woken by shutdown() and re-checks
+    //           the condition sees a fresh wakeup and can exit the abort path.
+    // ACTUAL:   reset() returns after `shut_ = false` with no notification.
+    // =======================================================================
+
+    func testBugH7_chunkQueueResetMissingNotify() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/audio/chunk_queue.cpp"
+        guard let content = readSource("engine/src/audio/chunk_queue.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read chunk_queue.cpp"); return
+        }
+
+        guard let resetRange = content.range(of: "void ChunkQueue::reset()") else {
+            XCTFail("Cannot find ChunkQueue::reset() in chunk_queue.cpp"); return
+        }
+        let resetBody = substring(content, from: resetRange.lowerBound, length: 200)
+
+        // The fix: notify_all() on at least not_empty_ (and ideally not_full_) so
+        // threads sleeping in pop() or push() wake and re-evaluate the condition.
+        let hasNotify = resetBody.contains("notify_all()")
+            || resetBody.contains("notify_one()")
+
+        XCTAssertTrue(hasNotify,
+            "Bug H7 CONFIRMED: ChunkQueue::reset() does not call notify_all() after " +
+            "setting shut_ = false. Race window: shutdown() fires notify_all(); a " +
+            "thread wakes in pop() and is about to re-check `!queue_.empty() || shut_`; " +
+            "reset() runs and sets shut_=false before the re-check; the thread sees " +
+            "both conditions false and re-waits with no pending notification — hang. " +
+            "This manifests on rapid abort-and-restart (user presses Escape during " +
+            "an active inference) where the worker thread blocks in pop() indefinitely " +
+            "after reset(), never processing the sentinel chunk. " +
+            "Fix: add `not_empty_.notify_all(); not_full_.notify_all();` at the end " +
+            "of reset() so woken threads can re-evaluate and exit cleanly.")
+    }
+
+    // =======================================================================
+    // Bug C9 — RingBuffer::write() silently returns 0 when the buffer is
+    //          full — audio data dropped with no log, no flag, no backpressure
+    //                                                                  [CRIT]
+    //
+    // When the producer (audio capture) writes faster than the IPC reader
+    // drains, write() computes n=0 and returns immediately.  No warning is
+    // logged, no dropped-bytes counter is incremented, and no error is
+    // surfaced to the caller.  The transcriber receives silently truncated
+    // audio with no indication that data was lost.
+    //
+    // EXPECTED: write() logs LOG_WARN (or increments a diagnostic counter)
+    //           when n < len, so dropped audio is observable and the caller
+    //           can take corrective action.
+    // ACTUAL:   `if (n == 0) return 0;` — completely silent discard.
+    // =======================================================================
+
+    func testBugC9_ringBufferWriteSilentlyDropsData() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/audio/ring_buffer.cpp"
+        guard let content = readSource("engine/src/audio/ring_buffer.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read ring_buffer.cpp"); return
+        }
+
+        guard let writeRange = content.range(of: "RingBuffer::write(") else {
+            XCTFail("Cannot find RingBuffer::write() in ring_buffer.cpp"); return
+        }
+        let writeBody = substring(content, from: writeRange.lowerBound, length: 500)
+
+        // The fix: when n == 0 (or n < len), emit a diagnostic so the drop is
+        // observable at runtime.  Any of these patterns counts as a fix.
+        let hasDropDiagnostic = writeBody.contains("LOG_WARN")
+            || writeBody.contains("LOG_ERROR")
+            || writeBody.contains("dropped_")
+            || writeBody.contains("drop_count")
+            || writeBody.contains("overflow")
+
+        XCTAssertTrue(hasDropDiagnostic,
+            "Bug C9 CONFIRMED: RingBuffer::write() silently returns 0 when the " +
+            "buffer is full (no log, no counter, no backpressure signal). " +
+            "The IPC audio reader drains the ring buffer on each connection poll; " +
+            "during heavy load or a slow network the producer can outpace the consumer. " +
+            "Dropped audio appears as silence to the VAD/chunker: utterances get " +
+            "truncated mid-word and the transcriber never knows audio was lost. " +
+            "Fix: add `if (n < len) LOG_WARN(\"ring_buffer: dropped %zu bytes (full)\", " +
+            "len - n);` before the return, or maintain a `dropped_bytes_` atomic counter " +
+            "that is exposed via a diagnostic method and logged by the session.")
+    }
+
     func testBug53_serverJoinWithoutSignallingPreviousSession() {
         // Bugs 49 and 52 (client always calls disconnect() on error) make this
         // path unreachable in practice — the old engine session exits immediately
@@ -1733,5 +2153,323 @@ final class OpenBugsNegativeTests: XCTestCase {
             "Defense-in-depth fix: before session_thread_.join(), signal the " +
             "previous session via g_interrupted, a per-session stop flag, or " +
             "close the old client fd.")
+    }
+
+    // =======================================================================
+    // Bug C8 — Engine::unload_model() leaves backend_ non-null after hollowing
+    //          the Backend object; stale shared_ptr copies race with unload [MED]
+    //
+    // unload_model() calls backend_->unload_model() — which resets the llama_
+    // context pointer inside the Backend — then sets loaded_ = false, but
+    // leaves backend_ pointing at the now-hollow Backend object.
+    //
+    // Race window:
+    //   1. Worker thread locks engine_mutex_, copies backend_ into `be`, unlocks.
+    //   2. GCD / idle-timeout handler locks, calls unload_model() → llama_ = null.
+    //   3. Worker calls be->process_stream() — Backend is alive (shared_ptr refcount
+    //      > 0) but llama_ is null → null dereference / crash.
+    //
+    // Currently safe only because every call site guards on session_active_ before
+    // calling unload_model().  Engine itself does not enforce this contract.
+    //
+    // EXPECTED: unload_model() nulls backend_ after calling backend_->unload_model()
+    //           so any stale shared_ptr copy holds the last reference and the next
+    //           method call on it detects null llama_ via an internal guard.
+    // ACTUAL:   backend_ remains non-null pointing at a hollow Backend.
+    // =======================================================================
+
+    func testBugC8_unloadModelDoesNotNullBackend() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/engine.cpp"
+        guard let content = readSource("engine/src/engine.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read engine.cpp"); return
+        }
+
+        guard let unloadRange = content.range(of: "void Engine::unload_model()") else {
+            XCTFail("Cannot find Engine::unload_model() in engine.cpp"); return
+        }
+        let unloadBody = substring(content, from: unloadRange.lowerBound, length: 250)
+
+        // The fix: null backend_ after the inner unload call so any thread that
+        // grabbed a copy of the shared_ptr before the lock will still hold the
+        // last live reference, but the Backend's own process_stream / process_file
+        // will see a null llama_ context and throw rather than crash.
+        let nullsBackend = unloadBody.contains("backend_.reset()")
+            || unloadBody.contains("backend_ = nullptr")
+            || unloadBody.contains("backend_ = {}")
+
+        XCTAssertTrue(nullsBackend,
+            "Bug C8 CONFIRMED: Engine::unload_model() calls backend_->unload_model() " +
+            "(resetting llama_ inside the Backend) and sets loaded_=false, but leaves " +
+            "backend_ pointing at the now-hollow Backend object. A worker thread that " +
+            "copied backend_ under engine_mutex_ and then released the lock calls " +
+            "be->process_stream() on a Backend whose llama_ is null — crash. " +
+            "Currently mitigated only by caller discipline (all unload sites check " +
+            "session_active_ first); Engine does not enforce this contract itself. " +
+            "Fix: add `backend_.reset();` (or `backend_ = nullptr;`) at the end of " +
+            "unload_model() so stale copies become the sole owner and Backend::process_stream() " +
+            "can detect the null llama_ context with an internal guard before crashing.")
+    }
+
+    // =======================================================================
+    // Bug NEW-1 — RecvBuffer::accumulated not cleared on WAITING_READY →
+    //             STREAMING_AUDIO transition; pipelined bytes corrupt first
+    //             binary frame header                                    [MED]
+    //
+    // When the session transitions from WAITING_READY to STREAMING_AUDIO,
+    // buf.accumulated is not cleared.  A misbehaving or proxying client that
+    // pipelines binary frames before receiving session.ready leaves leftover
+    // JSON bytes in buf.accumulated.  recv_binary_frame() reads a 4-byte
+    // little-endian frame-length from buf.accumulated first — the stale JSON
+    // bytes produce a bogus length, triggering "frame too large" errors or
+    // silently corrupting the first audio chunk.
+    //
+    // The reverse transition (STREAMING_AUDIO → IDLE, session.cpp:321)
+    // correctly calls buf.accumulated.clear() before returning to JSON mode.
+    //
+    // EXPECTED: buf.accumulated.clear() is called immediately after
+    //           state = State::STREAMING_AUDIO at session.cpp:267.
+    // ACTUAL:   no clear; stale JSON bytes remain in the accumulator.
+    // =======================================================================
+
+    func testBugNEW1_accumulatedNotClearedBeforeBinaryMode() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/ipc/session.cpp"
+        guard let content = readSource("engine/src/ipc/session.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read session.cpp"); return
+        }
+
+        // Locate the WAITING_READY → STREAMING_AUDIO transition: the block that
+        // sends session.ready and switches the state machine into binary mode.
+        guard let readyRange = content.range(of: #""session.ready""#) else {
+            XCTFail("Cannot find session.ready send in session.cpp"); return
+        }
+        // Grab from the send_json call up to the first_frame_seen assignment and
+        // just past — the clear() must appear before chunk_queue_.reset().
+        let transitionBlock = substring(content, from: readyRange.lowerBound, length: 400)
+
+        // The bug: no accumulated.clear() in this forward transition.
+        // The fix: add buf.accumulated.clear() immediately after the state assignment.
+        let clearsAccumulated = transitionBlock.contains("accumulated.clear()")
+            || transitionBlock.contains("buf.accumulated = {}")
+            || transitionBlock.contains("buf.accumulated.resize(0)")
+
+        XCTAssertTrue(clearsAccumulated,
+            "Bug NEW-1 CONFIRMED: session.cpp does not call buf.accumulated.clear() " +
+            "when transitioning WAITING_READY → STREAMING_AUDIO (after sending " +
+            "session.ready). A client that pipelines binary frames before receiving " +
+            "session.ready leaves JSON bytes in buf.accumulated; recv_binary_frame() " +
+            "prepends them to the first frame, reads a bogus 4-byte frame-length, and " +
+            "either rejects the session with 'frame too large' or silently truncates " +
+            "the first audio chunk, degrading recognition quality. " +
+            "The reverse path (STREAMING_AUDIO → IDLE at session.cpp:321) correctly " +
+            "calls buf.accumulated.clear() before returning to JSON mode. " +
+            "Fix: add `buf.accumulated.clear();` immediately after " +
+            "`state = State::STREAMING_AUDIO;` at session.cpp:267.")
+    }
+
+    // =======================================================================
+    // Bug 62 — injectPerCharacter sets flags on key-down but NOT key-up
+    //
+    // keyCodeAndFlags(for:) returns .maskShift for uppercase chars.  The
+    // key-down event correctly receives down.flags = flags.  The key-up event
+    // is posted without any flags assignment, violating the CGEvent pairing
+    // contract.  The HID stream sees Shift pressed but never released →
+    // subsequent keystrokes are corrupted.
+    //
+    // EXPECTED: key-up event carries the same modifier flags as its key-down.
+    // ACTUAL:   key-up is posted with default (empty) flags.
+    // =======================================================================
+
+    func testBug62_perCharacterInjectionMissingFlagsOnKeyUp() {
+        guard let content = readSource("OpenVerb/Output/TextInjector.swift") else {
+            XCTFail("Cannot read TextInjector.swift"); return
+        }
+        guard let fnRange = content.range(of: "func injectPerCharacter") else {
+            XCTFail("Cannot find injectPerCharacter in TextInjector.swift"); return
+        }
+        let fnBody = substring(content, from: fnRange.lowerBound, length: 2000)
+
+        // The function must contain a key-up block that applies flags.
+        // Correct pattern: both keyDown:true and keyDown:false blocks set event.flags.
+        // Bug pattern: only the keyDown:true block sets flags.
+        let keyUpBlockRange = fnBody.range(of: "keyDown: false")
+        XCTAssertNotNil(keyUpBlockRange, "injectPerCharacter must have a key-up CGEvent block")
+
+        guard let upRange = keyUpBlockRange else { return }
+        // Grab the ~120 chars after "keyDown: false" — that's the key-up event body.
+        let afterKeyUp = substring(fnBody, from: upRange.upperBound, length: 120)
+        let keyUpSetsFlags = afterKeyUp.contains(".flags")
+        XCTAssertTrue(keyUpSetsFlags,
+            "Bug 62 CONFIRMED: injectPerCharacter posts key-up CGEvent without applying " +
+            "modifier flags. keyCodeAndFlags() returns .maskShift for uppercase chars; " +
+            "the key-down block correctly sets down.flags = flags, but the key-up block " +
+            "calls up.post() without up.flags = flags. The HID event tap sees Shift " +
+            "pressed (key-down) but never released (key-up has no Shift flag), leaving " +
+            "the modifier stuck and corrupting all subsequent keystrokes. " +
+            "Fix: add `if flags != CGEventFlags(rawValue: 0) { up.flags = flags }` " +
+            "before up.post(tap: .cghidEventTap) in injectPerCharacter.")
+    }
+
+    // =======================================================================
+    // Bug 63 — ModelDownloader.download() has no re-entrance guard
+    //
+    // download() calls session?.invalidateAndCancel() unconditionally before
+    // checking isDownloading.  A second concurrent call therefore cancels the
+    // first URLSession (and its in-flight task) and starts a fresh download,
+    // silently discarding all progress from the first call.
+    //
+    // EXPECTED: download() guards against re-entrance (isDownloading check or throw).
+    // ACTUAL:   no guard — second call silently kills the first.
+    // =======================================================================
+
+    func testBug63_downloadHasNoReentranceGuard() {
+        guard let content = readSource("OpenVerb/Model/ModelDownloader.swift") else {
+            XCTFail("Cannot read ModelDownloader.swift"); return
+        }
+        guard let fnRange = content.range(of: "func download()") else {
+            XCTFail("Cannot find download() in ModelDownloader.swift"); return
+        }
+        let fnBody = substring(content, from: fnRange.lowerBound, length: 500)
+        // The function must guard against re-entrance BEFORE calling invalidateAndCancel().
+        // A guard takes the form "guard !isDownloading" or "if isDownloading { return }".
+        // Simple check: look for both a guard/if-isDownloading pattern and invalidateAndCancel;
+        // the guard pattern must appear before invalidateAndCancel in the function body.
+        let guardPattern = fnBody.range(of: "guard !isDownloading") ??
+                           fnBody.range(of: "isDownloading { return") ??
+                           fnBody.range(of: "isDownloading { throw")
+        let invalidateRange = fnBody.range(of: "invalidateAndCancel")
+
+        guard let inv = invalidateRange else {
+            // invalidateAndCancel was removed — the function was rewritten differently; skip.
+            return
+        }
+        let hasGuardBeforeInvalidate = guardPattern.map { $0.lowerBound < inv.lowerBound } ?? false
+        XCTAssertTrue(hasGuardBeforeInvalidate,
+            "Bug 63 CONFIRMED: ModelDownloader.download() calls " +
+            "session?.invalidateAndCancel() before checking isDownloading. A second " +
+            "concurrent call silently cancels the first URLSession, discarding all " +
+            "download progress with no error or notification. The guard must appear " +
+            "before the invalidateAndCancel() call. " +
+            "Fix: add `guard !isDownloading else { return }` at the top of download().")
+    }
+
+    // =======================================================================
+    // Bug 64 — ModelDownloader removes destination before moving temp file
+    //
+    // urlSession(_:downloadTask:didFinishDownloadingTo:) calls removeItem
+    // then moveItem as two separate file-system operations.  A process kill or
+    // I/O error between the two leaves the user with no model file (old one
+    // deleted, new one never written).
+    //
+    // EXPECTED: destination replaced atomically (replaceItemAt or move-then-rename).
+    // ACTUAL:   removeItem followed by moveItem — non-atomic, data loss on crash.
+    // =======================================================================
+
+    func testBug64_nonAtomicRemoveBeforeMove() {
+        guard let content = readSource("OpenVerb/Model/ModelDownloader.swift") else {
+            XCTFail("Cannot read ModelDownloader.swift"); return
+        }
+        // Look for the two-step remove + move pattern in the download delegate.
+        guard let delegateRange = content.range(of: "didFinishDownloadingTo") else {
+            XCTFail("Cannot find didFinishDownloadingTo in ModelDownloader.swift"); return
+        }
+        let delegateBody = substring(content, from: delegateRange.lowerBound, length: 600)
+
+        // The atomic fix uses replaceItemAt or moveItem without a preceding removeItem.
+        let usesAtomicReplace = delegateBody.contains("replaceItemAt")
+        let usesRemoveThenMove = delegateBody.contains("removeItem") &&
+                                 delegateBody.contains("moveItem")
+        XCTAssertTrue(usesAtomicReplace || !usesRemoveThenMove,
+            "Bug 64 CONFIRMED: ModelDownloader.urlSession(_:downloadTask:didFinishDownloadingTo:) " +
+            "calls FileManager.removeItem(at: destinationURL) and then " +
+            "FileManager.moveItem(at: location, to: destinationURL) as two separate " +
+            "non-atomic steps. If the process is killed between these two calls the old " +
+            "model is gone and the new one was never placed — the user loses the model " +
+            "and must re-download from byte 0. " +
+            "Fix: use FileManager.replaceItemAt(_:withItemAt:backupItemName:options:) " +
+            "which is atomic within the same volume, or move to a sibling temp path " +
+            "first and then call rename(2) directly.")
+    }
+
+    // =======================================================================
+    // Bug 65 — VadScanner::flush() emits without enforcing MIN_CHUNK_MS
+    //
+    // push_frame() guards chunk emission with `buffer_ms_ - silence_ms_ >= MIN_CHUNK_MS`.
+    // flush() calls maybe_emit_chunk(true) unconditionally whenever the buffer
+    // is non-empty, bypassing the minimum-duration filter entirely.
+    // Short utterances (< 3 s) recorded before the silence boundary fires
+    // are sent to the inference engine as final, producing empty transcripts.
+    //
+    // EXPECTED: flush() enforces MIN_CHUNK_MS before emitting.
+    // ACTUAL:   flush() emits regardless of chunk duration.
+    // =======================================================================
+
+    func testBug65_flushBypasesMinChunkMs() {
+        guard let content = readSource("engine/src/audio/vad_scanner.cpp") ??
+                            readSource("../engine/src/audio/vad_scanner.cpp") else {
+            XCTFail("Cannot read vad_scanner.cpp"); return
+        }
+        guard let flushRange = content.range(of: "VadScanner::flush()") else {
+            XCTFail("Cannot find VadScanner::flush() in vad_scanner.cpp"); return
+        }
+        let flushBody = substring(content, from: flushRange.lowerBound, length: 200)
+        let enforcesMin = flushBody.contains("MIN_CHUNK_MS")
+        XCTAssertTrue(enforcesMin,
+            "Bug 65 CONFIRMED: VadScanner::flush() calls maybe_emit_chunk(true) " +
+            "without checking MIN_CHUNK_MS. push_frame() guards emission with " +
+            "`buffer_ms_ - silence_ms_ >= MIN_CHUNK_MS`, but flush() has no such guard. " +
+            "Utterances shorter than MIN_CHUNK_MS (3 s) that end before the silence " +
+            "boundary fires are emitted as is_final=true, reaching the inference engine " +
+            "and producing empty or low-quality transcripts. " +
+            "Fix: add `if (buffer_ms_ - silence_ms_ < MIN_CHUNK_MS) { ... return; }` " +
+            "before maybe_emit_chunk(true) in flush().")
+    }
+
+    // =======================================================================
+    // Bug 66 — processTapBuffer calls waveformCallback on the audio tap thread
+    //
+    // AVAudioEngine's installTap fires its closure on a real-time audio thread.
+    // processTapBuffer releases the lock and then calls waveformCallback inline
+    // on that same thread.  The caller in OpenVerbApp updates waveformVM's
+    // @Published var amplitudes from the audio thread, which is a threading
+    // violation — SwiftUI requires @Published mutations on the main thread.
+    //
+    // EXPECTED: waveformCallback dispatched to main thread before invocation.
+    // ACTUAL:   waveformCallback called inline on audio tap thread.
+    // =======================================================================
+
+    func testBug66_waveformCallbackCalledOnAudioThread() {
+        guard let content = readSource("OpenVerb/Input/AudioSession.swift") else {
+            XCTFail("Cannot read AudioSession.swift"); return
+        }
+        guard let fnRange = content.range(of: "func processTapBuffer") else {
+            XCTFail("Cannot find processTapBuffer in AudioSession.swift"); return
+        }
+        // processTapBuffer starts at line 232 and the callback call is at line 311 (~79 lines).
+        // At ~55 chars/line that's ~4350 chars; use 5000 to be safe.
+        let fnBody = substring(content, from: fnRange.lowerBound, length: 5000)
+
+        // Correct: waveformCallback invocations inside processTapBuffer must be
+        // preceded by a DispatchQueue.main dispatch or Task { @MainActor in ... }.
+        guard let cbRange = fnBody.range(of: "waveformCallback(chunk)") else {
+            // If the call site moved, the test needs updating.
+            XCTFail("Cannot find waveformCallback(chunk) in processTapBuffer"); return
+        }
+        // Check the ~80 chars before the callback call for a main-thread dispatch.
+        let beforeCb = substring(fnBody, from: fnBody.startIndex, length: fnBody.distance(from: fnBody.startIndex, to: cbRange.lowerBound))
+        let dispatchedToMain = beforeCb.hasSuffix("main.async {") ||
+                               beforeCb.contains("DispatchQueue.main") ||
+                               beforeCb.contains("@MainActor") ||
+                               beforeCb.contains("MainActor.run")
+        XCTAssertTrue(dispatchedToMain,
+            "Bug 66 CONFIRMED: AudioSession.processTapBuffer() calls waveformCallback " +
+            "inline on the AVAudioEngine tap thread (a real-time audio thread). The " +
+            "caller in OpenVerbApp passes a closure that mutates waveformVM's @Published " +
+            "var amplitudes directly on the audio thread. SwiftUI requires @Published " +
+            "property mutations to happen on the main thread; this race condition causes " +
+            "undefined rendering behaviour and Swift concurrency warnings. " +
+            "Fix: wrap the callback loop in DispatchQueue.main.async { } inside " +
+            "processTapBuffer, or document that waveformCallback MUST dispatch itself.")
     }
 }
