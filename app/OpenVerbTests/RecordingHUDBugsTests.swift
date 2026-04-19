@@ -28,15 +28,18 @@ final class RecordingHUDBugsTests: XCTestCase {
         guard let src = readSource("OpenVerb/UI/RecordingWindow.swift") else {
             XCTFail("Cannot read RecordingWindow.swift"); return
         }
-        // The stable fix pattern is a @State-owned publisher named `ticker`
-        // (or similar). Assert the file declares one.
-        let hasStatePublisher = src.contains("@State private var ticker") ||
-                                src.contains("@State private let ticker") ||
-                                src.contains("@State private var elapsedTicker") ||
-                                src.contains("@State private let elapsedTicker")
-        XCTAssertTrue(hasStatePublisher,
-            "Bug A: Timer.publish must be hoisted to a @State property so " +
-            "SwiftUI does not re-subscribe on every body eval.")
+        // The stable fix pattern is either:
+        //   (a) a @State-owned publisher (ticker/elapsedTicker), or
+        //   (b) a @State Task-based timer (timerTask) — which is even better
+        //       because Task.sleep is immune to SwiftUI body re-evaluation.
+        let hasStableTimer = src.contains("@State private var ticker") ||
+                             src.contains("@State private let ticker") ||
+                             src.contains("@State private var elapsedTicker") ||
+                             src.contains("@State private let elapsedTicker") ||
+                             src.contains("@State private var timerTask")
+        XCTAssertTrue(hasStableTimer,
+            "Bug A: the elapsed-seconds timer must use a stable @State property " +
+            "(publisher or Task) so SwiftUI does not re-subscribe on every body eval.")
 
         // Negative assertion: the inline usage pattern must not remain.
         XCTAssertFalse(
