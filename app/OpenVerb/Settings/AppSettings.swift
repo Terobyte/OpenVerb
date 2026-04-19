@@ -117,8 +117,8 @@ final class AppSettings: ObservableObject {
     // -----------------------------------------------------------------------
 
     /// Whether to show a live partial transcript below the waveform during
-    /// recording.  Off by default — can be distracting for short dictations.
-    @Published var showLiveTranscript: Bool = false {
+    /// recording.  On by default so users see live text out-of-the-box.
+    @Published var showLiveTranscript: Bool = true {
         didSet {
             guard !isResetting else { return }
             defaults.set(showLiveTranscript, forKey: Key.showLiveTranscript)
@@ -266,7 +266,7 @@ final class AppSettings: ObservableObject {
         language = Locale.current.language.languageCode?.identifier
         soundEffectsEnabled = Default.soundEffectsEnabled
         showWaveform = Default.showWaveform
-        showLiveTranscript = false
+        showLiveTranscript = true
         includeClipboard = Default.includeClipboard
         maxRecordingDuration = Default.maxRecordingDuration
         modelDirectory = FileManager.default.homeDirectoryForCurrentUser
