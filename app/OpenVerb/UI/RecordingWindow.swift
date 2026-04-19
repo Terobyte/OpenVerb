@@ -273,8 +273,6 @@ struct RecordingContentView: View {
             }
             previousState = newState
         }
-        .animation(.easeInOut(duration: 0.2), value: showRecording)
-        .animation(.easeInOut(duration: 0.2), value: showInferring)
     }
 
     // -----------------------------------------------------------------------
