@@ -248,3 +248,162 @@ for chunk in chunksToDisplay {
 The caller in `OpenVerbApp` passes `{ [weak self] chunk in self?.waveformVM.updateAmplitude(chunk) }`, which mutates `@Published var amplitudes` directly on the audio thread. SwiftUI requires `@Published` mutations to happen on the main thread; violating this causes undefined rendering behaviour and Swift concurrency warnings.
 
 **Fix:** Dispatch inside `processTapBuffer` before the callback loop: `DispatchQueue.main.async { waveformCallback(chunk) }`, or document that all `waveformCallback` implementations must dispatch themselves.
+
+---
+
+### 67 — `RingBuffer::reset()` stores indices without holding `write_mutex_`; concurrent `write()` sees torn state
+
+- **File:** `engine/src/audio/ring_buffer.cpp` — `reset()`, lines 14-17
+- **Category:** Data race (undefined behaviour)
+- **Severity:** Medium — `reset()` only called at session boundary but `write()` is on the audio thread with no synchronisation point
+- **Status:** Open — negative test: `testBug67_ringBufferResetMissingWriteMutexLock`
+
+`write()` acquires `write_mutex_` and computes free space as `BUF_SIZE - (write_idx_ - read_idx_)`. `reset()` stores `write_idx_ = 0` then `read_idx_ = 0` without acquiring `write_mutex_`. A concurrent `write()` between the two stores sees `write_idx_ = 0, read_idx_ = stale_value`, causing the unsigned subtraction `0 - stale_value` to wrap to a huge number, making `free` underflow to near-zero and silently dropping all audio for the rest of the session.
+
+```cpp
+void RingBuffer::reset() {
+    write_idx_.store(0, std::memory_order_seq_cst);  // store 1
+    read_idx_.store(0, std::memory_order_seq_cst);   // store 2 — gap!
+    // write() can read write_idx_==0, read_idx_==old → underflow
+}
+```
+
+**Fix:** Acquire `write_mutex_` in `reset()` before touching the indices, or use a single seqlock-style generation counter.
+
+---
+
+### 68 — `EngineManager.shutdown()` sets `status = .stopped` before old process exits; rapid restart may launch duplicate engine
+
+- **File:** `app/OpenVerb/Engine/EngineManager.swift` — `shutdown()`, lines ~180-195
+- **Category:** Race condition / process lifecycle
+- **Severity:** Medium — mitigated by crash-recovery backoff and `canRestartBackend` guard in practice
+- **Status:** Open — negative test: `testBug68_shutdownSetsStatusBeforeProcessExits`
+
+`shutdown()` sends SIGTERM, spawns a detached Task to wait for exit (0.5s timeout), then immediately sets `status = .stopped`. If the caller invokes `ensureRunning()` before the old process actually exits (e.g., user presses hotkey during shutdown), `ensureRunning()` sees `.stopped` and launches a new Process — but the old engine is still bound to the Unix socket. The new process fails to `bind()` and immediately crashes.
+
+```swift
+func shutdown() {
+    engineClient.sendShutdown()
+    sendSIGTERM()
+    let procRef = process
+    Task.detached { Self.waitForProcessExit(procRef, timeout: 0.5) }
+    status = .stopped  // ← process may still be alive
+}
+```
+
+**Fix:** Move `status = .stopped` into the detached Task's completion, or add a `Process.isRunning` check before launching a new process in `ensureRunning()`.
+
+---
+
+### 69 — Onboarding mic-permission step advances to accessibility regardless of user response
+
+- **File:** `app/OpenVerb/UI/OnboardingView.swift` — mic permission callback, ~line 95
+- **Category:** Logic error / UX
+- **Severity:** Low — user can still grant permission later; only affects first-launch wizard flow
+- **Status:** Open — negative test: `testBug69_onboardingAdvancesEvenWhenMicPermissionDenied`
+
+The microphone permission callback unconditionally advances the onboarding step to `.accessibility` even when the user denied permission:
+
+```swift
+AVCaptureDevice.requestAccess(for: .audio) { granted in
+    Task { @MainActor in
+        micGranted = granted
+        step = .accessibility  // ← advances even if granted == false
+    }
+}
+```
+
+The user is left believing microphone access is configured, but it was denied. Subsequent recordings will fail with `AudioSessionError.permissionDenied`.
+
+**Fix:** Only advance when `granted == true`. Show an error or retry prompt when denied.
+
+---
+
+### 70 — `ClipboardStyle.detectFormality` classifies >60% uppercase as "formal"; ALL-CAPS text is typically informal/shouting
+
+- **File:** `app/OpenVerb/Context/ClipboardStyle.swift` — `detectFormality()`, ~line 40
+- **Category:** Logic error / NLP heuristic inversion
+- **Severity:** Low — formality hint is advisory; model can override; only affects prompt style selection
+- **Status:** Open — negative test: `testBug70_detectFormalityInvertsUppercaseHeuristic`
+
+The heuristic counts uppercase vs total alphabetic characters and returns `"formal"` when the ratio exceeds 0.6. However, ALL-CAPS text on macOS is far more likely to be shouting, emphasis, or informal communication (e.g., "OMG WHAT") than formal writing. Formal text typically has correct capitalisation (proper nouns, sentence starts) but not >60% uppercase.
+
+```swift
+if total > 0 && Double(upperCount) / Double(total) > 0.6 {
+    return "formal"  // ← "HEY WHAT'S UP" → "formal"?!
+}
+```
+
+**Fix:** Invert the heuristic — high uppercase ratio should map to `"informal"` or `"casual"`. Formal text is better detected by sentence structure, punctuation, and honorifics.
+
+---
+
+### 71 — `Session::run()` timeout in STREAMING_AUDIO returns to IDLE without closing client fd; client may send orphaned binary frames
+
+- **File:** `engine/src/ipc/session.cpp` — timeout catch block, ~line 350
+- **Category:** Protocol state machine leak
+- **Severity:** Low — client normally disconnects after receiving `session.error{code=timeout}`; defense-in-depth
+- **Status:** Open — negative test: `testBug71_streamingTimeoutReturnsToIdleWithoutClosingFd`
+
+When a timeout fires during STREAMING_AUDIO, the session sends a JSON error to the client and transitions back to IDLE without closing the file descriptor. If the client doesn't disconnect (buggy client, proxy, etc.), it may continue sending binary audio frames into a session that's in IDLE state. The IDLE handler doesn't expect binary frames and will either silently discard them or misinterpret them as JSON, producing parse errors.
+
+```cpp
+} catch (const std::runtime_error& e) {
+    if (std::string(e.what()) == "timeout") {
+        send_error(fd, ErrorCode::timeout, ...);
+    }
+    // cleanup...
+    state = State::IDLE;  // ← fd still open, client may still send
+}
+```
+
+**Fix:** Transition to SHUTDOWN instead of IDLE on timeout, or close the fd after sending the error.
+
+---
+
+### 72 — `AccessibilityReader.readCursorSurroundingText` crashes with NSRangeException when AX reports a range extending beyond text
+
+- **File:** `app/OpenVerb/Context/AccessibilityReader.swift` — `readCursorSurroundingText()`, line 147
+- **Category:** Crash / bounds check missing
+- **Severity:** Medium — crash in the context builder path; triggered by apps that report stale or incorrect `AXSelectedTextRange` values
+- **Status:** Open — negative test: `testBug72_accessibilityReaderUnclampedAfterIndex`
+
+The `cursorPos` (derived from `cfRange.location`) is correctly clamped to `[0, totalLen]` at line 144. However, the `afterNS` index is computed without clamping:
+
+```swift
+let cursorPos = min(max(cfRange.location, 0), totalLen)     // ← clamped
+let beforeNS = nsString.substring(to: cursorPos)             // ← safe
+let afterNS  = nsString.substring(from: cursorPos + max(cfRange.length, 0))  // ← NOT clamped
+```
+
+If an app's AX implementation reports a `cfRange.location + cfRange.length` that exceeds `totalLen` (e.g., a text field that was edited after the range was queried), `NSString.substring(from:)` raises an `NSRangeException` and crashes the process.
+
+**Fix:** Clamp the after-index: `let afterStart = min(cursorPos + max(cfRange.length, 0), totalLen)`.
+
+---
+
+### 73 — `RecordingWindow` crossfade `asyncAfter` overrides correct state on rapid restart
+
+- **File:** `app/OpenVerb/UI/RecordingWindow.swift` — `onChange(of: appState.state)`, lines 266-270
+- **Category:** UI state race
+- **Severity:** Low — requires inferring → error/cancel → new recording within 200ms; visible as a brief flash where the recording indicator disappears
+- **Status:** Open — negative test: `testBug73_crossfadeAsyncAfterMissingStateGuard`
+
+The recording→inferring crossfade schedules `showRecording = false` via `DispatchQueue.main.asyncAfter(deadline: .now() + 0.20)`. If the app state changes again during this 200ms window (e.g., engine error → idle → hotkey → preparing → recording), the deferred block fires and sets `showRecording = false` even though the new recording state requires `showRecording = true`:
+
+```swift
+if previousState == .recording, newState == .inferring {
+    withAnimation(.easeIn(duration: 0.15)) {
+        showInferring = true
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
+        withAnimation(.easeOut(duration: 0.05)) {
+            showRecording = false  // ← fires even if state has since changed back to .recording
+        }
+    }
+}
+```
+
+The `asyncAfter` closure does not verify that the state is still `.inferring` before mutating `showRecording`.
+
+**Fix:** Guard the deferred block: `guard appState.state == .inferring else { return }`, or cancel the pending block on each state transition.

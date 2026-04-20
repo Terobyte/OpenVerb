@@ -55,6 +55,13 @@ import AppKit
 //   Bug 64  — ModelDownloader non-atomic remove+move → model lost on crash        [MED]
 //   Bug 65  — VadScanner.flush() bypasses MIN_CHUNK_MS → short utterances emitted [MED]
 //   Bug 66  — waveformCallback called on audio tap thread → @Published race       [MED]
+//   Bug 67  — RingBuffer::reset() missing write_mutex_ lock → torn index race     [MED]
+//   Bug 68  — EngineManager.shutdown() sets status=.stopped before process exits  [MED]
+//   Bug 69  — Onboarding mic-permission step advances even when denied            [LOW]
+//   Bug 70  — detectFormality classifies ALL-CAPS as "formal" (heuristic inverted)[LOW]
+//   Bug 71  — STREAMING_AUDIO timeout transitions to IDLE, leaves fd open         [LOW]
+//   Bug 72  — readCursorSurroundingText after-index unclamped → NSRangeException  [MED]
+//   Bug 73  — crossfade asyncAfter fires showRecording=false on rapid restart     [LOW]
 // ---------------------------------------------------------------------------
 
 final class OpenBugsNegativeTests: XCTestCase {
@@ -2471,5 +2478,375 @@ final class OpenBugsNegativeTests: XCTestCase {
             "undefined rendering behaviour and Swift concurrency warnings. " +
             "Fix: wrap the callback loop in DispatchQueue.main.async { } inside " +
             "processTapBuffer, or document that waveformCallback MUST dispatch itself.")
+    }
+
+    // =======================================================================
+    // Bug 67 — RingBuffer::reset() stores write_idx_ and read_idx_ without
+    //           holding write_mutex_; concurrent write() sees torn indices    [MED]
+    //
+    // write() acquires write_mutex_ and computes free = BUF_SIZE - (write_idx_ - read_idx_).
+    // reset() stores write_idx_=0 then read_idx_=0 without the mutex.
+    // A write() between the two stores sees write_idx_=0, read_idx_=stale_value:
+    // the unsigned subtraction 0 - stale wraps to ~SIZE_MAX, making free underflow
+    // to near-zero and silently dropping all audio for the rest of the session.
+    //
+    // EXPECTED: reset() acquires write_mutex_ before touching either index so
+    //           no concurrent write() can observe a torn state.
+    // ACTUAL:   reset() stores both atomics without any lock.
+    // =======================================================================
+
+    func testBug67_ringBufferResetMissingWriteMutexLock() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/audio/ring_buffer.cpp"
+        guard let content = readSource("engine/src/audio/ring_buffer.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read ring_buffer.cpp"); return
+        }
+
+        guard let resetRange = content.range(of: "void RingBuffer::reset()") else {
+            XCTFail("Cannot find RingBuffer::reset() in ring_buffer.cpp"); return
+        }
+        let resetBody = substring(content, from: resetRange.lowerBound, length: 200)
+
+        // The fix: acquire write_mutex_ (or equivalent) before both index stores.
+        // Any of these patterns is an acceptable fix.
+        let hasLock = resetBody.contains("write_mutex_")
+            || resetBody.contains("lock_guard")
+            || resetBody.contains("unique_lock")
+            || resetBody.contains("scoped_lock")
+
+        XCTAssertTrue(hasLock,
+            "Bug 67 CONFIRMED: RingBuffer::reset() stores write_idx_=0 then read_idx_=0 " +
+            "without acquiring write_mutex_. A concurrent write() between the two stores " +
+            "reads write_idx_=0 and the stale read_idx_; the unsigned subtraction " +
+            "0 - stale_read_idx wraps to ~SIZE_MAX, making free_space underflow to " +
+            "near-zero, causing all subsequent write() calls to silently drop audio for " +
+            "the rest of the session. reset() is only called at session boundaries, but " +
+            "write() is on the real-time CoreAudio thread with no synchronisation point. " +
+            "Fix: add `std::lock_guard<std::mutex> lk(write_mutex_);` at the top of " +
+            "reset() before touching write_idx_ or read_idx_.")
+    }
+
+    // =======================================================================
+    // Bug 68 — EngineManager.shutdown() sets status = .stopped immediately
+    //           after launching a detached Task; process may still be alive  [MED]
+    //
+    // shutdown() sends SIGTERM, then launches Task.detached { waitForProcessExit() }
+    // and immediately sets status = .stopped at function level — before the
+    // detached task's wait completes.  If ensureRunning() is called before the
+    // old process actually exits, it sees .stopped and launches a new Process,
+    // which fails to bind() to the socket still held by the old engine.
+    //
+    // EXPECTED: status = .stopped is set inside the detached Task's completion
+    //           handler (after waitForProcessExit returns), OR ensureRunning()
+    //           guards against launching when the old process is still running.
+    // ACTUAL:   status = .stopped is set outside the Task body (synchronously
+    //           after Task.detached {} launches), before the process exits.
+    // =======================================================================
+
+    func testBug68_shutdownSetsStatusBeforeProcessExits() {
+        guard let content = readSource("OpenVerb/Engine/EngineManager.swift") else {
+            XCTFail("Cannot read EngineManager.swift"); return
+        }
+
+        guard let shutdownRange = content.range(of: "func shutdown()") else {
+            XCTFail("Cannot find shutdown() in EngineManager.swift"); return
+        }
+        // Grab up to the next func boundary.
+        let afterShutdown = String(content[shutdownRange.lowerBound...])
+        let boundary = afterShutdown.range(of: "\n    private func ")
+            ?? afterShutdown.range(of: "\n    func ")
+        let fnBody = boundary.map {
+            String(afterShutdown[afterShutdown.startIndex..<$0.lowerBound])
+        } ?? String(afterShutdown.prefix(600))
+
+        guard let taskRange = fnBody.range(of: "Task.detached") ?? fnBody.range(of: "Task {") else {
+            // Task structure removed entirely — check that ensureRunning guards isRunning.
+            guard let ensureRange = content.range(of: "func ensureRunning()") else {
+                XCTFail("Cannot find ensureRunning() in EngineManager.swift"); return
+            }
+            let ensureBody = substring(content, from: ensureRange.lowerBound, length: 600)
+            XCTAssertTrue(ensureBody.contains("isRunning"),
+                "Bug 68 CONFIRMED (alternative fix path): shutdown() has no Task block but " +
+                "ensureRunning() also lacks an isRunning guard.")
+            return
+        }
+
+        guard let statusRange = fnBody.range(of: "status = .stopped") else {
+            // status assignment removed from shutdown entirely — acceptable fix.
+            return
+        }
+
+        // Count { and } between Task.detached and status = .stopped.
+        // If closes >= opens, the Task block has already closed before the assignment:
+        // that's the bug (status set outside/after the async context).
+        let between = String(fnBody[taskRange.lowerBound..<statusRange.lowerBound])
+        let opens  = between.filter { $0 == "{" }.count
+        let closes = between.filter { $0 == "}" }.count
+
+        XCTAssertTrue(opens > closes,
+            "Bug 68 CONFIRMED: EngineManager.shutdown() sets `status = .stopped` at " +
+            "function level, after the Task.detached { } block closes " +
+            "(opens=\(opens), closes=\(closes) braces between Task start and assignment). " +
+            "The detached task's waitForProcessExit() runs asynchronously; by the time " +
+            "status is set, the caller has already seen .stopped and may launch a new " +
+            "engine process that fails to bind() to the socket still held by the old one. " +
+            "Fix: move `status = .stopped` into the Task body after waitForProcessExit, " +
+            "or add `guard !(process?.isRunning == true) else { return }` in ensureRunning().")
+    }
+
+    // =======================================================================
+    // Bug 69 — Onboarding mic-permission step advances to .accessibility
+    //           even when the user denies permission (granted == false)    [LOW]
+    //
+    // The requestAccess callback advances the onboarding step unconditionally:
+    //   AVCaptureDevice.requestAccess(for: .audio) { granted in
+    //       Task { @MainActor in
+    //           micGranted = granted
+    //           step = .accessibility   ← always executes, even when denied
+    //       }
+    //   }
+    //
+    // EXPECTED: step = .accessibility only when granted == true; a denied
+    //           grant shows an error or retry prompt.
+    // ACTUAL:   step always advances, leaving the user believing microphone
+    //           access is configured when it was denied.
+    // =======================================================================
+
+    func testBug69_onboardingAdvancesEvenWhenMicPermissionDenied() {
+        guard let content = readSource("OpenVerb/UI/OnboardingView.swift") else {
+            XCTFail("Cannot read OnboardingView.swift"); return
+        }
+
+        // Locate the requestAccess callback.
+        guard let accessRange = content.range(of: "requestAccess(for: .audio)") else {
+            XCTFail("Cannot find requestAccess in OnboardingView.swift"); return
+        }
+        let callbackBody = substring(content, from: accessRange.lowerBound, length: 300)
+
+        // The fix: step = .accessibility must only execute when granted == true.
+        // Acceptable patterns: `if granted`, `guard granted`, `if !granted { return }`.
+        let hasGrantedGuard = callbackBody.contains("if granted")
+            || callbackBody.contains("guard granted")
+            || callbackBody.contains("if !granted")
+            || callbackBody.contains("when granted")
+
+        XCTAssertTrue(hasGrantedGuard,
+            "Bug 69 CONFIRMED: OnboardingView.requestAccess(for: .audio) callback sets " +
+            "`step = .accessibility` unconditionally, regardless of the `granted` value. " +
+            "When the user taps Deny in the system permission dialog, the callback fires " +
+            "with granted=false; micGranted is set to false but step still advances to " +
+            ".accessibility. The user believes microphone setup is complete; subsequent " +
+            "recordings fail with AudioSessionError.permissionDenied without context. " +
+            "Fix: wrap the step advance in `if granted { step = .accessibility }` and " +
+            "add an error or retry path for the denied case.")
+    }
+
+    // =======================================================================
+    // Bug 70 — ClipboardStyle.detectFormality classifies >60% uppercase as
+    //           "formal"; ALL-CAPS text is typically informal / shouting     [LOW]
+    //
+    // The heuristic returns "formal" when more than 60% of alphabetic chars
+    // are uppercase.  But on macOS, >60% uppercase almost always means
+    // SHOUTING, emphasis, or abbreviations (e.g., "OMG WHAT'S UP") — not
+    // formal writing.  Formal text has normal capitalisation (proper nouns,
+    // sentence starts) and rarely exceeds ~15% uppercase.
+    //
+    //   if total > 0 && Double(upperCount) / Double(total) > 0.6 { return "formal" }
+    //
+    // EXPECTED: high uppercase ratio → "casual" or "informal" (inverted heuristic).
+    // ACTUAL:   high uppercase ratio → "formal" (heuristic is backwards).
+    // =======================================================================
+
+    func testBug70_detectFormalityInvertsUppercaseHeuristic() {
+        guard let content = readSource("OpenVerb/Context/ClipboardStyle.swift") else {
+            XCTFail("Cannot read ClipboardStyle.swift"); return
+        }
+
+        guard let fnRange = content.range(of: "func detectFormality(") ??
+                            content.range(of: "private static func detectFormality(") else {
+            XCTFail("Cannot find detectFormality in ClipboardStyle.swift"); return
+        }
+        let fnBody = substring(content, from: fnRange.lowerBound, length: 1000)
+
+        // Locate the uppercase-ratio branch.
+        guard let ratioRange = fnBody.range(of: "Double(upperCount) / Double(total) > 0.6") ??
+                               fnBody.range(of: "upperCount) / Double(total) > 0.6") else {
+            // Heuristic was removed or refactored — check that "formal" is no longer
+            // returned in a context that follows a high-uppercase check.
+            let noHighUpper = !fnBody.contains("return \"formal\"")
+                || fnBody.contains("// inverted")
+                || fnBody.contains("informal")
+            XCTAssertTrue(noHighUpper,
+                "Bug 70: detectFormality still returns \"formal\" — verify the uppercase " +
+                "heuristic is not inverted after refactoring.")
+            return
+        }
+
+        // Grab the ~80 chars AFTER the ratio condition — that's the return value.
+        let afterRatio = substring(fnBody, from: ratioRange.upperBound, length: 80)
+
+        // The buggy return is "formal". The fix inverts it to "casual" or "informal".
+        let returnsFormal = afterRatio.contains("return \"formal\"")
+        XCTAssertFalse(returnsFormal,
+            "Bug 70 CONFIRMED: ClipboardStyle.detectFormality() returns \"formal\" when " +
+            "Double(upperCount) / Double(total) > 0.6. ALL-CAPS text on macOS is " +
+            "overwhelmingly informal (shouting, abbreviations, emphasis) — not formal " +
+            "writing. Formal text uses correct capitalisation (sentence starts, proper " +
+            "nouns) and rarely exceeds ~15% uppercase. The heuristic is backwards. " +
+            "Fix: change `return \"formal\"` to `return \"casual\"` (or \"informal\") " +
+            "in that branch of detectFormality().")
+    }
+
+    // =======================================================================
+    // Bug 71 — Session::run() timeout in STREAMING_AUDIO transitions to IDLE
+    //           without closing the client fd; orphaned binary frames arrive  [LOW]
+    //
+    // When a recv_binary_frame() timeout fires, the catch block sends a JSON
+    // error, tears down the worker pipeline, and then sets state = State::IDLE
+    // without closing or invalidating the file descriptor.  A misbehaving or
+    // proxy client may continue sending binary audio frames into a session
+    // now in IDLE state; the IDLE handler misinterprets them as JSON.
+    //
+    // EXPECTED: on timeout the session transitions to SHUTDOWN or DESTROYED,
+    //           or explicitly closes fd so the client cannot send more frames.
+    // ACTUAL:   state = State::IDLE — fd stays open, session re-enters the
+    //           JSON-command loop while the client may still be streaming binary.
+    // =======================================================================
+
+    func testBug71_streamingTimeoutReturnsToIdleWithoutClosingFd() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/ipc/session.cpp"
+        guard let content = readSource("engine/src/ipc/session.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read session.cpp"); return
+        }
+
+        // Locate the STREAMING_AUDIO state body (brace form avoids matching state_name()).
+        guard let streamingRange = content.range(of: "case State::STREAMING_AUDIO: {") else {
+            XCTFail("Cannot find STREAMING_AUDIO state body in session.cpp"); return
+        }
+        let streamingSection = String(content[streamingRange.lowerBound...])
+
+        // Locate the runtime_error catch inside STREAMING_AUDIO.
+        guard let rteRange = streamingSection.range(of: "catch (const std::runtime_error& e)") else {
+            XCTFail("Cannot find runtime_error catch in STREAMING_AUDIO section"); return
+        }
+        let rteBody = substring(streamingSection, from: rteRange.lowerBound, length: 600)
+
+        // The fix: transition to SHUTDOWN or DESTROYED, or close(fd).
+        // The buggy pattern: state = State::IDLE (leaves fd open for re-use).
+        let transitionsToIdleOnly =
+            rteBody.contains("state = State::IDLE")
+            && !rteBody.contains("state = State::SHUTDOWN")
+            && !rteBody.contains("state = State::DESTROYED")
+            && !rteBody.contains("::close(fd)")
+            && !rteBody.contains("close(fd)")
+
+        XCTAssertFalse(transitionsToIdleOnly,
+            "Bug 71 CONFIRMED: Session::run() STREAMING_AUDIO runtime_error catch " +
+            "(timeout path) sets state = State::IDLE without closing or invalidating fd. " +
+            "After sending `session.error{code=timeout}`, the session re-enters the " +
+            "IDLE JSON-command loop while the client may still be streaming binary audio " +
+            "frames. The IDLE handler does not expect binary frames and will discard them " +
+            "silently or misinterpret them as JSON, producing parse errors. " +
+            "Fix: transition to SHUTDOWN (or DESTROYED) instead of IDLE on timeout, " +
+            "or call close(fd) after send_error() so the client receives an EOF and " +
+            "cannot send further frames into the orphaned IDLE session.")
+    }
+
+    // =======================================================================
+    // Bug 72 — AccessibilityReader.readCursorSurroundingText crashes with
+    //           NSRangeException when AX reports a range beyond text bounds  [MED]
+    //
+    // cursorPos is correctly clamped to [0, totalLen], but the after-index
+    // (cursorPos + cfRange.length) is passed to NSString.substring(from:)
+    // without clamping.  If an app's AX implementation returns a stale or
+    // incorrect range whose location + length exceeds totalLen, the unclamped
+    // index causes an NSRangeException and crashes the process.
+    //
+    //   let cursorPos = min(max(cfRange.location, 0), totalLen)   // clamped ✓
+    //   let afterNS = nsString.substring(from: cursorPos + max(cfRange.length, 0)) // NOT clamped ✗
+    //
+    // EXPECTED: afterStart is clamped to totalLen before substring(from:).
+    // ACTUAL:   no upper-bound clamp on the after-index.
+    // =======================================================================
+
+    func testBug72_accessibilityReaderUnclampedAfterIndex() {
+        guard let content = readSource("OpenVerb/Context/AccessibilityReader.swift") else {
+            XCTFail("Cannot read AccessibilityReader.swift"); return
+        }
+
+        // Locate the after-cursor text assignment by the variable name used in the function.
+        // Bug:  let afterNS = nsString.substring(from: cursorPos + max(cfRange.length, 0))
+        //       — no upper-bound clamp; cursorPos + length may exceed totalLen.
+        // Fix:  let afterStart = min(cursorPos + max(cfRange.length, 0), totalLen)
+        //       let afterNS = nsString.substring(from: afterStart)
+        guard let afterVarRange = content.range(of: "let afterNS") ??
+                                  content.range(of: "let afterStart") else {
+            XCTFail("Cannot find afterNS / afterStart variable in AccessibilityReader.swift"); return
+        }
+        let afterVarText = substring(content, from: afterVarRange.lowerBound, length: 200)
+
+        // Any of these patterns constitutes a valid clamp on the after-index.
+        let isClamped = afterVarText.contains("min(")
+            || afterVarText.contains("afterStart")
+            || content.contains("let afterStart")
+
+        XCTAssertTrue(isClamped,
+            "Bug 72 CONFIRMED: readCursorSurroundingText passes `cursorPos + " +
+            "max(cfRange.length, 0)` directly to NSString.substring(from:) without " +
+            "clamping to totalLen. cursorPos is correctly clamped at line 144, but the " +
+            "combined after-index (location + length) can still exceed totalLen if the " +
+            "app's AX implementation reports a stale or incorrect range. " +
+            "NSString.substring(from:) raises NSRangeException for out-of-bounds indices, " +
+            "crashing the process. Triggered by apps that update their text content after " +
+            "the AXSelectedTextRange was queried (e.g., autocomplete, live suggestions). " +
+            "Fix: `let afterStart = min(cursorPos + max(cfRange.length, 0), totalLen)` " +
+            "and pass afterStart to substring(from:).")
+    }
+
+    // =======================================================================
+    // Bug 73 — RecordingWindow crossfade asyncAfter fires unconditionally;
+    //           rapid restart (inferring → idle → recording) sets
+    //           showRecording = false on an active recording               [LOW]
+    //
+    // The recording→inferring crossfade schedules showRecording = false via
+    // DispatchQueue.main.asyncAfter(deadline: .now() + 0.20).  If the app
+    // state changes again during the 200ms window (engine error → idle →
+    // hotkey → recording), the deferred block fires and incorrectly hides
+    // the recording indicator even though the new recording is active.
+    //
+    // EXPECTED: the asyncAfter closure verifies appState.state == .inferring
+    //           before mutating showRecording, or the pending dispatch is
+    //           cancelled on each state transition.
+    // ACTUAL:   no guard in the closure — fires unconditionally.
+    // =======================================================================
+
+    func testBug73_crossfadeAsyncAfterMissingStateGuard() {
+        guard let content = readSource("OpenVerb/UI/RecordingWindow.swift") else {
+            XCTFail("Cannot read RecordingWindow.swift"); return
+        }
+
+        // Locate the crossfade asyncAfter block.
+        guard let asyncRange = content.range(of: "asyncAfter(deadline: .now() + 0.20)") ??
+                               content.range(of: "asyncAfter(deadline: .now() +") else {
+            XCTFail("Cannot find asyncAfter crossfade in RecordingWindow.swift"); return
+        }
+        // Grab the closure body — the `showRecording = false` is within ~100 chars.
+        let closureBody = substring(content, from: asyncRange.lowerBound, length: 200)
+
+        // The fix: guard that state is still .inferring before mutating showRecording.
+        let hasStateGuard = closureBody.contains("appState.state == .inferring")
+            || closureBody.contains(".inferring")
+            || closureBody.contains("guard")
+
+        XCTAssertTrue(hasStateGuard,
+            "Bug 73 CONFIRMED: RecordingWindow asyncAfter(deadline: .now() + 0.20) closure " +
+            "sets showRecording = false without verifying that appState.state is still " +
+            ".inferring. If the state changes within the 200ms window (e.g., error → idle " +
+            "→ hotkey → recording), the deferred block fires and sets showRecording = false " +
+            "even though the app has started a new recording. The recording indicator " +
+            "disappears briefly — a visible flash — before syncDisplayState restores it. " +
+            "Fix: add `guard appState.state == .inferring else { return }` at the top of " +
+            "the asyncAfter closure, or cancel the pending dispatch on each state change.")
     }
 }
