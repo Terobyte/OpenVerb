@@ -174,14 +174,15 @@ std::vector<int16_t> resample_channel(const std::vector<int16_t>& src,
     for (std::size_t i = 0; i < n_out; ++i) {
         // Continuous position in the source signal.
         const double pos = static_cast<double>(i) * ratio;
-        const auto   i1  = static_cast<int>(pos);  // left neighbour index
+        const auto   i1  = static_cast<int64_t>(pos);  // left neighbour index
         const double t   = pos - static_cast<double>(i1);
 
         // Four neighbours for cubic interpolation; clamp to signal bounds.
-        const int i0 = std::max(0, i1 - 1);
-        const int i2 = std::min(static_cast<int>(n_in) - 1, i1 + 1);
-        const int i3 = std::min(static_cast<int>(n_in) - 1, i1 + 2);
-        const int ic = std::min(static_cast<int>(n_in) - 1, i1);
+        const int64_t n_in64 = static_cast<int64_t>(n_in);
+        const int64_t i0 = std::max(static_cast<int64_t>(0), i1 - 1);
+        const int64_t i2 = std::min(n_in64 - 1, i1 + 1);
+        const int64_t i3 = std::min(n_in64 - 1, i1 + 2);
+        const int64_t ic = std::min(n_in64 - 1, i1);
 
         const double p0 = static_cast<double>(src[static_cast<std::size_t>(i0)]);
         const double p1 = static_cast<double>(src[static_cast<std::size_t>(ic)]);

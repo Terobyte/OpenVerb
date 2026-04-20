@@ -103,7 +103,11 @@ void AudioCapture::start(CaptureCallback callback) {
 }
 
 void AudioCapture::stop() {
-    if (!impl_->capturing.load(std::memory_order_acquire)) return;
+    // Bug M4 fix: do NOT return early when capturing==false — impl_->queue may
+    // have been created by start() before capturing was set to true (the window
+    // between AudioQueueNewInput and capturing.store(true)).  Removing the
+    // early-return ensures stop() always reaches the queue-disposal block so
+    // an in-progress start() cannot leave an orphaned, running AudioQueue.
     impl_->capturing.store(false, std::memory_order_release);
 
     if (impl_->queue) {

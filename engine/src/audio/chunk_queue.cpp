@@ -27,7 +27,7 @@ std::optional<Chunk> ChunkQueue::pop() {
     if (queue_.empty()) return std::nullopt;
     Chunk c = std::move(queue_.front());
     queue_.pop();
-    audio_ms_ -= c.duration_ms;
+    audio_ms_ = std::max(0, audio_ms_ - c.duration_ms);
     not_full_.notify_one();
     return c;
 }
