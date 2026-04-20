@@ -83,16 +83,31 @@ final class AppState: ObservableObject {
     /// queue_status heartbeats.  Non-nil only while in .inferring state and
     /// the engine has sent at least one queue_status message.  Cleared on
     /// every transition to .idle.
+    /// Bug 137: ideally private(set) var remainingInferenceMs — but kept as
+    /// plain var because NegativeTests_Bugs_95_101 sets it directly for Bug 100
+    /// test setup; once that test is updated this should become private(set).
     @Published var remainingInferenceMs: Int?
 
     /// Accumulated live partial transcript text from streaming partial_result
     /// messages.  Updated while the hotkey is held (recording) and during
     /// inference.  Cleared on every transition to .idle.
-    @Published var livePartialText: String = ""
+    /// Bug 99: didSet auto-clears any value written while in .idle AFTER a
+    /// session has been started, guarding against stale Task { @MainActor }
+    /// closures that enqueue livePartialText appends before the session ends
+    /// but execute after transitioning to .idle. The _hasStartedSession guard
+    /// prevents clearing writes on a fresh AppState that has never been in a
+    /// session (e.g. unit tests using AppState purely as a data holder).
+    @Published var livePartialText: String = "" {
+        didSet {
+            if _hasStartedSession && state == .idle && !livePartialText.isEmpty {
+                livePartialText = ""
+            }
+        }
+    }
 
     /// The polished (LLM-cleaned) transcript text.  Set when the engine's
     /// polished_result message arrives.  Cleared on transition to .idle.
-    @Published var polishedText: String?
+    @Published private(set) var polishedText: String?
 
     // -----------------------------------------------------------------------
     // Dependency injection for testing
@@ -126,6 +141,12 @@ final class AppState: ObservableObject {
     /// Fires after `preparingSubtitleDelay` to surface "Preparing…" in the UI.
     /// Cancelled immediately when PREPARING transitions to any other state.
     private var preparingSubtitleTimer: Task<Void, Never>?
+
+    /// Set to true the first time AppState leaves .idle (i.e. a session has
+    /// been started). Used by the livePartialText didSet guard so that writes
+    /// to a fresh AppState that has never been in a session (e.g. unit tests
+    /// that use AppState purely as a data holder) are not auto-cleared.
+    private var _hasStartedSession = false
 
     // -----------------------------------------------------------------------
     // Transition
@@ -210,6 +231,12 @@ final class AppState: ObservableObject {
 
             switch previous {
             case .idle:
+                // Mark that at least one session has been started. The
+                // livePartialText didSet guard uses this to distinguish a fresh
+                // AppState (never in a session) from one that has been through
+                // the full lifecycle and is now idle after a completed session.
+                _hasStartedSession = true
+
                 // Fresh session: capture the frontmost app right now (before
                 // RecordingWindow becomes visible and steals frontmost status).
                 targetApp = frontmostApplicationProvider()
@@ -315,5 +342,15 @@ final class AppState: ObservableObject {
         case .inferring:
             break
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Internal setter helpers — allow module-level code (OpenVerbApp) to
+    // update private(set) properties without exposing public setters.
+    // -----------------------------------------------------------------------
+
+    /// Sets polishedText; must be called on @MainActor.
+    func setPolishedText(_ text: String?) {
+        polishedText = text
     }
 }

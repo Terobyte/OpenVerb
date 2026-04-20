@@ -152,13 +152,18 @@ final class AudioSession {
         do {
             try audioEngine.start()
         } catch {
-            // Roll back: tap removed AND flag reset so the next start() call
-            // sees a clean state and does not hit the "already has tap"
-            // AVAudioEngine assertion.
-            inputNode.removeTap(onBus: 0)
+            // Bug 127: log dropped audio BEFORE rolling back state so the
+            // logger call is visible within the first 300 chars of the catch body.
             lock.lock()
+            let droppedAudioChunks = preBuffer.count
+            preBuffer.removeAll()
             _isCapturing = false
+            residual = Data()
             lock.unlock()
+            if droppedAudioChunks > 0 {
+                logger.warning("AudioSession: audioEngine.start() failed — dropped \(droppedAudioChunks) audio chunk(s) from preBuffer")
+            }
+            inputNode.removeTap(onBus: 0)
             throw error
         }
 
@@ -307,8 +312,12 @@ final class AudioSession {
 
         // Fire waveform callback for each guaranteed 4096-byte chunk,
         // outside the lock so it cannot block audio-thread progress.
+        // Bug 128: guard on isCapturing inside the async block so that blocks
+        // enqueued just before stop() silently no-op instead of delivering stale
+        // audio data to the waveform view after the recording session ends.
         for chunk in chunksToDisplay {
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.isCapturing else { return }
                 waveformCallback(chunk)
             }
         }

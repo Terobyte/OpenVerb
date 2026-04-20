@@ -85,6 +85,11 @@ final class HotkeyManager {
     private var lastToggleTime: Date = .distantPast
     private let debounceDuration: TimeInterval = 0.3
 
+    // Bug 106: re-entrancy guard for conflict alert. showConflictAlert() calls
+    // installEventTap() which may call handleTapCreateFailure() → showConflictAlert()
+    // again, creating nested NSAlert.runModal() sessions and risking a stack overflow.
+    private var isShowingConflictAlert = false
+
     // -----------------------------------------------------------------------
     // Register — installs the ⌥Space tap (Escape monitors are lazy).
     // -----------------------------------------------------------------------
@@ -103,11 +108,21 @@ final class HotkeyManager {
         }
     }
 
-    /// Updates the active hotkey and reinstalls the CGEvent tap immediately.
-    /// Call from a Combine observer to apply Preferences changes live without
-    /// requiring an app restart.
+    /// Updates the stored hotkey configuration.
+    /// Bug 121: configure() must NOT install the event tap directly — tap
+    /// management is the exclusive responsibility of register(). Installing
+    /// the tap here (before callbacks are wired) creates a window where
+    /// hotkey events are dropped. Call register() separately to install the tap.
+    /// For live preference changes (Combine observer), configure() + register()
+    /// is the correct two-step sequence.
     func configure(keyCode: CGKeyCode, modifiers: CGEventFlags) {
-        installEventTap(key: HotKey(virtualKey: keyCode, flags: modifiers))
+        hotKey = HotKey(virtualKey: keyCode, flags: modifiers)
+        // Bug 105: if a tap is already active, reinstall via register() so the
+        // new key takes effect immediately for live preference changes.
+        // On first-launch startup (configure before register), this is a no-op.
+        if eventTap != nil {
+            register()
+        }
     }
 
     private func installEventTap(key: HotKey) {
@@ -368,6 +383,12 @@ final class HotkeyManager {
     }
 
     private func showConflictAlert() {
+        // Bug 106: prevent re-entrant conflict alerts. installEventTap() called
+        // from here may recurse back into showConflictAlert() if the alternative
+        // key also fails, causing nested NSAlert.runModal() and stack overflow.
+        guard !isShowingConflictAlert else { return }
+        isShowingConflictAlert = true
+        defer { isShowingConflictAlert = false }
         guard let newKey = pickAlternativeHotkey() else { return }
         logger.info("Switching hotkey to alternative: \(newKey.virtualKey)")
         installEventTap(key: newKey)

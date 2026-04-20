@@ -268,9 +268,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // ---- Step 26c: Wire partial_result forwarding ----
         // onPartialResult fires from drainResult() during .inferring.  Updates
         // livePartialText for opt-in live subtitle rendering in RecordingWindow.
-        engineManager.engineClient.onPartialResult = { [weak self] text, _, _ in
+        // Bug 110: capture chunkId (not _) to enable dedup on retransmits.
+        // Bug 99: guard on .inferring state before appending to prevent stale
+        // partial text from a completed session re-populating livePartialText.
+        engineManager.engineClient.onPartialResult = { [weak self] text, chunkId, _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                // Bug 99: discard if no longer in an active session state.
+                guard self.appState.state == .inferring || self.appState.state == .recording else { return }
                 self.appState.livePartialText += text
             }
         }
@@ -281,7 +286,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         engineManager.engineClient.onPolishedResult = { [weak self] text in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.appState.polishedText = text
+                self.appState.setPolishedText(text)
             }
         }
 
@@ -729,6 +734,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             for chunk in buffered {
                 engineManager.engineClient.sendAudioFrame(chunk)
             }
+            // Bug 129: call syncOnIOQueue() BEFORE commitSendCallback so that
+            // the audio thread cannot race interim frames to ioQueue. Once the
+            // live callback is installed, the audio thread dispatches frames via
+            // ioQueue.async immediately. Without the sync fence here, a live frame
+            // can land in ioQueue before an older interim frame dispatched by the
+            // main thread's for-loop below.
+            engineManager.engineClient.syncOnIOQueue()
             // Atomically activate live streaming and drain any frames that
             // arrived in the nanosecond gap since flushPreBuffer() returned.
             let liveCallback: (Data) -> Void = { [weak self] chunk in
@@ -738,9 +750,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             for chunk in interim {
                 engineManager.engineClient.sendAudioFrame(chunk)
             }
-            // Bug 32 fix: drain all pre-buffered+interim frame writes from ioQueue
-            // before activating the live streaming monitor.
-            engineManager.engineClient.syncOnIOQueue()
             engineManager.engineClient.startPhase2Monitor()
 
             appState.transition(to: .recording)
@@ -814,10 +823,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // -----------------------------------------------------------------------
 
     private func drainResult(generation: UInt64) async {
+        // Bug 93: track whether a polishedResult arrived without a subsequent
+        // result message. After polishedResult, use a much shorter timeout so
+        // the session does not block for the full 3-minute window if the engine
+        // crashes mid-delivery and never sends the final result message.
+        var polishedResultReceived = false
         while appState.state == .inferring && generation == drainGeneration {
+            let timeoutMs: Int = polishedResultReceived ? 10_000 : 180_000
             let msg: ServerMessage
             do {
-                msg = try await engineManager.engineClient.receiveMessage(timeoutMs: 180_000)
+                msg = try await engineManager.engineClient.receiveMessage(timeoutMs: timeoutMs)
             } catch {
                 logger.error("drainResult: receive error: \(error)")
                 // Bug 16: stale drain from a previous session — return without touching UI.
@@ -848,6 +863,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
 
+            // Bug 113: check generation immediately after await receiveMessage() returns,
+            // before processing the message. The while-condition alone is insufficient —
+            // one stale message slips through between the await resumption and the next
+            // while-condition check. This guard prevents that.
+            guard generation == drainGeneration else { return }
             switch msg {
             case .progress(let percent):
                 processingVM.updateProgress(percent)
@@ -866,6 +886,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .polishedResult(let text):
                 processingVM.exitPolishing()
                 engineManager.engineClient.onPolishedResult?(text)
+                // Bug 93: flag that polishedResult has arrived so the next
+                // receiveMessage uses the shorter 10_000 ms timeout instead of
+                // 180_000 ms. If the engine never sends the final result message
+                // (crash after polish), the session resolves in 10 s rather than 3 min.
+                polishedResultReceived = true
 
             case .result(let text, let command):
                 // Bug 78: stale-drain guard — abortAndRestart() bumps drainGeneration.
