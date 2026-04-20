@@ -1,409 +1,211 @@
 # OpenVerb Bug Tracker
 
-## C++ Engine — Open Bugs
-
-### C8 — `unload_model()` doesn't null `backend_`; stale `shared_ptr` copy races with model unload
-
-- **File:** `engine/src/engine.cpp:142-148`
-- **Category:** Race condition (latent)
-- **Severity:** Medium — currently mitigated by caller discipline (`unload_model()` only called when `session_active_` is false)
-- **Status:** Fixed — negative test: `testBugC8_unloadModelDoesNotNullBackend`
-
-`unload_model()` calls `backend_->unload_model()` (which resets the internal `llama_` context) and sets `loaded_ = false`, but leaves `backend_` pointing to the now-hollow Backend object. Any `process_stream()` or `process_file()` call that already grabbed a `shared_ptr<Backend>` copy under `engine_mutex_` and released the lock will call into a Backend whose `llama_` is null:
-
-```
-Worker thread:                         Poll loop / GCD handler:
-  lock(engine_mutex_)
-  be = backend_           ← copy shared_ptr
-  unlock(engine_mutex_)
-                                        lock(engine_mutex_)
-                                        backend_->unload_model()  ← resets llama_ inside Backend
-                                        loaded_ = false
-                                        unlock(engine_mutex_)
-  be->process_stream(...) ← Backend alive (refcount) but llama_ is null → crash
-```
-
-Currently safe because all `unload_model()` call sites (GCD CRITICAL handler, idle timeout, WARN force-unload) check `session_active_` before calling. But `Engine` doesn't enforce this — one refactoring that breaks the caller contract causes a crash.
-
-**Fix:** Either null `backend_` in `unload_model()` so stale copies see a dead pointer immediately, or add an abort check inside the Backend's `process_stream`/`process_file` methods.
+Sorted by severity: crashes and data loss first, cosmetic and test gaps last.
+`[tested]` = failing red test exists. Green = bug fixed.
 
 ---
 
-### C9 — Ring buffer `write()` silently drops audio data when full
+## High — real crash or data loss under specific conditions
 
-- **File:** `engine/src/audio/ring_buffer.cpp:6-25`
-- **Category:** Silent data loss
-- **Severity:** Low — only affects `--mic` mode; IPC streaming path doesn't use RingBuffer
-- **Status:** Fixed — negative test: `testBugC9_ringBufferWriteSilentlyDropsData`
+**Bug 86** [tested] — Download progress shows billions of percent when server omits `Content-Length`
+`ModelDownloader.swift:187` — `max(totalBytesExpectedToWrite, 1)` converts `-1` (NSURLSessionTransferSizeUnknown) to `1`. With a 1.5 GB file, `progress ≈ 1_500_000_000`. Displayed as `Int(progress * 100)%`.
 
-When the producer (audio capture) writes faster than the consumer can drain, `write()` silently returns 0 and discards data. No backpressure signal, no error flag — the transcriber silently receives incomplete audio. The caller in `main.cpp:178-180` logs a warning but proceeds with partial data.
+**Bug 87** [tested] — SHA256 sentinel `"TBD_PIN_BEFORE_RELEASE"` skips all security verification; test never catches it
+`ModelDownloader.swift:151–153, ModelDownloaderTests.swift:6–8` — `testSHA256ConstantsExist` only checks `!isEmpty`. Sentinel passes. Release build accepts corrupted or malicious models silently.
 
----
+**Bug 88** [tested] — Every injection permanently destroys non-string clipboard content (RTF, images, files)
+`TextInjector.swift:57–99` — Only `pasteboard.string(forType: .string)` is saved. `clearContents()` removes all types. Restore writes only plain text. Copy a file in Finder, then dictate → file path gone forever.
 
-### H1 — `stop_requested_` uses `memory_order_relaxed`; worker may delay seeing abort signal
+**Bug 89** [tested] — Key-up CGEvent silently dropped → `V` key stuck system-wide
+`TextInjector.swift:111–119` — If key-down posts but key-up `CGEvent` creation returns nil, no key-up is ever sent. `V` is "held" in the HID stream until the user physically presses and releases it.
 
-- **File:** `engine/src/ipc/session.cpp:49,102`
-- **Category:** Delayed visibility
-- **Severity:** Low — worker processes 1-2 extra tokens before noticing; harmless in practice
-- **Status:** Fixed — negative test: `testBugH1_stopRequestedStoreUsesRelaxedOrdering`
+**Bug 90** [tested] — Transcription text leaked in cleartext clipboard when dictating into a password field
+`TextInjector.swift:41–103` — No check for `SecureInputEnabled` or `AXRole`. Full transcription sits on `NSPasteboard.general` for 300 ms in plaintext; any process can read it.
 
-`stop_requested_` is a `std::atomic<bool>` accessed with `memory_order_relaxed`. The worker thread reads it in the inference loop; the main thread writes it in `stop()` and error handlers. Relaxed ordering doesn't guarantee the worker sees the store promptly — on weakly-ordered architectures (ARM, which Apple Silicon is), the worker may continue for extra iterations before the store becomes visible.
+**Bug 91** [tested] — Concurrent `download()` calls both pass `isDownloading` guard — duplicate downloads
+`ModelDownloader.swift:82, 95` — Guard reads `isDownloading`; write is deferred to a `MainActor.run` 13 lines later. Second call in that window passes, both calls invalidate each other's session.
 
-**Fix:** Use `memory_order_release` for stores and `memory_order_acquire` for loads, or simply `memory_order_seq_cst`.
+**Bug 92** [tested] — Onboarding mic denial deadlocks — user permanently stuck
+`OnboardingView.swift:68–79` — `step` only advances on `granted == true`. After denial macOS never re-prompts; tapping button again fires `false` immediately. No error message, no Skip. Onboarding cannot complete.
 
----
+**Bug 93** [tested] — Engine sends `polishedResult` without `result` → app stuck in `.inferring` for 3 minutes
+`OpenVerbApp.swift:852–857` — `polishedResult` is non-terminal. Without a `result` message the while-loop runs for 180 seconds. Escape disabled; user cannot start a new session.
 
-### C1 — Worker thread captures `Engine&` by reference; dangling reference if IpcServer outlives scope
-
-- **File:** `engine/src/ipc/session.cpp` — `worker_thread_` lambda
-- **Category:** Use-after-free (latent)
-- **Severity:** Medium — `~Session()` calls `stop() → join()` which normally prevents the dangle, but exceptions in adjacent paths can break the ordering
-- **Status:** Fixed — negative test: `testBugC1_workerThreadCapturesEngineByReference`
-
-`worker_thread_` lambda uses `[this, fd, &engine]`. Capturing `engine` (an `Engine&` parameter) by lvalue reference means the worker thread holds a raw alias into the `IpcServer`'s `engine_` member. If the `IpcServer` is destroyed before the worker thread exits, the reference dangles.
-
-**Fix:** Pass engine by value (requires Engine to be movable) or introduce a `std::shared_ptr<Engine>` so the worker captures shared ownership.
+**Bug 94** [tested] — `injectPerCharacter()` shift-detection broken for punctuation (`!@#$%^&*`)
+`TextInjector.swift:142–148` — `char != char.lowercased()` returns `false` for all shifted punctuation (no lowercase form). `!` injects as `1`, `@` as `2`, etc.
 
 ---
 
-### C2 — Session thread captures raw `this`; use-after-free if IpcServer destroyed mid-session
+## Medium — real bugs with narrower trigger conditions
 
-- **File:** `engine/src/ipc/server.cpp` — `session_thread_` lambda
-- **Category:** Use-after-free (latent)
-- **Severity:** High — if `stop()` is never called (e.g., `start()` throws after thread launch), destructor skips join and the thread outlives the `IpcServer` object
-- **Status:** Fixed — negative test: `testBugC2_sessionThreadCapturesIpcServerThisDirectly`
+**Bug 95** [tested] — `recvJSONSync` races on `fd` between `pollfd` setup and `read()` syscall
+`EngineClient.swift:323, 340` — `disconnect()` can close `fd` while `poll()` is blocked; subsequent `read(fd,...)` re-reads `-1` → `EBADF` instead of clean `connectionClosed`.
 
-`session_thread_` lambda uses `[this, client_fd, now_sec]`. All accesses to `engine_`, `session_active_`, `pressure_critical_active_`, and `LOG_*` inside the lambda go through the captured raw `this`. `IpcServer::stop()` joins `session_thread_` before the destructor completes, which normally prevents dangling use — but exceptional paths break this guarantee.
+**Bug 96** [tested] — `ensureRunning()` blocks MainActor 500 ms via synchronous `waitForProcessExit`
+`EngineManager.swift:247` — Spins `RunLoop.current.run(until:)` on the main actor for up to 500 ms on every cold-start or crash-recovery. UI is unresponsive during that window.
 
-**Fix:** Make `IpcServer` inherit from `std::enable_shared_from_this<IpcServer>` and capture `auto self = shared_from_this()` in the lambda, or use a `std::weak_ptr` with a lock guard.
+**Bug 97** [tested] — `handleCrash()` silent-return on dedup — callers can't distinguish dedup from success
+`EngineManager.swift:359` — `guard !isRecovering else { return }` returns `Void`. If the first recovery throws `crashLoop`, the second caller sees no error and assumes recovery is running; engine stays dead.
 
----
+**Bug 98** [tested] — Phase 2 monitor and `drainResult` both fire `onPartialResult` for the same message
+`EngineClient.swift:617, OpenVerbApp.swift:846` — No guard equivalent to `callOnErrorIfLive` for partials. During `recording→inferring` handoff the same partial result is appended to `livePartialText` twice.
 
-### H6 — VadScanner has no synchronization; data race between audio thread and session thread
+**Bug 99** [tested] — `livePartialText` appended after idle-transition clear — stale text from previous session
+`AppState.swift:91, OpenVerbApp.swift:265–269` — `onPartialResult` enqueues a `Task { @MainActor }`. If the session ends and `livePartialText` is cleared before the Task runs, stale text is appended to the now-idle state.
 
-- **File:** `engine/src/audio/vad_scanner.cpp`
-- **Category:** Data race (undefined behaviour)
-- **Severity:** High — `push_frame()` called from CoreAudio real-time thread; `flush()`/`reset()` from session main thread; concurrent access to `buffer_ms_`, `silence_ms_`, `in_speech_`, `buffer_`
-- **Status:** Fixed — negative test: `testBugH6_vadScannerHasNoSynchronization`
+**Bug 100** [tested] — `remainingInferenceMs` not cleared on `ERROR→PREPARING` — stale countdown in new session
+`AppState.swift:234–255` — Only cleared on `.idle`. After `INFERRING→ERROR→PREPARING` retry, the UI shows the countdown from the failed session during the new preparing phase.
 
-`vad_scanner.cpp` has no mutex or atomic protection. `push_frame()` is called from the CoreAudio real-time thread; `flush()` and `reset()` are called from the session main thread. `buffer_.insert()` is not thread-safe — concurrent access can produce incorrect VAD boundaries or memory corruption. Detected by TSan.
+**Bug 101** [tested] — `NSPasteboard.string` fallback in `ContextBuilder.build` called off main thread
+`ContextBuilder.swift:99` — When `clipboardSnapshot` is nil and `includeClipboard` is true, `NSPasteboard.general.string(forType:)` is called from the cooperative thread pool. NSPasteboard requires main thread.
 
-**Fix:** Add `std::mutex mu_` to `VadScanner` and acquire it at the top of `push_frame()`, `flush()`, and `reset()`.
+**Bug 102** [tested] — Surrogate-pair split: UTF-16 cursor offset can bisect an emoji grapheme cluster
+`AccessibilityReader.swift:139–148` — `NSString.substring(to: cursorPos)` at a UTF-16 offset inside a surrogate pair produces a lone surrogate → corrupt UTF-8 passed as context to the engine.
 
----
+**Bug 103** [tested] — `hotkeyKeyCode = 0` (A key) treated as "not set" — binding silently reverts on restart
+`AppSettings.swift:208–209` — `defaults.integer(forKey:)` returns `0` for both absent and stored `0x00`. Binding the hotkey to `⌥A` reverts to `⌥Space` on every launch.
 
-### H7 — ChunkQueue::reset() doesn't notify waiting threads; lost-wakeup hang
+**Bug 104** [tested] — `isDownloading` cancel race: rapid double-tap overwrites valid `resumeData` with nil
+`ModelDownloader.swift:110–117` — `isDownloading = false` is written async. Second cancel fires `cancel(byProducingResumeData:)` on an already-cancelled task, delivering nil that overwrites the valid resume token.
 
-- **File:** `engine/src/audio/chunk_queue.cpp`
-- **Category:** Lost wakeup / hang
-- **Severity:** High — manifests on rapid abort-and-restart (Escape during active inference)
-- **Status:** Fixed — negative test: `testBugH7_chunkQueueResetMissingNotify`
+**Bug 105** [tested] — `configure()` has no retry watchdog — hotkey silently dies on tap failure during reconfiguration
+`HotkeyManager.swift:100–103` — `register()` starts the watchdog on failure. `configure()` does not. If the tap fails mid-session (permissions revoked), the hotkey is permanently dead with no recovery.
 
-`shutdown()` sets `shut_=true` and calls `notify_all()`. A thread waking in `pop()` re-checks `!queue_.empty() || shut_`. If `reset()` runs between the notify and the re-check, setting `shut_=false`, the thread sees both conditions false and re-waits with no pending notification — hangs indefinitely. No subsequent push arrives in the abort-and-restart scenario, so the worker thread never processes the sentinel chunk.
+**Bug 106** [tested] — `showConflictAlert` re-enters `installEventTap` which re-enters `showConflictAlert` — stack overflow on double conflict
+`HotkeyManager.swift:365–371, 113–156` — If both the original and alternative key fail tap creation, `NSAlert.runModal()` is called inside an existing `runModal()` session.
 
-**Fix:** Add `not_empty_.notify_all(); not_full_.notify_all();` at the end of `reset()`.
+**Bug 107** [tested] — `ShortcutCaptureView.deinit` calls `NSEvent.removeMonitor` — may not run on main thread
+`ShortcutRecorder.swift:54–58` — `deinit` can run on whichever thread drops the last reference. `NSEvent.removeMonitor` is AppKit — main thread only.
 
----
+**Bug 108** [tested] — `AppSettings.shared` static let accessible cross-actor — first access may initialize off main actor
+`AppSettings.swift:28–29, 37` — Class is `@MainActor` but `static let shared` lazy-initializes on first access. Access from a non-`@MainActor` context runs `init()` off the main actor.
 
-### 53 — Server joins previous session thread without signalling stop; blocks new client up to 15s
+**Bug 109** [tested] — Markdown ordered-list regex never matches — `^\d+\\. ` matches a literal backslash, not a dot
+`ClipboardStyle.swift:37` — Raw string `#"^\d+\\. "#` passes `^\d+\\. ` to the regex engine, matching `"1\. "` not `"1. "`. Ordered-list clipboard content is never detected as Markdown.
 
-- **File:** `engine/src/ipc/server.cpp`
-- **Category:** Blocking / latency
-- **Severity:** Medium — mitigated by Bugs 49+52 fixes (client always disconnects on error), so the old session exits in <1ms via `ConnectionClosed`; defense-in-depth C++ signal deferred
-- **Status:** Deferred (unreachable after Bugs 49+52 fixed) — negative test: `testBug53_serverJoinWithoutSignallingPreviousSession`
+**Bug 110** [tested] — `onPartialResult` ignores `chunkId` and `isFinal` — no dedup on retransmit
+`OpenVerbApp.swift:265–270` — Both fields discarded. Engine retransmit appends text twice. Cumulative partials would produce doubled text in `livePartialText`.
 
-`server.cpp` calls `session_thread_.join()` after `accept()` without signalling the previous session to stop. Under Bug 49/52 conditions (client left old fd open), the prior session polls for up to `idle_timeout_secs` (15 s) before exiting, blocking the new client. The kernel accepts the new fd but the server is stuck in `join()`.
+**Bug 111** [tested] — `handleSleep()` sets `.stopped` synchronously before async `disconnect()` closes `fd`
+`EngineManager.swift:500–511` — Rapid sleep/wake: `handleWake()` calls `connectSync()` which sees `fd != -1` (disconnect not yet run), returns early believing connected, then `sendPing()` writes to a half-closed socket.
 
-**Fix:** Before `session_thread_.join()`, signal the previous session via `g_interrupted`, a per-session stop flag, or close the old client fd.
+**Bug 112** [tested] — Stale `resumeData` never cleared when next download starts fresh
+`ModelDownloader.swift:98–103` — `resumeData` only cleared on SHA256 failure or completion. Cancel → delete partial file → retry attempts to resume from stale data, potentially writing a corrupt model.
 
----
+**Bug 113** [tested] — `drainResult` processes one message after `abortAndRestart()` bumps `drainGeneration`
+`OpenVerbApp.swift:803–847` — While-condition checked at top. After `await receiveMessage()` resumes, one message is processed (including `livePartialText +=`) before stale-generation exit. Text from aborted session leaks into new session.
 
-### NEW-1 — `buf.accumulated` not cleared before JSON→binary mode transition; stale bytes corrupt framing
+**Bug 114** [tested] — `waitForProcessExit` busy-waits on cooperative thread — starves thread pool
+`EngineManager.swift:344–350` — `RunLoop.current.run(until:)` on a cooperative thread has no sources; spin-waits 50 ms per iteration. Burns a thread pool slot for the full 500 ms on every `shutdown()`.
 
-- **File:** `engine/src/ipc/session.cpp:267`
-- **Category:** Protocol fragility
-- **Severity:** Medium — only triggered by misbehaving/proxying clients; current Swift client is safe
-- **Status:** Fixed — negative test: `testBugNEW1_accumulatedNotClearedBeforeBinaryMode`
+**Bug 115** [tested] — Language picker shows no selection for unsupported system locales
+`AppSettings.swift:221, PreferencesView.swift:77–92` — Picker only offers 6 languages. Any other system locale (Chinese, Arabic, Portuguese) leaves picker with no selection; unrecognized code passed to engine.
 
-When the session transitions from WAITING_READY (JSON mode) to STREAMING_AUDIO (binary mode), `RecvBuffer::accumulated` is not cleared. If the client pipelined data (sent binary frames before receiving `session.ready`), leftover bytes from JSON parsing would be interpreted as a binary frame header by `recv_binary_frame()`, causing bogus frame lengths or `frame too large` errors.
+**Bug 116** [tested] — Concurrent `inject()` calls interleave clipboard state
+`TextInjector.swift:41–103` — No actor isolation. A stale `drainResult` Task can call `inject()` while a new session injects. `savedClipboard` of one call captures transcription text written by the other.
 
-The reverse transition (STREAMING_AUDIO → IDLE) correctly clears at session.cpp:321.
+**Bug 117** [tested] — `activate(options: [])` deprecated and more often silently fails on macOS 14+
+`CommandExecutor.swift:142, TextInjector.swift:72, 175` — On Sonoma, activation without `.activateIgnoringOtherApps` is restricted more aggressively. Code logs warning and proceeds; injected text silently lost when target app isn't frontmost.
 
-**Fix:** Add `buf.accumulated.clear()` at session.cpp:268, before the streaming pipeline is initialized:
+**Bug 118** [tested] — `RecordingHUDBugsTests` resolves source paths against CWD — fails silently on CI
+`RecordingHUDBugsTests.swift:12–15` — `URL(fileURLWithPath: relativePath)` fails when CWD ≠ `app/`. Tests report "Cannot read file" instead of the intended assertion, masking actual regressions.
 
-```cpp
-state            = State::STREAMING_AUDIO;
-buf.accumulated.clear();  // prevent stale JSON bytes corrupting binary frames
-first_frame_seen = false;
-```
+**Bug M2** [tested] — `ring_buffer.cpp`: `reset()` + concurrent `read_all()` — `read_idx_` overtakes `write_idx_`
+`ring_buffer.cpp` — Index inversion race produces reads of uninitialized data.
 
----
+**Bug M6** [tested] — `g_interrupted` global: SIGINT kills entire server instead of per-session isolation
+`session.cpp` — A single SIGINT terminates all active sessions. No per-session cancellation.
 
-## Swift / macOS — Open Bugs
+**Bug M7** [tested] — Polish inference runs on dead connection after `ConnectionClosed` — wasted GPU
+`session.cpp:341–347` — Polishing inference not gated on connection liveness.
 
-### 62 — `injectPerCharacter` sets modifier flags on key-down but not key-up; Shift sticks
+**Bug M8** [tested] — `reinterpret_cast<int16_t*>` without alignment guarantee + odd-frame truncation
+`session.cpp:364–366` — Pointer alignment unchecked; odd byte count silently drops last sample.
 
-- **File:** `app/OpenVerb/Output/TextInjector.swift` — `injectPerCharacter()`, lines 189-194
-- **Category:** CGEvent protocol violation
-- **Severity:** High — uppercase characters leave the Shift modifier logically pressed in the system event stream
-- **Status:** Fixed — negative test: `testBug62_perCharacterInjectionMissingFlagsOnKeyUp`
+**Bug M9** [tested] — `load_thread.join()` blocks indefinitely on hung model load
+`session.cpp:226–257` — No timeout. Corrupt model file or I/O stall freezes the session thread permanently.
 
-`injectPerCharacter` calls `keyCodeAndFlags(for:)` to retrieve a `(CGKeyCode, CGEventFlags)` pair and correctly sets `down.flags = flags` on the key-down event. However, the key-up event is posted **without** applying the same flags:
+**Bug M10** [tested] — `strip_trailing_punct` handles ASCII only — CJK punctuation not stripped
+`parser.cpp` — `。、）` and other Unicode punctuation appear at end of transcription output.
 
-```swift
-if let down = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true) {
-    if flags != CGEventFlags(rawValue: 0) { down.flags = flags }
-    down.post(tap: .cghidEventTap)
-}
-if let up = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false) {
-    up.post(tap: .cghidEventTap)   // ← flags never applied
-}
-```
+**Bug M11** [tested] — `infer()` with empty `audio_pcm` and no VAD → null bitmap → crash
+`llama_context.cpp` — Zero-length audio without VAD produces null feature bitmap, null-pointer dereference inside inference.
 
-Per the CGEvent contract, a key-up must carry the same modifier flags as its paired key-down. When `.maskShift` is absent on the key-up, the HID event tap sees a mismatched pair and leaves the Shift modifier in a logically-pressed state, corrupting all subsequent keystrokes until the user physically taps Shift.
-
-**Fix:** Mirror the down-event guard: `if flags != CGEventFlags(rawValue: 0) { up.flags = flags }` before `up.post(...)`.
-
----
-
-### 63 — `ModelDownloader.download()` has no re-entrance guard; concurrent call silently cancels the in-flight download
-
-- **File:** `app/OpenVerb/Model/ModelDownloader.swift` — `download()`, lines 81-105
-- **Category:** State machine violation / silent data loss
-- **Severity:** Medium — progress and resume data from the first download are silently discarded
-- **Status:** Fixed — negative test: `testBug63_downloadHasNoReentranceGuard`
-
-`download()` begins by calling `session?.invalidateAndCancel()` (line 90) unconditionally — before checking whether a download is already in progress. A concurrent or rapid second call therefore cancels the first URLSession (and its in-flight download task) and starts fresh, with no error or notification to the caller. `isDownloading` is set to `true` for both calls, making the race invisible to observers.
-
-**Fix:** Guard the function body: `guard !isDownloading else { return }` (or `throw`) immediately after entering.
+**Bug M12** [tested] — Log rotation: `fclose` → `fopen` failure silently drops all subsequent logs
+`log.cpp` — File handle set to null on open failure; all subsequent writes silently discarded.
 
 ---
 
-### 64 — `ModelDownloader` removes destination file before moving temp file; crash between the two ops loses the downloaded model
+## Low — edge cases, fragile tests, cosmetic issues
 
-- **File:** `app/OpenVerb/Model/ModelDownloader.swift` — `urlSession(_:downloadTask:didFinishDownloadingTo:)`, lines 212-215
-- **Category:** Non-atomic file operation / data loss
-- **Severity:** Medium — process kill or I/O error between removeItem and moveItem leaves the user with no model and must re-download
-- **Status:** Fixed — negative test: `testBug64_nonAtomicRemoveBeforeMove`
+**Bug 119** [tested] — `recvBuffer` not cleared if `connectSync` called while already connected — stale bytes
+`EngineClient.swift:130–131` — Guard `fd == -1 else { return }` skips buffer reset. Prior session's leftover bytes returned as a new message, triggering spurious protocol errors.
 
-The finish-download delegate first removes any existing destination file and then moves the URLSession temp file:
+**Bug 120** [tested] — `isConnected` calls `ioQueue.sync` from MainActor — latent deadlock
+`EngineClient.swift:200` — Any future `ioQueue` block dispatching back to MainActor would deadlock.
 
-```swift
-if FileManager.default.fileExists(atPath: destinationURL.path) {
-    try FileManager.default.removeItem(at: destinationURL)   // step 1
-}
-try FileManager.default.moveItem(at: location, to: destinationURL) // step 2
-```
+**Bug 121** [tested] — Double `configure()` + `register()` on app launch installs tap twice
+`OpenVerbApp.swift:186–199` — Two `CGEvent.tapCreate` calls at startup; first tap torn down immediately. Brief window where a keypress fires `handleCGKeyEvent` with no callbacks assigned.
 
-If the process is killed, crashes, or encounters a permissions error between step 1 and step 2, the old model is gone and the new one was never written. `moveItem` is also not atomic across volume boundaries (it falls back to copy + delete internally).
+**Bug 122** [tested] — `autoClearTimer` guard `!Task.isCancelled` after `catch { return }` is dead code
+`AppState.swift:302` — `Task.sleep` throws on cancellation; `catch` returns. Post-catch guard is unreachable via cancellation path.
 
-**Fix:** Use `replaceItemAt(_:withItemAt:backupItemName:options:)` which is atomic within the same volume, or move to a sibling temp path first and then rename.
+**Bug 123** [tested] — `reset()` skips `modelDirectory` trailing-slash normalization applied in `init()`
+`AppSettings.swift:272–273` — Asymmetric stored values between first-launch and post-reset state.
 
----
+**Bug 124** [tested] — `hotkeyModifiers = 0` (no modifiers) treated as "not set" on reload
+`AppSettings.swift:211–212` — Same sentinel ambiguity as Bug 103 but for modifier flags.
 
-### 65 — `VadScanner::flush()` emits chunks without enforcing `MIN_CHUNK_MS`; short utterances reach the inference engine
+**Bug 125** [tested] — `updateNSView` no-op leaves ShortcutRecorder in recording state after external reset
+`ShortcutRecorder.swift:31` — "Reset to Default" fires while recorder active → `updateNSView` ignored; next keypress overwrites the reset value.
 
-- **File:** `engine/src/audio/vad_scanner.cpp` — `flush()`, lines 32-38
-- **Category:** Logic / inconsistent validation
-- **Severity:** Medium — sub-minimum utterances (< MIN_CHUNK_MS = 3 s) sent as final chunks produce empty or low-quality transcripts
-- **Status:** Fixed — negative test: `testBug65_flushBypasesMinChunkMs`
+**Bug 126** [tested] — `detectFormality` substring match — casual markers fire inside unrelated words
+`ClipboardStyle.swift:55–60` — `"lol"` in `"alcohol"`, `"imo"` in Italian `-imo` words. Scientific text misclassified as casual.
 
-`push_frame()` enforces `MIN_CHUNK_MS` at the silence-boundary path (line 25):
+**Bug 127** [tested] — Pre-buffer audio silently lost on `audioEngine.start()` failure
+`AudioSession.swift:148–163` — Tap fires and fills `preBuffer` before `start()` throws. Rollback clears buffer with no notification; first successful retry sees empty pre-buffer.
 
-```cpp
-if (buffer_ms_ - silence_ms_ >= MIN_CHUNK_MS) {
-    maybe_emit_chunk(false);
-```
+**Bug 128** [tested] — Stale waveform callbacks delivered after `stop()` — waveform animates briefly post-recording
+`AudioSession.swift:309–315` — Queued `DispatchQueue.main.async` blocks cannot be cancelled. Waveform shows one extra buffer after session ends.
 
-`flush()` does not:
+**Bug 129** [tested] — `commitSendCallback` + interim-frame ordering race — out-of-order frame to engine
+`AudioSession.swift:198–205, OpenVerbApp.swift:720–729` — Audio thread can dispatch live frame to `ioQueue` before caller's interim for-loop submits interim frames. Chronologically earlier frame arrives later.
 
-```cpp
-void VadScanner::flush() {
-    if (!buffer_.empty() && in_speech_) {
-        maybe_emit_chunk(true);   // ← no MIN_CHUNK_MS check
-    }
-```
+**Bug 130** [tested] — `testSetAndGetCustomHotkey` never tests UserDefaults round-trip
+`AppSettingsTests.swift:38–43` — Sets and reads from the same in-memory instance. Persistence path completely untested.
 
-Any utterance that ends before the silence boundary fires (e.g., a user presses stop after 0.5 s) is emitted as `is_final=true` regardless of duration, bypassing the filter that prevents noise/breath bursts from reaching the backend.
+**Bug 131** [tested] — Test suite shares one UserDefaults suite name — fragile cross-test isolation
+`AppSettingsTests.swift:6–9` — In-memory cache behavior after `removePersistentDomain` is implementation-defined.
 
-**Fix:** Add the same guard: `if (!buffer_.empty() && in_speech_ && (buffer_ms_ - silence_ms_ >= MIN_CHUNK_MS))`.
+**Bug 132** [tested] — `ContextBuilderTests` asserts `ctx["clipboard"]` nil — key never exists; tests vacuously pass
+`ContextBuilderTests.swift:73–93` — Production writes `"clipboard_style"`, never `"clipboard"`. All three tests always pass regardless of what production code emits.
 
----
+**Bug 133** [tested] — `AccessibilityReaderTests` tests only the mock — zero coverage of real implementation
+`AccessibilityReaderTests.swift:14–41` — All four tests instantiate `MockAccessibilityReader`. Any regression in the real `AccessibilityReader` is invisible.
 
-### 66 — `AudioSession.processTapBuffer()` calls `waveformCallback` on the audio tap thread; updates `@Published` off the main thread
+**Bug 134** [tested] — `PartialAccumulationTests` never exercises `AppState.livePartialText` accumulation
+`PartialAccumulationTests.swift:23–86` — Tests inject a local closure. Production path (`appState.livePartialText += text`) untested.
 
-- **File:** `app/OpenVerb/Input/AudioSession.swift` — `processTapBuffer()`, line 311
-- **Category:** Threading / SwiftUI concurrency
-- **Severity:** Medium — unsynchronised mutation of `@Published var amplitudes` from audio thread races with SwiftUI rendering
-- **Status:** Fixed — negative test: `testBug66_waveformCallbackCalledOnAudioThread`
+**Bug 135** [tested] — `testQueueStatusDoesNotFirePartialCallback` is a tautology — always passes
+`PartialAccumulationTests.swift:135–151` — `if case .partialResult = queueStatusMsg` can never match. `XCTAssertFalse(fired)` proves nothing.
 
-`installTap(onBus:bufferSize:format:)` fires its callback on a real-time audio thread. `processTapBuffer` releases the lock and then calls `waveformCallback` inline:
+**Bug 136** [tested] — `livePartialText` not cleared on `.error` transition — stale transcript visible during error window
+`AppState.swift:280–305` — `.error` entry effects only clear `preparingSubtitle`. Up to 5 seconds of stale partial transcript visible alongside the error message.
 
-```swift
-for chunk in chunksToDisplay {
-    waveformCallback(chunk)   // ← audio thread, not main thread
-}
-```
+**Bug 137** [tested] — `polishedText` and `remainingInferenceMs` lack `private(set)` — invariant bypass
+`AppState.swift:86, 95` — External code can set these without going through state transitions, bypassing cleanup logic in `applyEntryEffects`.
 
-The caller in `OpenVerbApp` passes `{ [weak self] chunk in self?.waveformVM.updateAmplitude(chunk) }`, which mutates `@Published var amplitudes` directly on the audio thread. SwiftUI requires `@Published` mutations to happen on the main thread; violating this causes undefined rendering behaviour and Swift concurrency warnings.
+**Bug 138** [tested] — `testBug1` wrong first assertion — fails at wrong line when Bug 1 and Bug 39 coexist
+`BugsMDTDDTests.swift:44–55` — Asserts `!vm.amplitudes.isEmpty` at line 49 before reset. If `updateAmplitude` is async (Bug 1), test fails here with misleading message, masking the actual reset bug.
 
-**Fix:** Dispatch inside `processTapBuffer` before the callback loop: `DispatchQueue.main.async { waveformCallback(chunk) }`, or document that all `waveformCallback` implementations must dispatch themselves.
+**Bug 139** [tested] — `autoClearTimer` cancellation is timing-sensitive — intermittent test flakiness under load
+`AppState.swift:295–305, BugsMDTDDTests.swift:71–85` — If the 50 ms timer fires before `cancel()` is called in `transition(to: .preparing)`, the test incorrectly sees `.idle` instead of `.preparing`.
+
+**Bug 140** [tested] — `testBug27` search window of 3000 chars is fragile against future function growth
+`OpenBugsNegativeTests.swift:248` — `recvJSONSync` is already ~3600 chars. Next significant edit pushes POLLHUP/POLLIN guards out of the window; test reports infrastructure failure instead of bug regression.
 
 ---
 
-### 67 — `RingBuffer::reset()` stores indices without holding `write_mutex_`; concurrent `write()` sees torn state
+## Deferred
 
-- **File:** `engine/src/audio/ring_buffer.cpp` — `reset()`, lines 14-17
-- **Category:** Data race (undefined behaviour)
-- **Severity:** Medium — `reset()` only called at session boundary but `write()` is on the audio thread with no synchronisation point
-- **Status:** Open — negative test: `testBug67_ringBufferResetMissingWriteMutexLock`
-
-`write()` acquires `write_mutex_` and computes free space as `BUF_SIZE - (write_idx_ - read_idx_)`. `reset()` stores `write_idx_ = 0` then `read_idx_ = 0` without acquiring `write_mutex_`. A concurrent `write()` between the two stores sees `write_idx_ = 0, read_idx_ = stale_value`, causing the unsigned subtraction `0 - stale_value` to wrap to a huge number, making `free` underflow to near-zero and silently dropping all audio for the rest of the session.
-
-```cpp
-void RingBuffer::reset() {
-    write_idx_.store(0, std::memory_order_seq_cst);  // store 1
-    read_idx_.store(0, std::memory_order_seq_cst);   // store 2 — gap!
-    // write() can read write_idx_==0, read_idx_==old → underflow
-}
-```
-
-**Fix:** Acquire `write_mutex_` in `reset()` before touching the indices, or use a single seqlock-style generation counter.
-
----
-
-### 68 — `EngineManager.shutdown()` sets `status = .stopped` before old process exits; rapid restart may launch duplicate engine
-
-- **File:** `app/OpenVerb/Engine/EngineManager.swift` — `shutdown()`, lines ~180-195
-- **Category:** Race condition / process lifecycle
-- **Severity:** Medium — mitigated by crash-recovery backoff and `canRestartBackend` guard in practice
-- **Status:** Open — negative test: `testBug68_shutdownSetsStatusBeforeProcessExits`
-
-`shutdown()` sends SIGTERM, spawns a detached Task to wait for exit (0.5s timeout), then immediately sets `status = .stopped`. If the caller invokes `ensureRunning()` before the old process actually exits (e.g., user presses hotkey during shutdown), `ensureRunning()` sees `.stopped` and launches a new Process — but the old engine is still bound to the Unix socket. The new process fails to `bind()` and immediately crashes.
-
-```swift
-func shutdown() {
-    engineClient.sendShutdown()
-    sendSIGTERM()
-    let procRef = process
-    Task.detached { Self.waitForProcessExit(procRef, timeout: 0.5) }
-    status = .stopped  // ← process may still be alive
-}
-```
-
-**Fix:** Move `status = .stopped` into the detached Task's completion, or add a `Process.isRunning` check before launching a new process in `ensureRunning()`.
-
----
-
-### 69 — Onboarding mic-permission step advances to accessibility regardless of user response
-
-- **File:** `app/OpenVerb/UI/OnboardingView.swift` — mic permission callback, ~line 95
-- **Category:** Logic error / UX
-- **Severity:** Low — user can still grant permission later; only affects first-launch wizard flow
-- **Status:** Open — negative test: `testBug69_onboardingAdvancesEvenWhenMicPermissionDenied`
-
-The microphone permission callback unconditionally advances the onboarding step to `.accessibility` even when the user denied permission:
-
-```swift
-AVCaptureDevice.requestAccess(for: .audio) { granted in
-    Task { @MainActor in
-        micGranted = granted
-        step = .accessibility  // ← advances even if granted == false
-    }
-}
-```
-
-The user is left believing microphone access is configured, but it was denied. Subsequent recordings will fail with `AudioSessionError.permissionDenied`.
-
-**Fix:** Only advance when `granted == true`. Show an error or retry prompt when denied.
-
----
-
-### 70 — `ClipboardStyle.detectFormality` classifies >60% uppercase as "formal"; ALL-CAPS text is typically informal/shouting
-
-- **File:** `app/OpenVerb/Context/ClipboardStyle.swift` — `detectFormality()`, ~line 40
-- **Category:** Logic error / NLP heuristic inversion
-- **Severity:** Low — formality hint is advisory; model can override; only affects prompt style selection
-- **Status:** Open — negative test: `testBug70_detectFormalityInvertsUppercaseHeuristic`
-
-The heuristic counts uppercase vs total alphabetic characters and returns `"formal"` when the ratio exceeds 0.6. However, ALL-CAPS text on macOS is far more likely to be shouting, emphasis, or informal communication (e.g., "OMG WHAT") than formal writing. Formal text typically has correct capitalisation (proper nouns, sentence starts) but not >60% uppercase.
-
-```swift
-if total > 0 && Double(upperCount) / Double(total) > 0.6 {
-    return "formal"  // ← "HEY WHAT'S UP" → "formal"?!
-}
-```
-
-**Fix:** Invert the heuristic — high uppercase ratio should map to `"informal"` or `"casual"`. Formal text is better detected by sentence structure, punctuation, and honorifics.
-
----
-
-### 71 — `Session::run()` timeout in STREAMING_AUDIO returns to IDLE without closing client fd; client may send orphaned binary frames
-
-- **File:** `engine/src/ipc/session.cpp` — timeout catch block, ~line 350
-- **Category:** Protocol state machine leak
-- **Severity:** Low — client normally disconnects after receiving `session.error{code=timeout}`; defense-in-depth
-- **Status:** Open — negative test: `testBug71_streamingTimeoutReturnsToIdleWithoutClosingFd`
-
-When a timeout fires during STREAMING_AUDIO, the session sends a JSON error to the client and transitions back to IDLE without closing the file descriptor. If the client doesn't disconnect (buggy client, proxy, etc.), it may continue sending binary audio frames into a session that's in IDLE state. The IDLE handler doesn't expect binary frames and will either silently discard them or misinterpret them as JSON, producing parse errors.
-
-```cpp
-} catch (const std::runtime_error& e) {
-    if (std::string(e.what()) == "timeout") {
-        send_error(fd, ErrorCode::timeout, ...);
-    }
-    // cleanup...
-    state = State::IDLE;  // ← fd still open, client may still send
-}
-```
-
-**Fix:** Transition to SHUTDOWN instead of IDLE on timeout, or close the fd after sending the error.
-
----
-
-### 72 — `AccessibilityReader.readCursorSurroundingText` crashes with NSRangeException when AX reports a range extending beyond text
-
-- **File:** `app/OpenVerb/Context/AccessibilityReader.swift` — `readCursorSurroundingText()`, line 147
-- **Category:** Crash / bounds check missing
-- **Severity:** Medium — crash in the context builder path; triggered by apps that report stale or incorrect `AXSelectedTextRange` values
-- **Status:** Open — negative test: `testBug72_accessibilityReaderUnclampedAfterIndex`
-
-The `cursorPos` (derived from `cfRange.location`) is correctly clamped to `[0, totalLen]` at line 144. However, the `afterNS` index is computed without clamping:
-
-```swift
-let cursorPos = min(max(cfRange.location, 0), totalLen)     // ← clamped
-let beforeNS = nsString.substring(to: cursorPos)             // ← safe
-let afterNS  = nsString.substring(from: cursorPos + max(cfRange.length, 0))  // ← NOT clamped
-```
-
-If an app's AX implementation reports a `cfRange.location + cfRange.length` that exceeds `totalLen` (e.g., a text field that was edited after the range was queried), `NSString.substring(from:)` raises an `NSRangeException` and crashes the process.
-
-**Fix:** Clamp the after-index: `let afterStart = min(cursorPos + max(cfRange.length, 0), totalLen)`.
-
----
-
-### 73 — `RecordingWindow` crossfade `asyncAfter` overrides correct state on rapid restart
-
-- **File:** `app/OpenVerb/UI/RecordingWindow.swift` — `onChange(of: appState.state)`, lines 266-270
-- **Category:** UI state race
-- **Severity:** Low — requires inferring → error/cancel → new recording within 200ms; visible as a brief flash where the recording indicator disappears
-- **Status:** Open — negative test: `testBug73_crossfadeAsyncAfterMissingStateGuard`
-
-The recording→inferring crossfade schedules `showRecording = false` via `DispatchQueue.main.asyncAfter(deadline: .now() + 0.20)`. If the app state changes again during this 200ms window (e.g., engine error → idle → hotkey → preparing → recording), the deferred block fires and sets `showRecording = false` even though the new recording state requires `showRecording = true`:
-
-```swift
-if previousState == .recording, newState == .inferring {
-    withAnimation(.easeIn(duration: 0.15)) {
-        showInferring = true
-    }
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
-        withAnimation(.easeOut(duration: 0.05)) {
-            showRecording = false  // ← fires even if state has since changed back to .recording
-        }
-    }
-}
-```
-
-The `asyncAfter` closure does not verify that the state is still `.inferring` before mutating `showRecording`.
-
-**Fix:** Guard the deferred block: `guard appState.state == .inferring else { return }`, or cancel the pending block on each state transition.
+_(none)_
