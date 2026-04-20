@@ -86,6 +86,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// instead of tearing down the (new) session. MainActor-isolated — no lock.
     private var drainGeneration: UInt64 = 0
 
+    /// Bug 81: re-entrancy guard for stopRecording(). Set to true before
+    /// launching the drainResult Task; reset to false when the drain completes
+    /// or on the next recording session start. Prevents two concurrent callers
+    /// (Stop button + maxDurationTimer) from each spawning a drainResult Task.
+    private var isDraining: Bool = false
+
     /// Bug 22: auto-stop timer scheduled when entering .recording. Cancelled
     /// on every transition out of .recording (stopRecording / handleCancel /
     /// abortAndRestart / engine error) so a stale timer cannot fire into a
@@ -354,7 +360,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // -----------------------------------------------------------------------
 
     func applicationWillTerminate(_ notification: Notification) {
-        engineManager.shutdown()
+        // shutdown() is async; fire-and-forget is acceptable at app termination
+        // because the process is about to exit regardless.
+        Task { await engineManager.shutdown() }
         engineManager.disconnect()
     }
 
@@ -490,6 +498,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // -----------------------------------------------------------------------
 
     private func stopRecording() {
+        // Bug 81: re-entrancy guard — two concurrent callers (Stop button +
+        // maxDurationTimer) must not each spawn a drainResult Task, as both
+        // would call receiveMessage() on the same socket fd.
+        guard !isDraining else { return }
+        isDraining = true
+
         // Bug 22: leaving .recording — cancel the auto-stop timer so it does
         // not fire during INFERRING or carry into the next session.
         maxDurationTimer?.cancel()
@@ -774,15 +788,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 } else {
                     appState.transition(to: .error("Connection failed"))
                 }
-            }
-            // Invoke crash recovery so the engine is ready for the next session.
-            // handleCrash() manages exponential backoff and crash-loop detection.
-            Task { [weak self] in
-                guard let self else { return }
-                do {
-                    try await engineManager.handleCrash()
-                } catch {
-                    logger.error("Crash recovery failed after connect error: \(error)")
+                // Bug 61: only invoke crash recovery for genuine engine errors,
+                // not user-initiated cancellations (Escape → handleCancel() →
+                // .idle before this catch fires). Calling handleCrash() on a
+                // healthy engine after every Escape press exhausts the crash
+                // budget (maxCrashes = 3 / 60 s) and locks the app into a
+                // permanent error state despite no actual crash.
+                Task { [weak self] in
+                    guard let self else { return }
+                    do {
+                        try await engineManager.handleCrash()
+                    } catch {
+                        logger.error("Crash recovery failed after connect error: \(error)")
+                    }
                 }
             }
         }
@@ -802,12 +820,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 msg = try await engineManager.engineClient.receiveMessage(timeoutMs: 180_000)
             } catch {
                 logger.error("drainResult: receive error: \(error)")
-                // Bug 16: a stale drain from a previous session (whose abortAndRestart()
-                // or stopRecording() has already bumped drainGeneration) must return
-                // without touching UI — the new session is owned by a newer generation.
+                // Bug 16: stale drain from a previous session — return without touching UI.
                 guard generation == drainGeneration else { return }
-                // Only tear down if this session is still active — abort+restart
-                // moves to .preparing before this catch fires, so we must not clobber it.
+                // Only tear down if still .inferring — abort+restart moves to .preparing.
                 if appState.state == .inferring {
                     etaTickTimer?.invalidate()
                     etaTickTimer = nil
@@ -853,6 +868,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 engineManager.engineClient.onPolishedResult?(text)
 
             case .result(let text, let command):
+                // Bug 78: stale-drain guard — abortAndRestart() bumps drainGeneration.
+                guard generation == drainGeneration else { return }
                 // Disconnect so the engine detects EOF and returns to IDLE,
                 // freeing the socket slot before any async injection work begins.
                 engineManager.disconnect()
@@ -889,6 +906,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 logger.warning("Engine warning \(code): \(message)")
 
             case .error(let code, let message):
+                // Bug 79: stale-drain guard — same drainGeneration check as .result.
+                guard generation == drainGeneration else { return }
                 Task { [weak self] in try? await self?.engineManager.handleCrash() }
                 // Error ends the session.
                 recordingWindow.hide()

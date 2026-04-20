@@ -315,7 +315,7 @@ final class EngineManager: ObservableObject {
     //   Caller must invoke disconnect() separately after this returns.
     // -----------------------------------------------------------------------
 
-    func shutdown() {
+    func shutdown() async {
         engineClient.sendShutdown()
         // Do NOT block the MainActor waiting for an ack — the engine is always
         // terminated via SIGTERM below regardless.  The shutdown JSON is a
@@ -327,12 +327,14 @@ final class EngineManager: ObservableObject {
         // keeps running.  Without SIGTERM the engine survives app quit / sleep and
         // breaks the lifecycle contract (wake restart, socket reuse, etc.).
         sendSIGTERM()
-        // Bug 8 fix: don't block the MainActor spinning RunLoop for up to 500ms.
-        // SIGTERM already went out; the actual reap can happen off the main thread.
+        // Bug 74/80 fix: await process exit directly so restartWithBackend() can
+        // await shutdown() and be certain the old process is gone before calling
+        // ensureRunning(). This prevents tryPing() from succeeding against the
+        // still-alive old engine and silently skipping the backend switch.
         let procRef = process
-        Task.detached {
+        await Task.detached {
             Self.waitForProcessExit(procRef, timeout: 0.5)
-        }
+        }.value
         status = .stopped
     }
 
@@ -420,7 +422,7 @@ final class EngineManager: ObservableObject {
         AppSettings.shared.backend = backend
         backendOverride = backend.rawValue
         status = .starting
-        shutdown()
+        await shutdown()
         try? await ensureRunning()
     }
 

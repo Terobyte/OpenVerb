@@ -299,22 +299,32 @@ final class EngineClient {
         // (ioQueue drainResult + detached Phase 2 monitor) cannot split a
         // single message's bytes between them.
         socketReadLock.lock()
-        defer { socketReadLock.unlock() }
 
         // Re-check buffer: another caller may have drained a whole message into
         // recvBuffer while we were blocked on socketReadLock. Handing it back
         // without entering poll() preserves FIFO delivery.
         recvLock.lock()
         if let msg = recvBuffer.extractMessage() {
-            recvLock.unlock(); return msg
+            recvLock.unlock()
+            socketReadLock.unlock()
+            return msg
         }
         recvLock.unlock()
 
         // fd may have been closed by disconnect() while we waited.
-        guard fd >= 0 else { throw EngineClientError.notConnected }
+        guard fd >= 0 else {
+            socketReadLock.unlock()
+            throw EngineClientError.notConnected
+        }
 
         let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000.0)
         var chunk = [UInt8](repeating: 0, count: 4096)
+
+        // Bug 76: release socketReadLock before entering the blocking poll loop.
+        // Holding it across the full timeoutMs (up to 180 s for drainResult) would
+        // prevent the Phase 2 monitor from acquiring it within its 100 ms window,
+        // effectively disabling crash detection for the entire inference window.
+        socketReadLock.unlock()
 
         while true {
             let remaining = deadline.timeIntervalSinceNow
@@ -508,9 +518,15 @@ final class EngineClient {
         guard Darwin.pipe(&pipefds) == 0 else { return }
         let rfd = pipefds[0]
         let wfd = pipefds[1]
-        wakeRead  = rfd
-        wakeWrite = wfd
         _ = fcntl(rfd, F_SETFL, O_NONBLOCK)
+
+        // Bug 77: serialise wakeRead/wakeWrite assignments on ioQueue so all
+        // accesses (writes here, reads in disconnect/stopPhase2Monitor) run on
+        // the same queue and cannot race across threads.
+        ioQueue.sync {
+            wakeRead  = rfd
+            wakeWrite = wfd
+        }
 
         // #22: capture the pipe fds as local constants so the task's defer
         // closes the fds it opened — not self.wakeRead/wakeWrite, which a
@@ -545,15 +561,19 @@ final class EngineClient {
                 continue
             }
             if pfds[1].revents & Int16(POLLIN) != 0 { break }  // wakeup signal
-            // POLLHUP / POLLERR means the engine died mid-recording.
-            if pfds[0].revents & Int16(POLLHUP | POLLERR) != 0 {
-                logger.error("Phase 2 monitor: engine connection dropped (POLLHUP/POLLERR)")
-                let errMsg = ServerMessage.error(code: "connection_closed",
-                                                 message: "Engine connection dropped mid-recording")
-                callOnErrorIfLive(errMsg)
-                return
-            }
+            // Bug 75: check POLLIN before POLLHUP so a message written just before
+            // socket close is never discarded. When the engine writes its final
+            // message and closes the socket simultaneously, poll() sets both POLLIN
+            // and POLLHUP. We must drain POLLIN first, then treat HUP as fatal.
             guard pfds[0].revents & Int16(POLLIN) != 0 else {
+                // No data — check if the connection dropped with no pending data.
+                if pfds[0].revents & Int16(POLLHUP | POLLERR) != 0 {
+                    logger.error("Phase 2 monitor: engine connection dropped (POLLHUP/POLLERR)")
+                    let errMsg = ServerMessage.error(code: "connection_closed",
+                                                     message: "Engine connection dropped mid-recording")
+                    callOnErrorIfLive(errMsg)
+                    return
+                }
                 phase2Lock.lock()
                 stopped = phase2MonitorStopped
                 phase2Lock.unlock()
