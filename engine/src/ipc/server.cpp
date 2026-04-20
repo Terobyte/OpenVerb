@@ -243,16 +243,22 @@ void IpcServer::start(const std::string& socket_path) {
         session_active_.store(true, std::memory_order_release);
         LOG_INFO("ipc: session started");
 
-        session_thread_ = std::thread([this, client_fd, now_sec]() {
+        session_thread_ = std::thread([
+            &eng = engine_,
+            &pca = pressure_critical_active_,
+            &sa  = session_active_,
+            &lis = last_inference_sec_,
+            client_fd, now_sec
+        ]() {
             try {
-                openverb::Session::handle_connection(client_fd, engine_);
-            } catch (const std::exception& e) {
-                LOG_WARN("ipc: session error: %s", e.what());
+                openverb::Session::handle_connection(client_fd, eng);
+            } catch (const std::exception& ex) {
+                LOG_WARN("ipc: session error: %s", ex.what());
             }
             ::close(client_fd);
-            pressure_critical_active_.store(false, std::memory_order_relaxed);
-            session_active_.store(false, std::memory_order_relaxed);
-            last_inference_sec_.store(now_sec(), std::memory_order_relaxed);
+            pca.store(false, std::memory_order_relaxed);
+            sa.store(false, std::memory_order_relaxed);
+            lis.store(now_sec(), std::memory_order_relaxed);
             LOG_INFO("ipc: session ended");
         });
     }

@@ -7,7 +7,7 @@
 - **File:** `engine/src/engine.cpp:142-148`
 - **Category:** Race condition (latent)
 - **Severity:** Medium — currently mitigated by caller discipline (`unload_model()` only called when `session_active_` is false)
-- **Status:** Open — negative test: `testBugC8_unloadModelDoesNotNullBackend`
+- **Status:** Fixed — negative test: `testBugC8_unloadModelDoesNotNullBackend`
 
 `unload_model()` calls `backend_->unload_model()` (which resets the internal `llama_` context) and sets `loaded_ = false`, but leaves `backend_` pointing to the now-hollow Backend object. Any `process_stream()` or `process_file()` call that already grabbed a `shared_ptr<Backend>` copy under `engine_mutex_` and released the lock will call into a Backend whose `llama_` is null:
 
@@ -34,7 +34,7 @@ Currently safe because all `unload_model()` call sites (GCD CRITICAL handler, id
 - **File:** `engine/src/audio/ring_buffer.cpp:6-25`
 - **Category:** Silent data loss
 - **Severity:** Low — only affects `--mic` mode; IPC streaming path doesn't use RingBuffer
-- **Status:** Open — negative test: `testBugC9_ringBufferWriteSilentlyDropsData`
+- **Status:** Fixed — negative test: `testBugC9_ringBufferWriteSilentlyDropsData`
 
 When the producer (audio capture) writes faster than the consumer can drain, `write()` silently returns 0 and discards data. No backpressure signal, no error flag — the transcriber silently receives incomplete audio. The caller in `main.cpp:178-180` logs a warning but proceeds with partial data.
 
@@ -45,7 +45,7 @@ When the producer (audio capture) writes faster than the consumer can drain, `wr
 - **File:** `engine/src/ipc/session.cpp:49,102`
 - **Category:** Delayed visibility
 - **Severity:** Low — worker processes 1-2 extra tokens before noticing; harmless in practice
-- **Status:** Open — negative test: `testBugH1_stopRequestedStoreUsesRelaxedOrdering`
+- **Status:** Fixed — negative test: `testBugH1_stopRequestedStoreUsesRelaxedOrdering`
 
 `stop_requested_` is a `std::atomic<bool>` accessed with `memory_order_relaxed`. The worker thread reads it in the inference loop; the main thread writes it in `stop()` and error handlers. Relaxed ordering doesn't guarantee the worker sees the store promptly — on weakly-ordered architectures (ARM, which Apple Silicon is), the worker may continue for extra iterations before the store becomes visible.
 
@@ -58,7 +58,7 @@ When the producer (audio capture) writes faster than the consumer can drain, `wr
 - **File:** `engine/src/ipc/session.cpp` — `worker_thread_` lambda
 - **Category:** Use-after-free (latent)
 - **Severity:** Medium — `~Session()` calls `stop() → join()` which normally prevents the dangle, but exceptions in adjacent paths can break the ordering
-- **Status:** Open — negative test: `testBugC1_workerThreadCapturesEngineByReference`
+- **Status:** Fixed — negative test: `testBugC1_workerThreadCapturesEngineByReference`
 
 `worker_thread_` lambda uses `[this, fd, &engine]`. Capturing `engine` (an `Engine&` parameter) by lvalue reference means the worker thread holds a raw alias into the `IpcServer`'s `engine_` member. If the `IpcServer` is destroyed before the worker thread exits, the reference dangles.
 
@@ -71,7 +71,7 @@ When the producer (audio capture) writes faster than the consumer can drain, `wr
 - **File:** `engine/src/ipc/server.cpp` — `session_thread_` lambda
 - **Category:** Use-after-free (latent)
 - **Severity:** High — if `stop()` is never called (e.g., `start()` throws after thread launch), destructor skips join and the thread outlives the `IpcServer` object
-- **Status:** Open — negative test: `testBugC2_sessionThreadCapturesIpcServerThisDirectly`
+- **Status:** Fixed — negative test: `testBugC2_sessionThreadCapturesIpcServerThisDirectly`
 
 `session_thread_` lambda uses `[this, client_fd, now_sec]`. All accesses to `engine_`, `session_active_`, `pressure_critical_active_`, and `LOG_*` inside the lambda go through the captured raw `this`. `IpcServer::stop()` joins `session_thread_` before the destructor completes, which normally prevents dangling use — but exceptional paths break this guarantee.
 
@@ -84,7 +84,7 @@ When the producer (audio capture) writes faster than the consumer can drain, `wr
 - **File:** `engine/src/audio/vad_scanner.cpp`
 - **Category:** Data race (undefined behaviour)
 - **Severity:** High — `push_frame()` called from CoreAudio real-time thread; `flush()`/`reset()` from session main thread; concurrent access to `buffer_ms_`, `silence_ms_`, `in_speech_`, `buffer_`
-- **Status:** Open — negative test: `testBugH6_vadScannerHasNoSynchronization`
+- **Status:** Fixed — negative test: `testBugH6_vadScannerHasNoSynchronization`
 
 `vad_scanner.cpp` has no mutex or atomic protection. `push_frame()` is called from the CoreAudio real-time thread; `flush()` and `reset()` are called from the session main thread. `buffer_.insert()` is not thread-safe — concurrent access can produce incorrect VAD boundaries or memory corruption. Detected by TSan.
 
@@ -97,7 +97,7 @@ When the producer (audio capture) writes faster than the consumer can drain, `wr
 - **File:** `engine/src/audio/chunk_queue.cpp`
 - **Category:** Lost wakeup / hang
 - **Severity:** High — manifests on rapid abort-and-restart (Escape during active inference)
-- **Status:** Open — negative test: `testBugH7_chunkQueueResetMissingNotify`
+- **Status:** Fixed — negative test: `testBugH7_chunkQueueResetMissingNotify`
 
 `shutdown()` sets `shut_=true` and calls `notify_all()`. A thread waking in `pop()` re-checks `!queue_.empty() || shut_`. If `reset()` runs between the notify and the re-check, setting `shut_=false`, the thread sees both conditions false and re-waits with no pending notification — hangs indefinitely. No subsequent push arrives in the abort-and-restart scenario, so the worker thread never processes the sentinel chunk.
 
@@ -123,7 +123,7 @@ When the producer (audio capture) writes faster than the consumer can drain, `wr
 - **File:** `engine/src/ipc/session.cpp:267`
 - **Category:** Protocol fragility
 - **Severity:** Medium — only triggered by misbehaving/proxying clients; current Swift client is safe
-- **Status:** Open — negative test: `testBugNEW1_accumulatedNotClearedBeforeBinaryMode`
+- **Status:** Fixed — negative test: `testBugNEW1_accumulatedNotClearedBeforeBinaryMode`
 
 When the session transitions from WAITING_READY (JSON mode) to STREAMING_AUDIO (binary mode), `RecvBuffer::accumulated` is not cleared. If the client pipelined data (sent binary frames before receiving `session.ready`), leftover bytes from JSON parsing would be interpreted as a binary frame header by `recv_binary_frame()`, causing bogus frame lengths or `frame too large` errors.
 
@@ -146,7 +146,7 @@ first_frame_seen = false;
 - **File:** `app/OpenVerb/Output/TextInjector.swift` — `injectPerCharacter()`, lines 189-194
 - **Category:** CGEvent protocol violation
 - **Severity:** High — uppercase characters leave the Shift modifier logically pressed in the system event stream
-- **Status:** Open — negative test: `testBug62_perCharacterInjectionMissingFlagsOnKeyUp`
+- **Status:** Fixed — negative test: `testBug62_perCharacterInjectionMissingFlagsOnKeyUp`
 
 `injectPerCharacter` calls `keyCodeAndFlags(for:)` to retrieve a `(CGKeyCode, CGEventFlags)` pair and correctly sets `down.flags = flags` on the key-down event. However, the key-up event is posted **without** applying the same flags:
 
@@ -171,7 +171,7 @@ Per the CGEvent contract, a key-up must carry the same modifier flags as its pai
 - **File:** `app/OpenVerb/Model/ModelDownloader.swift` — `download()`, lines 81-105
 - **Category:** State machine violation / silent data loss
 - **Severity:** Medium — progress and resume data from the first download are silently discarded
-- **Status:** Open — negative test: `testBug63_downloadHasNoReentranceGuard`
+- **Status:** Fixed — negative test: `testBug63_downloadHasNoReentranceGuard`
 
 `download()` begins by calling `session?.invalidateAndCancel()` (line 90) unconditionally — before checking whether a download is already in progress. A concurrent or rapid second call therefore cancels the first URLSession (and its in-flight download task) and starts fresh, with no error or notification to the caller. `isDownloading` is set to `true` for both calls, making the race invisible to observers.
 
@@ -184,7 +184,7 @@ Per the CGEvent contract, a key-up must carry the same modifier flags as its pai
 - **File:** `app/OpenVerb/Model/ModelDownloader.swift` — `urlSession(_:downloadTask:didFinishDownloadingTo:)`, lines 212-215
 - **Category:** Non-atomic file operation / data loss
 - **Severity:** Medium — process kill or I/O error between removeItem and moveItem leaves the user with no model and must re-download
-- **Status:** Open — negative test: `testBug64_nonAtomicRemoveBeforeMove`
+- **Status:** Fixed — negative test: `testBug64_nonAtomicRemoveBeforeMove`
 
 The finish-download delegate first removes any existing destination file and then moves the URLSession temp file:
 
@@ -206,7 +206,7 @@ If the process is killed, crashes, or encounters a permissions error between ste
 - **File:** `engine/src/audio/vad_scanner.cpp` — `flush()`, lines 32-38
 - **Category:** Logic / inconsistent validation
 - **Severity:** Medium — sub-minimum utterances (< MIN_CHUNK_MS = 3 s) sent as final chunks produce empty or low-quality transcripts
-- **Status:** Open — negative test: `testBug65_flushBypasesMinChunkMs`
+- **Status:** Fixed — negative test: `testBug65_flushBypasesMinChunkMs`
 
 `push_frame()` enforces `MIN_CHUNK_MS` at the silence-boundary path (line 25):
 
@@ -235,7 +235,7 @@ Any utterance that ends before the silence boundary fires (e.g., a user presses 
 - **File:** `app/OpenVerb/Input/AudioSession.swift` — `processTapBuffer()`, line 311
 - **Category:** Threading / SwiftUI concurrency
 - **Severity:** Medium — unsynchronised mutation of `@Published var amplitudes` from audio thread races with SwiftUI rendering
-- **Status:** Open — negative test: `testBug66_waveformCallbackCalledOnAudioThread`
+- **Status:** Fixed — negative test: `testBug66_waveformCallbackCalledOnAudioThread`
 
 `installTap(onBus:bufferSize:format:)` fires its callback on a real-time audio thread. `processTapBuffer` releases the lock and then calls `waveformCallback` inline:
 

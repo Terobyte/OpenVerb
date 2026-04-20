@@ -191,6 +191,7 @@ struct TextInjector {
                 down.post(tap: .cghidEventTap)
             }
             if let up = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false) {
+                if flags != CGEventFlags(rawValue: 0) { up.flags = flags }
                 up.post(tap: .cghidEventTap)
             }
             try? await Task.sleep(for: .milliseconds(5))

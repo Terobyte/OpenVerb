@@ -308,7 +308,9 @@ final class AudioSession {
         // Fire waveform callback for each guaranteed 4096-byte chunk,
         // outside the lock so it cannot block audio-thread progress.
         for chunk in chunksToDisplay {
-            waveformCallback(chunk)
+            DispatchQueue.main.async {
+                waveformCallback(chunk)
+            }
         }
 
         // Dispatch send-callback chunks outside the lock, but re-verify

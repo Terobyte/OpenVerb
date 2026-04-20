@@ -6,6 +6,7 @@ VadScanner::VadScanner(Callback cb, int vad_mode)
     : cb_(std::move(cb)), vad_(vad_mode, SAMPLE_RATE) {}
 
 void VadScanner::push_frame(const int16_t* samples, int num_samples) {
+    std::lock_guard<std::mutex> lk(mu_);
     bool speech = vad_.is_speech(samples, num_samples);
     int frame_ms = num_samples * 1000 / SAMPLE_RATE;
 
@@ -30,7 +31,8 @@ void VadScanner::push_frame(const int16_t* samples, int num_samples) {
 }
 
 void VadScanner::flush() {
-    if (!buffer_.empty() && in_speech_) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!buffer_.empty() && in_speech_ && (buffer_ms_ - silence_ms_ >= MIN_CHUNK_MS)) {
         maybe_emit_chunk(true);
     }
     in_speech_ = false;
@@ -38,6 +40,7 @@ void VadScanner::flush() {
 }
 
 void VadScanner::reset() {
+    std::lock_guard<std::mutex> lk(mu_);
     buffer_.clear();
     buffer_ms_ = 0;
     silence_ms_ = 0;

@@ -79,6 +79,7 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
     // -----------------------------------------------------------------------
 
     func download() async throws {
+        guard !isDownloading else { return }
         try FileManager.default.createDirectory(
             at: destinationURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -199,7 +200,6 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
             // Verify before moving — URLSession deletes the temp file after
             // this delegate returns, so verification cannot happen later.
             guard verifySHA256(at: location) else {
-                try? FileManager.default.removeItem(at: location)
                 Task { @MainActor in
                     self.error = "Model integrity check failed — download may be corrupted. Please retry."
                     self.isDownloading = false
@@ -209,10 +209,7 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
                 return
             }
 
-            if FileManager.default.fileExists(atPath: destinationURL.path) {
-                try FileManager.default.removeItem(at: destinationURL)
-            }
-            try FileManager.default.moveItem(at: location, to: destinationURL)
+            _ = try FileManager.default.replaceItemAt(destinationURL, withItemAt: location)
 
             Task { @MainActor in
                 self.resumeData = nil
