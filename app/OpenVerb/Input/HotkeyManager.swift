@@ -162,6 +162,11 @@ final class HotkeyManager {
             if let src = runLoopSource {
                 CFRunLoopRemoveSource(CFRunLoopGetMain(), src, .commonModes)
             }
+            // Bug 83: invalidate the Mach port so the kernel reclaims it.
+            // Without this, each configure() call leaks one Mach port; the
+            // per-process limit (~2048) is exhausted after ~2048 reconfigurations,
+            // causing CGEvent.tapCreate to return nil and the hotkey to die silently.
+            CFMachPortInvalidate(tap)
         }
         eventTap = nil
         runLoopSource = nil

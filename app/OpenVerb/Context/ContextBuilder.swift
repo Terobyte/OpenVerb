@@ -37,9 +37,6 @@ extension NSPasteboard: PasteboardReadable {}
 
 struct ContextBuilder {
 
-    // Maximum UTF-8 byte length for the clipboard context field.
-    static let clipboardByteLimit = 10_240
-
     /// Builds the context dictionary for the current session.
     ///
     /// - Parameters:
@@ -49,9 +46,15 @@ struct ContextBuilder {
     ///                       selected text). Defaults to nil (no accessibility).
     ///   - pasteboard: Pasteboard to read clipboard from. Defaults to
     ///                 `NSPasteboard.general`.
-    ///   - includeClipboard: Whether to include clipboard content. Default true.
+    ///   - clipboardSnapshot: Pre-captured clipboard string (Bug 54). When nil,
+    ///                        the live pasteboard is read instead.
+    ///   - includeClipboard: Whether to include clipboard style. Default true.
     ///   - languageOverride: If non-nil, overrides locale language detection.
     /// - Returns: `[String: String]` suitable for `SessionStart.context`.
+    ///
+    /// Clipboard content is **never** sent as raw text. Instead, a structural
+    /// descriptor (`clipboard_style`) is emitted via ``ClipboardStyle/describe(_:)``.
+    @MainActor
     static func build(
         targetApp: AppIdentifiable?,
         accessibilityApp: NSRunningApplication? = nil,
@@ -88,13 +91,15 @@ struct ContextBuilder {
             context["window"] = ""
         }
 
-        // "clipboard" — use pre-captured snapshot when available (Bug 54 fix: avoids
-        // reading TextInjector's paste as clipboard context on rapid re-press), or
-        // fall back to live pasteboard read for backwards-compatible callers.
+        // "clipboard_style" — structural descriptor of clipboard content.
+        // Raw clipboard text is never included; ClipboardStyle.describe() returns
+        // a deterministic summary (length, coding/markdown/url flags, formality, case).
+        // Uses pre-captured snapshot when available (Bug 54: avoids reading
+        // TextInjector's paste as clipboard context on rapid re-press).
         if includeClipboard {
             let clip = clipboardSnapshot ?? pasteboard.string(forType: .string)
             if let c = clip, !c.isEmpty {
-                context["clipboard"] = truncateToUTF8Bytes(c, limit: clipboardByteLimit)
+                context["clipboard_style"] = ClipboardStyle.describe(c)
             }
         }
 
@@ -103,7 +108,7 @@ struct ContextBuilder {
         // When accessibilityApp is nil, skip: reading OpenVerb's own selection is useless.
         if let app = accessibilityApp,
            let sel = accessibilityReader.readSelectedText(for: app), !sel.isEmpty {
-            context["selected"] = truncateToUTF8Bytes(sel, limit: clipboardByteLimit)
+            context["selected"] = truncateToUTF8Bytes(sel, limit: ClipboardStyle.byteLimit)
         }
 
         // "surrounding_before" / "surrounding_after" — text flanking the cursor
@@ -113,10 +118,10 @@ struct ContextBuilder {
         if let app = accessibilityApp {
             let (before, after) = accessibilityReader.readCursorSurroundingText(for: app)
             if !before.isEmpty {
-                context["surrounding_before"] = truncateToUTF8Bytes(before, limit: clipboardByteLimit)
+                context["surrounding_before"] = truncateToUTF8Bytes(before, limit: ClipboardStyle.byteLimit)
             }
             if !after.isEmpty {
-                context["surrounding_after"] = truncateToUTF8Bytes(after, limit: clipboardByteLimit)
+                context["surrounding_after"] = truncateToUTF8Bytes(after, limit: ClipboardStyle.byteLimit)
             }
         }
 

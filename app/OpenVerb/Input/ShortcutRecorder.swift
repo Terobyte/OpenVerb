@@ -94,6 +94,11 @@ final class ShortcutCaptureView: NSView {
                 return nil
             }
             let mods = event.modifierFlags
+            // Bug 84: pass through system shortcuts (Cmd+Q, Cmd+W, Cmd+H, etc.)
+            // so the app remains killable via keyboard while recording is active.
+            if mods.contains(.command) {
+                return event
+            }
             let hasMod = mods.contains(.option) || mods.contains(.control)
                 || mods.contains(.shift) || mods.contains(.command)
             if hasMod {

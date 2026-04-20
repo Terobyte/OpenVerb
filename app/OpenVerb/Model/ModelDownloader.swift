@@ -75,6 +75,18 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
     }
 
     // -----------------------------------------------------------------------
+    // deinit — break URLSession retain cycle
+    // -----------------------------------------------------------------------
+
+    deinit {
+        // Bug 85: URLSession holds its delegate (self) strongly until
+        // invalidateAndCancel() is called. Without this, closing the onboarding
+        // window mid-download keeps the downloader alive forever and delegate
+        // callbacks continue to fire on a zombie UI context.
+        session?.invalidateAndCancel()
+    }
+
+    // -----------------------------------------------------------------------
     // download — start or resume download
     // -----------------------------------------------------------------------
 
