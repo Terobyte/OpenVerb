@@ -121,7 +121,7 @@ final class AppState: ObservableObject {
     // Private
     // -----------------------------------------------------------------------
 
-    private var autoClearTimer: Task<Void, Never>?
+    var autoClearTimer: Task<Void, Never>?
 
     /// Fires after `preparingSubtitleDelay` to surface "Preparing…" in the UI.
     /// Cancelled immediately when PREPARING transitions to any other state.
@@ -204,6 +204,9 @@ final class AppState: ObservableObject {
             // Clear live transcript from previous session (abort+restart skips IDLE).
             livePartialText = ""
             polishedText = nil
+            // Bug 100: clear stale countdown from a failed inference session so
+            // the UI does not show a leftover timer during the new preparing phase.
+            remainingInferenceMs = nil
 
             switch previous {
             case .idle:
@@ -286,6 +289,9 @@ final class AppState: ObservableObject {
             preparingSubtitleTimer?.cancel()
             preparingSubtitleTimer = nil
             preparingSubtitle = nil
+            // Bug 136: clear stale partial transcript so it is not shown alongside
+            // the error message for the full 5-second error display window.
+            livePartialText = ""
 
             // Start the auto-clear timer (default 5 s; injectable for tests).
             // The task is isolated to @MainActor (created from @MainActor context),
@@ -299,7 +305,9 @@ final class AppState: ObservableObject {
                     // Task was cancelled — another transition happened; stop here.
                     return
                 }
-                guard !Task.isCancelled else { return }
+                // Bug 122: guard !Task.isCancelled after catch { return } was dead
+                // code — Task.sleep throws CancellationError, so the catch already
+                // returns on cancellation. Removed to eliminate misleading dead code.
                 self?.transition(to: .idle)
             }
             autoClearTimer = task

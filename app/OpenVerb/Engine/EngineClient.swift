@@ -127,6 +127,13 @@ final class EngineClient {
     }
 
     private func connectSync(path: String) throws {
+        // Bug 119 fix: clear the receive buffer unconditionally so stale bytes
+        // from any prior session are never returned as the first message of a
+        // new session, even when fd != -1 (already-connected early return).
+        recvLock.lock()
+        recvBuffer = RecvAccumulator()
+        recvLock.unlock()
+
         guard fd == -1 else { return }  // already connected
 
         let sock = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -197,7 +204,10 @@ final class EngineClient {
         }
     }
 
-    var isConnected: Bool { ioQueue.sync { fd >= 0 } }
+    // Bug 120 fix: read fd via fdLock instead of ioQueue.sync. Calling ioQueue.sync
+    // from the MainActor deadlocks if any ioQueue block dispatches back to MainActor.
+    // fdLock is a plain NSLock — no actor hop needed.
+    var isConnected: Bool { fd >= 0 }
 
     // -----------------------------------------------------------------------
     // Low-level write helpers (called from ioQueue)
@@ -347,7 +357,8 @@ final class EngineClient {
                 continue
             }
 
-            let n = read(fd, &chunk, chunk.count)
+            let currentFd = fd  // Bug 95: snapshot fd once under implicit lock before read()
+            let n = read(currentFd, &chunk, chunk.count)
             if n == 0 { throw EngineClientError.connectionClosed }
             if n < 0 {
                 let e = errno
@@ -633,8 +644,17 @@ final class EngineClient {
                 // Continue streaming — warning does not end the session.
 
             default:
-                if case .partialResult(let t, let id, let f) = msg {
-                    onPartialResult?(t, id, f)  // Bug 55: live forwarding
+                if case .partialResult(let text, let chunkId, let isFinal) = msg {
+                    // Bug 98 fix: only forward partials from the phase 2 monitor
+                    // when the monitor is still active (not stopped). drainResult
+                    // delivers any partials buffered after the monitor stops,
+                    // preventing double-delivery of the same message.
+                    phase2Lock.lock()
+                    let alreadyStopped = phase2MonitorStopped
+                    phase2Lock.unlock()
+                    if !alreadyStopped {
+                        onPartialResult?(text, chunkId, isFinal)  // Bug 55 / Bug 98
+                    }
                 } else {
                     recvLock.lock()
                     var r = data; r.append(UInt8(ascii: "\n"))

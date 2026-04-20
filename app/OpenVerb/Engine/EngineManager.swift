@@ -244,7 +244,11 @@ final class EngineManager: ObservableObject {
         // engine is alive but unresponsive (ping failed), replacing self.process
         // without SIGTERM leaks an orphan process consuming memory/GPU.
         sendSIGTERM()
-        Self.waitForProcessExit(process, timeout: 0.5)
+        // Bug 96 fix: move the wait off the main actor so the RunLoop spin in
+        // waitForProcessExit does not block MainActor for up to 500 ms on every
+        // cold-start or crash-recovery.
+        let procToWait = process
+        await Task.detached { Self.waitForProcessExit(procToWait, timeout: 0.5) }.value
 
         // Remove stale socket.
         try? FileManager.default.removeItem(atPath: socketPath)
@@ -346,8 +350,11 @@ final class EngineManager: ObservableObject {
     nonisolated private static func waitForProcessExit(_ proc: Process?, timeout: TimeInterval) {
         guard let proc = proc else { return }
         let deadline = Date().addingTimeInterval(timeout)
+        // Bug 114 fix: use Thread.sleep instead of RunLoop spin.
+        // A cooperative thread has no run-loop sources so the old RunLoop-based
+        // approach was a pure busy-wait that burned the pool slot for 500 ms.
         while proc.isRunning && Date() < deadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+            Thread.sleep(forTimeInterval: 0.05)
         }
     }
 
@@ -358,9 +365,12 @@ final class EngineManager: ObservableObject {
     func handleCrash() async throws {
         // Guard against multiple callers racing to start recovery for the same crash
         // (e.g. Phase 2 onError + drainResult() both detecting the same engine death).
+        // Bug 97 fix: throw instead of silently returning so callers can distinguish
+        // "already recovering" from "recovery was initiated by me" and can check
+        // engine status themselves rather than assuming recovery is progressing.
         guard !isRecovering else {
             logger.info("handleCrash: recovery already in progress — skipping duplicate")
-            return
+            throw EngineManagerError.recoveryInProgress
         }
         isRecovering = true
         defer { isRecovering = false }
@@ -507,9 +517,16 @@ final class EngineManager: ObservableObject {
         // (3) Disconnect — close the socket fd.
         //     The engine process is intentionally kept alive so the model
         //     stays loaded in memory.  On wake we reconnect without reloading.
-        engineClient.disconnect()
-        status = .stopped
-        logger.info("System sleep — disconnected from engine (process kept alive)")
+        // Bug 111 fix: set .stopped only after disconnect completes, via an
+        // awaited Task, so handleWake() cannot observe fd as half-open while
+        // status is already .stopped and incorrectly skip reconnect verification.
+        Task { [weak self] in
+            guard let self else { return }
+            self.engineClient.disconnect()
+            await Task.yield()  // ensure disconnect's ioQueue.async has been dispatched
+            self.status = .stopped
+            logger.info("System sleep — disconnected from engine (process kept alive)")
+        }
     }
 
     @objc func handleWake() {
@@ -544,11 +561,15 @@ final class EngineManager: ObservableObject {
 enum EngineManagerError: Error, CustomStringConvertible {
     case launchTimeout
     case crashLoop
+    /// Bug 97 fix: thrown by handleCrash() when a recovery is already in progress,
+    /// so duplicate callers can detect they did not trigger recovery and act accordingly.
+    case recoveryInProgress
 
     var description: String {
         switch self {
-        case .launchTimeout: return "engine did not respond within 5 seconds"
-        case .crashLoop:     return "engine crash loop detected"
+        case .launchTimeout:      return "engine did not respond within 5 seconds"
+        case .crashLoop:          return "engine crash loop detected"
+        case .recoveryInProgress: return "crash recovery already in progress"
         }
     }
 }
