@@ -2,10 +2,18 @@
 
 void ChunkQueue::push(const Chunk& chunk) {
     std::unique_lock<std::mutex> lock(mu_);
+    // Bug H4 fix: capture the current generation before waiting so that, after
+    // waking, we can detect whether reset() fired and the queue belongs to a new
+    // session.  If the generation changed, discard this stale chunk.
+    const uint64_t entry_generation = generation_;
     not_full_.wait(lock, [this]() {
         return static_cast<int>(queue_.size()) < CHUNK_QUEUE_MAX_DEPTH || shut_;
     });
     if (shut_) return;
+    // Bug H4 fix: discard chunk if reset() advanced the generation counter
+    // while this push() was blocked — the old chunk belongs to the previous
+    // session and must not be inserted into the freshly-cleared queue.
+    if (generation_ != entry_generation) return;
     audio_ms_ += chunk.duration_ms;
     queue_.push(chunk);
     not_empty_.notify_one();
@@ -37,6 +45,12 @@ void ChunkQueue::reset() {
     queue_.swap(empty);
     audio_ms_ = 0;
     shut_ = false;
+    // Bug H4 fix: advance the generation counter so any push() that was blocked
+    // on not_full_.wait() and wakes up here will see the generation mismatch and
+    // discard its stale chunk instead of inserting it into the new session.
+    ++generation_;
+    not_empty_.notify_all();
+    not_full_.notify_all();
 }
 
 int ChunkQueue::depth() const {

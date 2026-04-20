@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <vector>
 
 #include "audio/chunk_queue.h"
@@ -18,8 +19,12 @@ public:
     void reset();
 
 private:
-    void maybe_emit_chunk(bool is_final);
+    // Bug H3 fix: takes unique_lock by reference so it can unlock mu_ before
+    // invoking cb_() — preventing a deadlock when cb_() (chunk_queue_.push())
+    // blocks on a full queue while another thread holds mu_.
+    void maybe_emit_chunk(bool is_final, std::unique_lock<std::mutex>& lk);
 
+    mutable std::mutex mu_;
     Callback cb_;
     Vad vad_;
     std::vector<int16_t> buffer_;

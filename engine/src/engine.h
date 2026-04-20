@@ -24,6 +24,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <vector>
 
@@ -80,7 +81,10 @@ private:
     Config                   cfg_;
     std::shared_ptr<Backend> backend_;
     std::atomic<bool>        loaded_{false};
-    std::mutex                engine_mutex_;
+    mutable std::mutex        engine_mutex_;
+    // Bug C1 fix: reader/writer lock held for the full duration of inference so
+    // unload_model() cannot free model weights while process_stream() is active.
+    mutable std::shared_mutex inference_mutex_;
 };
 
 }  // namespace openverb

@@ -7,6 +7,7 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -84,6 +85,12 @@ public:
         const std::atomic<bool>&     abort_flag,
         ProgressQueue&               progress_queue) override;
 
+    // Runs a short dummy inference (~100 ms of silent PCM) directly on the
+    // underlying LlamaContext so the mtmd audio projector and llama decode
+    // graph are compiled before the first real session arrives.  Capped at
+    // ~5 s via an internal abort flag; all exceptions are swallowed.
+    void warmup() override;
+
     std::string name() const override { return "gemma_audio"; }
 
 private:
@@ -99,4 +106,7 @@ private:
     std::unique_ptr<LlamaContext> llama_;
     Vad                           vad_;
     bool                          vad_enabled_;
+    // Bug C2 fix: serialises llama_.reset() in unload_model() with
+    // the llama_ null-check + dereference in process_impl().
+    mutable std::mutex            backend_mutex_;
 };

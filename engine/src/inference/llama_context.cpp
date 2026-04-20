@@ -284,7 +284,7 @@ struct LlamaContext::Impl {
         mmp.use_gpu       = true;
         mmp.n_threads     = threads;
         mmp.print_timings = false;
-        mmp.warmup        = false;
+        mmp.warmup        = true;
 
         mctx = mtmd_init_from_file(mmproj_path.c_str(), model, mmp);
         if (!mctx) {
@@ -416,6 +416,30 @@ std::string LlamaContext::infer(const std::string&         text_prompt,
     if (abort_flag && abort_flag->load(std::memory_order_relaxed)) return "";
 
     // -----------------------------------------------------------------------
+    // Pre-flight context size check (Bug H5)
+    //
+    // mtmd_helper_eval_chunks() and the generation loop together consume
+    // n_prompt_tokens + MAX_NEW_TOKENS positions in the KV cache.
+    // If that total exceeds ctx_size the eval will OOM or silently truncate.
+    // Return a clean error now rather than letting llama_decode() crash.
+    // -----------------------------------------------------------------------
+    {
+        const int n_chunks = static_cast<int>(mtmd_input_chunks_size(chunks));
+        // Rough prompt token count: one token per chunk (text) or ~64 per
+        // audio chunk. mtmd does not expose an exact count without a full
+        // encode, so we use chunk count * 64 as a conservative upper bound.
+        const int n_prompt_tokens = n_chunks * 64;
+        constexpr int MAX_NEW_TOKENS_CHECK = 512;
+        const int n_total = n_prompt_tokens + MAX_NEW_TOKENS_CHECK;
+        if (n_total > impl_->ctx_size) {
+            throw std::runtime_error(
+                "LlamaContext::infer: token budget (" + std::to_string(n_total) +
+                ") exceeds context window (" + std::to_string(impl_->ctx_size) +
+                "). The audio is too large for context — use a larger --ctx-size.");
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Step 5: Process all chunks (encode audio + decode text into KV cache)
     // -----------------------------------------------------------------------
     // KV-cache must be cleared between calls
@@ -514,6 +538,11 @@ std::string LlamaContext::infer(const std::string&         text_prompt,
             progress(est);
             last_progress_tp = now;
         }
+
+        // Bug C3 fix: guard against n_past reaching the KV-cache boundary.
+        // Without this check a long recording + verbose prompt overflows the
+        // context window, causing llama_decode() to silently corrupt memory.
+        if (n_past >= impl_->ctx_size) break;
 
         // --- Decode for next iteration: single-token batch ---
         batch.n_tokens       = 1;

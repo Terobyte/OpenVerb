@@ -15,6 +15,7 @@
 #include <cctype>
 #include <cmath>
 #include <functional>
+#include <shared_mutex>
 #include <string>
 #include <vector>
 
@@ -104,9 +105,10 @@ InferenceResult Engine::process_file(const std::string&         file_path,
     // ── Resample to 16 kHz mono (no-op if already at target).
     AudioData pcm16k = resample(audio, SAMPLE_RATE);
 
-    // ── Run inference — grab a shared_ptr to the backend under the mutex,
-    // then release the mutex so unload_model() isn't blocked during the
-    // (potentially 30+ second) inference call.
+    // ── Run inference — hold a shared (reader) lock on inference_mutex_ for
+    // the entire process() call so unload_model() (which acquires an exclusive
+    // write lock) cannot free model weights while inference is in progress.
+    // Bug C1 fix: lk_inference stays alive until process() returns.
     std::shared_ptr<Backend> be;
     {
         std::lock_guard<std::mutex> lk(engine_mutex_);
@@ -121,6 +123,7 @@ InferenceResult Engine::process_file(const std::string&         file_path,
         }
         be = backend_;
     }
+    std::shared_lock<std::shared_mutex> lk_inference(inference_mutex_);
     return be->process(pcm16k.samples,
                        pcm16k.sample_rate,
                        context_json,
@@ -140,9 +143,14 @@ void Engine::ensure_loaded() {
 }
 
 void Engine::unload_model() {
+    // Bug C1 fix: acquire exclusive writer lock so that any in-flight
+    // process_stream() / process_file() holding a shared reader lock must
+    // complete before we free the model weights.
+    std::unique_lock<std::shared_mutex> lk_inference(inference_mutex_);
     std::lock_guard<std::mutex> lk(engine_mutex_);
     if (backend_) {
         backend_->unload_model();
+        backend_.reset();
     }
     loaded_.store(false, std::memory_order_release);
 }
@@ -168,6 +176,8 @@ InferenceResult Engine::process_stream(
         }
         be = backend_;
     }
+    // Bug C1 fix: hold shared lock across the entire inference call.
+    std::shared_lock<std::shared_mutex> lk_inference(inference_mutex_);
     return be->process_stream(pcm, sample_rate, context_json,
                               abort_flag, progress_queue);
 }

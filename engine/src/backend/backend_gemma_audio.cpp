@@ -5,10 +5,14 @@
 #include "context/prompt_builder.h"
 #include "audio/reader.h"
 #include "ipc/progress.h"
+#include "config/log.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstring>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 // ---------------------------------------------------------------------------
@@ -37,6 +41,9 @@ InferenceResult GemmaAudioBackend::process_impl(
     std::function<void(float)>   progress,
     const std::atomic<bool>*     abort_flag)
 {
+    // Bug C2 fix: acquire backend_mutex_ before reading llama_ so that
+    // unload_model()'s llama_.reset() cannot race the null-check + dereference.
+    std::lock_guard<std::mutex> lk(backend_mutex_);
     // #26: guard against null llama_ (set by unload_model() between process()
     // calls under memory pressure).  A stale shared_ptr from an in-flight call
     // could reach here after the model is unloaded.
@@ -127,6 +134,9 @@ InferenceResult GemmaAudioBackend::process(
 
 void GemmaAudioBackend::unload_model()
 {
+    // Bug C2 fix: acquire backend_mutex_ so llama_.reset() cannot race with
+    // process_impl()'s null-check + dereference of llama_.
+    std::lock_guard<std::mutex> lk(backend_mutex_);
     llama_.reset();
 }
 
@@ -163,4 +173,68 @@ InferenceResult GemmaAudioBackend::process_stream(
     };
     return process_impl(audio_pcm, sample_rate, context_json,
                         progress_cb, &abort_flag);
+}
+
+// ---------------------------------------------------------------------------
+// warmup — compile mtmd + llama graphs before the first real session.
+//
+// Why this exists: mtmd_init_from_file() is configured with warmup=false (see
+// llama_context.cpp), so the multimodal projector's compute graphs are not
+// compiled until the first mtmd_encode() call.  Without this step, the first
+// transcription after engine launch hits a cold audio-encode path that can
+// return empty output — the "first run is always empty" symptom.
+//
+// Bypasses process() / process_impl() on purpose so the backend-level VAD
+// cannot short-circuit on silent input.
+// ---------------------------------------------------------------------------
+void GemmaAudioBackend::warmup()
+{
+    if (!llama_) return;  // model not loaded — nothing to warm.
+
+    const auto t_start = std::chrono::steady_clock::now();
+
+    // ~100 ms of silent PCM at 16 kHz — enough to force mtmd_encode through
+    // its full compile path without producing real tokens to generate from.
+    std::vector<int16_t> silence(1600, 0);
+
+    // Safety cap: if the cold-start graph compile is slower than expected the
+    // warmup must not block session.ready forever.  Watchdog thread flips the
+    // abort flag after 5 s; infer() checks it before tokenise, before eval,
+    // and on every generation iteration.
+    std::atomic<bool> abort_flag{false};
+    std::atomic<bool> warmup_done{false};
+    std::thread watchdog([&abort_flag, &warmup_done]() {
+        auto start = std::chrono::steady_clock::now();
+        while (!warmup_done.load(std::memory_order_relaxed)) {
+            if (std::chrono::steady_clock::now() - start
+                    > std::chrono::seconds(5)) {
+                abort_flag.store(true, std::memory_order_relaxed);
+                return;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    });
+
+    try {
+        (void)llama_->infer(
+            /*text_prompt=*/       "",
+            /*audio_pcm=*/         silence,
+            /*sample_rate=*/       16000,
+            /*generation_suffix=*/ "",
+            /*progress=*/          nullptr,
+            /*abort_flag=*/        &abort_flag
+        );
+    } catch (const std::exception& e) {
+        LOG_WARN("gemma_audio: warmup exception (non-fatal): %s", e.what());
+    } catch (...) {
+        LOG_WARN("gemma_audio: warmup non-std exception (non-fatal)");
+    }
+
+    warmup_done.store(true, std::memory_order_relaxed);
+    if (watchdog.joinable()) watchdog.join();
+
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t_start).count();
+    LOG_INFO("gemma_audio: warmup complete (%lldms)",
+             static_cast<long long>(elapsed));
 }

@@ -33,4 +33,8 @@ private:
     std::queue<Chunk> queue_;
     int audio_ms_ = 0;
     bool shut_ = false;
+    // Bug H4 fix: incremented in reset() so a push() that wakes from
+    // not_full_.wait() can detect it was woken by a reset() (stale session)
+    // rather than by genuine capacity becoming available, and discard the chunk.
+    uint64_t generation_ = 0;
 };

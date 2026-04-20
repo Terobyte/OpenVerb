@@ -9,7 +9,10 @@ size_t RingBuffer::write(const void* data, size_t len) {
     size_t r = read_idx_.load(std::memory_order_acquire);
     size_t free = BUF_SIZE - (w - r);
     size_t n = (len < free) ? len : free;
-    if (n == 0) return 0;
+    if (n == 0) {
+        if (len > 0) overflow_.store(true, std::memory_order_release);
+        return 0;
+    }
 
     const uint8_t* src = static_cast<const uint8_t*>(data);
     size_t w_pos = w & MASK;
@@ -25,6 +28,12 @@ size_t RingBuffer::write(const void* data, size_t len) {
 }
 
 std::vector<int16_t> RingBuffer::read_all() {
+    // Bug H2 fix: acquire write_mutex_ so that reset() cannot concurrently
+    // zero both indices while read_all() is reading and advancing read_idx_.
+    // Without this lock, reset() zeroing write_idx_ after read_all() has
+    // loaded it can leave read_idx_ advanced past write_idx_ = 0, which
+    // causes every subsequent read to return uninitialised data.
+    std::lock_guard<std::mutex> lk(write_mutex_);
     size_t r       = read_idx_.load(std::memory_order_relaxed);
     size_t w       = write_idx_.load(std::memory_order_acquire);
     size_t avail   = (w >= r) ? w - r : 0;  // guard against reset() race underflow
@@ -45,6 +54,7 @@ std::vector<int16_t> RingBuffer::read_all() {
 }
 
 void RingBuffer::reset() {
+    std::lock_guard<std::mutex> lk(write_mutex_);
     write_idx_.store(0, std::memory_order_seq_cst);
     read_idx_.store(0, std::memory_order_seq_cst);
 }

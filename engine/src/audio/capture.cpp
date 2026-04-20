@@ -5,12 +5,16 @@
 #include <AudioToolbox/AudioToolbox.h>
 #include <atomic>
 #include <cstring>
+#include <mutex>
 #include <vector>
 
 struct AudioCapture::Impl {
     AudioQueueRef           queue{nullptr};
     AudioQueueBufferRef     buffers[3]{};
     CaptureCallback         callback;
+    // Bug H1 fix: guards concurrent read (CoreAudio real-time callback thread)
+    // and write (application thread via start()) of the callback member.
+    std::mutex              callback_mutex_;
     std::atomic<bool>       capturing{false};
 
     static constexpr int kBufferBytes = 4096;
@@ -21,14 +25,23 @@ struct AudioCapture::Impl {
                                 UInt32,
                                 const AudioStreamPacketDescription*) {
         auto* self = static_cast<Impl*>(user_data);
-        if (!self->capturing.load(std::memory_order_acquire) || !self->callback) {
+        if (!self->capturing.load(std::memory_order_acquire)) {
             // Do not re-enqueue during dispose — AudioQueueDispose(true) is in flight
             // and re-enqueuing a buffer into a queue being torn down is undefined.
             return;
         }
 
-        self->callback(reinterpret_cast<const uint8_t*>(buffer->mAudioData),
-                       buffer->mAudioDataByteSize);
+        // Bug H1 fix: lock callback_mutex_ before reading the callback member
+        // to prevent a data race with the application-thread write in start().
+        CaptureCallback cb_copy;
+        {
+            std::lock_guard<std::mutex> lk(self->callback_mutex_);
+            cb_copy = self->callback;
+        }
+        if (!cb_copy) return;
+
+        cb_copy(reinterpret_cast<const uint8_t*>(buffer->mAudioData),
+                buffer->mAudioDataByteSize);
 
         AudioQueueEnqueueBuffer(self->queue, buffer, 0, nullptr);
     }
@@ -43,7 +56,12 @@ AudioCapture::~AudioCapture() {
 
 void AudioCapture::start(CaptureCallback callback) {
     if (impl_->capturing.load(std::memory_order_acquire)) return;
-    impl_->callback = std::move(callback);
+    // Bug H1 fix: protect callback assignment with callback_mutex_ so the
+    // CoreAudio real-time thread cannot read a partially-constructed std::function.
+    {
+        std::lock_guard<std::mutex> lk(impl_->callback_mutex_);
+        impl_->callback = std::move(callback);
+    }
 
     AudioStreamBasicDescription fmt{};
     fmt.mSampleRate       = SAMPLE_RATE;
