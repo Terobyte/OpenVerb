@@ -140,11 +140,15 @@ struct AccessibilityReader: AccessibilityReadable {
         let nsString = fullText as NSString
         let totalLen = nsString.length
 
-        // Clamp cursor position to valid range.
-        let cursorPos = min(max(cfRange.location, 0), totalLen)
+        // Clamp cursor position to valid range, then snap to a grapheme-cluster
+        // boundary so we never bisect a surrogate pair or emoji sequence.
+        let rawCursorPos = min(max(cfRange.location, 0), totalLen)
+        let safeCursorPos = rawCursorPos < totalLen
+            ? nsString.rangeOfComposedCharacterSequence(at: rawCursorPos).location
+            : totalLen
 
-        let beforeNS  = nsString.substring(to: cursorPos)
-        let afterStart = min(cursorPos + max(cfRange.length, 0), totalLen)
+        let beforeNS  = nsString.substring(to: safeCursorPos)
+        let afterStart = min(safeCursorPos + max(cfRange.length, 0), totalLen)
         let afterNS   = nsString.substring(from: afterStart)
 
         return (before: beforeNS, after: afterNS)

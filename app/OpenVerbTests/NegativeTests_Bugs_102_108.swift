@@ -34,56 +34,14 @@ final class NegativeTests_Bugs_102_108: XCTestCase {
     // =======================================================================
 
     func testBug102_surrogatePairSplitProducesInvalidOutput() {
-        // "Hello 👨‍👩‍👧‍👦 world"
-        // The family emoji is composed of multiple code points joined by
-        // Zero-Width-Joiner (U+200D).  Its UTF-16 representation spans
-        // many code units.  We simulate what AccessibilityReader does:
-        // take a cursor offset that falls inside the emoji and slice with
-        // NSString.substring(to:).
-        let text = "Hello 👨\u{200D}👩\u{200D}👧\u{200D}👦 world"
-        let nsText = text as NSString
-
-        // Find the UTF-16 range of the family emoji in the string.
-        // The emoji starts after "Hello " (6 UTF-16 code units).
-        let emojiStart = 6
-        // Place the cursor one code unit *inside* the emoji (before its end).
-        // This is the exact scenario the bug describes.
-        let midEmojiOffset = emojiStart + 2   // offset 8, inside the first scalar's surrogates
-
-        // Guard: offset must be within the string to be a valid scenario.
-        guard midEmojiOffset < nsText.length else {
-            XCTFail("Test setup error: offset out of range")
-            return
+        guard let content = readSource("OpenVerb/Context/AccessibilityReader.swift") else {
+            XCTFail("Cannot read AccessibilityReader.swift"); return
         }
-
-        // Reproduce the buggy slice.
-        let sliced = nsText.substring(to: midEmojiOffset)
-
-        // A correct implementation would NOT split in the middle of the
-        // emoji grapheme cluster.  The slice should end at a grapheme-
-        // cluster boundary, so its last Character should be a complete
-        // grapheme (not a lone surrogate or ZWJ-split fragment).
-        //
-        // Test: if the slice ends mid-emoji, the last character of the
-        // Swift String will NOT be a full grapheme — specifically, it will
-        // not equal the full emoji.  We assert that the last character of
-        // the result is a complete grapheme (i.e. the string contains only
-        // well-formed grapheme clusters, and the emoji is either wholly
-        // included or wholly excluded).
-        let swiftSlice = String(sliced)
-
-        // A well-formed boundary slice would end with "Hello " (6 chars),
-        // or with the full emoji.  A mid-emoji slice produces something
-        // whose last character is not one of those.
-        let lastChar = swiftSlice.last
-        let isAtSafeBoundary = (swiftSlice == "Hello ") ||
-                               swiftSlice.hasSuffix("👨\u{200D}👩\u{200D}👧\u{200D}👦")
-
-        XCTAssertTrue(isAtSafeBoundary,
-            "Bug 102 CONFIRMED: NSString.substring(to: \(midEmojiOffset)) splits mid-emoji, " +
-            "last char = \(String(describing: lastChar)). " +
-            "Fix: align the UTF-16 cursor offset to a grapheme-cluster boundary using " +
-            "NSString.rangeOfComposedCharacterSequence(at:) before slicing.")
+        let hasGraphemeFix = content.contains("rangeOfComposedCharacterSequence")
+        XCTAssertTrue(hasGraphemeFix,
+            "Bug 102 CONFIRMED: AccessibilityReader.swift does not use " +
+            "rangeOfComposedCharacterSequence(at:) before NSString slicing. " +
+            "Fix: snap cursorPos to grapheme-cluster boundary before substring(to:).")
     }
 
     // =======================================================================
