@@ -64,15 +64,58 @@ static void trim_whitespace(std::string& s) {
 }
 
 // ---------------------------------------------------------------------------
-// strip_trailing_punct — remove exactly one trailing punctuation char if
-// it is one of: . , ! ?
+// strip_trailing_punct — remove exactly one trailing punctuation character.
+//
+// Handles ASCII punctuation (. , ! ?) and common CJK / fullwidth Unicode
+// punctuation characters:
+//   U+3002 。 CJK fullstop         (UTF-8: 0xE3 0x80 0x82)
+//   U+3001 、 CJK enumeration comma (UTF-8: 0xE3 0x80 0x81)
+//   U+FF01 ！ fullwidth exclamation (UTF-8: 0xEF 0xBC 0x81)
+//   U+FF1F ？ fullwidth question    (UTF-8: 0xEF 0xBC 0x9F)
+//   U+FF0C ， fullwidth comma       (UTF-8: 0xEF 0xBC 0x8C)
+//   U+FF0E ． fullwidth full stop   (UTF-8: 0xEF 0xBC 0x8E)
+//   U+300D 」 CJK right corner bracket (UTF-8: 0xE3 0x80 0x8D)
+//   U+FF09 ） fullwidth right paren (UTF-8: 0xEF 0xBC 0x89)
 // ---------------------------------------------------------------------------
 
 static void strip_trailing_punct(std::string& s) {
     if (s.empty()) return;
+
+    // ASCII punctuation: single byte.
     char last = s.back();
-    if (last == '.' || last == ',' || last == '!' || last == '?')
+    if (last == '.' || last == ',' || last == '!' || last == '?') {
         s.pop_back();
+        return;
+    }
+
+    // CJK / fullwidth Unicode punctuation: 3-byte sequences.
+    // Check that the string is long enough and that the trailing 3 bytes
+    // match one of the known punctuation sequences.
+    if (s.size() >= 3) {
+        const unsigned char b0 = static_cast<unsigned char>(s[s.size() - 3]);
+        const unsigned char b1 = static_cast<unsigned char>(s[s.size() - 2]);
+        const unsigned char b2 = static_cast<unsigned char>(s[s.size() - 1]);
+
+        bool is_cjk_punct = false;
+
+        // 0xE3 0x80 block: CJK punctuation (U+3001, U+3002, U+300D, …)
+        if (b0 == 0xE3 && b1 == 0x80) {
+            // U+3001 、 (0x81), U+3002 。 (0x82), U+300D 」 (0x8D)
+            is_cjk_punct = (b2 == 0x81 || b2 == 0x82 || b2 == 0x8D);
+        }
+
+        // 0xEF 0xBC block: fullwidth punctuation (U+FF01 ！, U+FF09 ）, …)
+        if (b0 == 0xEF && b1 == 0xBC) {
+            // U+FF01 ！ (0x81), U+FF09 ） (0x89), U+FF0C ， (0x8C),
+            // U+FF0E ． (0x8E), U+FF1F ？ (0x9F)
+            is_cjk_punct = (b2 == 0x81 || b2 == 0x89 || b2 == 0x8C ||
+                            b2 == 0x8E || b2 == 0x9F);
+        }
+
+        if (is_cjk_punct) {
+            s.erase(s.size() - 3, 3);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

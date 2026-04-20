@@ -13,7 +13,7 @@ import os
 //   (2) write    — put transcribed text on clipboard; record changeCount after
 //   (3) hide     — window.orderOut(nil); release key-window status so the
 //                  target app can reclaim focus
-//   (4) activate — targetApp.activate(options: [])
+//   (4) activate — targetApp.activate(options: .activateIgnoringOtherApps)
 //   (5) delay    — 50 ms minimum to cover async focus transfer under load
 //   (6) paste    — CGEvent ⌘V key-down + key-up posted to HID stream
 //   (7) delay    — 300 ms wait for target app to read clipboard before restore
@@ -38,6 +38,7 @@ struct TextInjector {
     // @MainActor Task.
     // -----------------------------------------------------------------------
 
+    @MainActor
     static func inject(
         text: String,
         targetApp: NSRunningApplication,
@@ -53,8 +54,37 @@ struct TextInjector {
 
         let pasteboard = NSPasteboard.general
 
-        // (1) save current clipboard string BEFORE our write
-        let savedClipboard = pasteboard.string(forType: .string)
+        // (0b) Bug 90: refuse to use pasteboard path for secure/password fields.
+        // Check the focused element's AXRole for password markers; also check
+        // isSecure via SecInputIsEnabled() equivalent on the focused element.
+        let isSecureField: Bool = {
+            guard let focusedApp = NSWorkspace.shared.frontmostApplication else { return false }
+            let axApp = AXUIElementCreateApplication(focusedApp.processIdentifier)
+            var focusedElement: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(axApp, kAXFocusedUIElementAttribute as CFString, &focusedElement) == .success,
+                  let element = focusedElement else { return false }
+            var roleValue: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element as! AXUIElement, kAXRoleAttribute as CFString, &roleValue) == .success,
+                  let role = roleValue as? String else { return false }
+            return role == "AXSecureTextField"
+        }()
+
+        if isSecureField {
+            logger.warning("TextInjector: secure input field detected — skipping pasteboard injection")
+            window.orderOut(nil)
+            return
+        }
+
+        // (1) save full pasteboardItems BEFORE our write (Bug 88: preserve all types)
+        let savedItems = pasteboard.pasteboardItems?.compactMap { item -> NSPasteboardItem? in
+            let copy = NSPasteboardItem()
+            for type in item.types {
+                if let data = item.data(forType: type) {
+                    copy.setData(data, forType: type)
+                }
+            }
+            return copy
+        }
 
         // (2) write text to clipboard
         pasteboard.clearContents()
@@ -69,7 +99,7 @@ struct TextInjector {
         window.orderOut(nil)
 
         // (4) activate target app
-        if !targetApp.activate(options: []) {
+        if !targetApp.activate(options: .activateIgnoringOtherApps) {
             logger.warning("TextInjector: activate() failed for \(targetApp.bundleIdentifier ?? targetApp.localizedName ?? "unknown")")
         }
 
@@ -93,8 +123,8 @@ struct TextInjector {
         // the restore to avoid overwriting their data.
         if pasteboard.changeCount == savedChangeCount {
             pasteboard.clearContents()
-            if let saved = savedClipboard {
-                pasteboard.setString(saved, forType: .string)
+            if let items = savedItems, !items.isEmpty {
+                pasteboard.writeObjects(items)
             }
             logger.debug("TextInjector: clipboard restored")
         } else {
@@ -112,11 +142,13 @@ struct TextInjector {
             down.flags = .maskCommand
             down.post(tap: .cghidEventTap)
         }
-        // key-up
-        if let up = CGEvent(keyboardEventSource: nil, virtualKey: 0x09, keyDown: false) {
-            up.flags = .maskCommand
-            up.post(tap: .cghidEventTap)
+        // key-up — guard so a nil result is never silently dropped (Bug 89)
+        guard let up = CGEvent(keyboardEventSource: nil, virtualKey: 0x09, keyDown: false) else {
+            logger.error("TextInjector: key-up CGEvent creation failed — V key may be stuck")
+            return
         }
+        up.flags = .maskCommand
+        up.post(tap: .cghidEventTap)
     }
 
     // -----------------------------------------------------------------------
@@ -136,16 +168,32 @@ struct TextInjector {
 
     /// Returns (keyCode, flags) with .maskShift set for uppercase/shifted chars.
     ///
-    /// The charToKeyCode map stores lowercase key positions (needsShift always
-    /// false in the map). We look up the lowercase version of the character, then
-    /// derive shift from whether the original char differs from its lowercase form.
+    /// Shift detection uses an explicit shiftedPunctuation set (Bug 94 fix).
+    /// Shifted punctuation has no lowercase form so a lowercased() comparison
+    /// would always return false. Letters still use isUppercase for Shift detection.
     static func keyCodeAndFlags(for char: String) -> (UInt16, CGEventFlags)? {
-        guard let scalar = char.lowercased().unicodeScalars.first,
-              let (code, _) = Self.charToKeyCode[scalar] else { return nil }
-        let needsShift = char != char.lowercased()
+        guard let scalar = char.unicodeScalars.first else { return nil }
+        // Check direct hit first (handles shifted punctuation entries in the map)
+        if let (code, needsShift) = Self.charToKeyCode[scalar] {
+            let flags: CGEventFlags = needsShift ? .maskShift : CGEventFlags(rawValue: 0)
+            return (code, flags)
+        }
+        // For letters: look up lowercase version and derive Shift from case change
+        guard let lowerScalar = char.lowercased().unicodeScalars.first,
+              let (code, _) = Self.charToKeyCode[lowerScalar] else { return nil }
+        // Use shiftedPunctuation set for explicit shift detection (Bug 94 fix)
+        let isUppercaseLetter = char.first?.isLetter == true && char.first?.isUppercase == true
+        let needsShift = Self.shiftedPunctuation.contains(char) || isUppercaseLetter
         let flags: CGEventFlags = needsShift ? .maskShift : CGEventFlags(rawValue: 0)
         return (code, flags)
     }
+
+    /// Explicit set of characters that require the Shift key (Bug 94 fix).
+    /// Using a lookup set avoids the broken lowercased() comparison heuristic.
+    private static let shiftedPunctuation: Set<String> = [
+        "!", "@", "#", "$", "%", "^", "&", "*", "(", ")", "_", "+",
+        "{", "}", "|", ":", "\"", "<", ">", "?", "~"
+    ]
 
     /// Inject text character by character via CGEvent keystrokes.
     /// Slow (~5 ms/char) but works where ⌘V is blocked.
@@ -172,7 +220,7 @@ struct TextInjector {
         window.orderOut(nil)
 
         // (2) activate target app.
-        if !targetApp.activate(options: []) {
+        if !targetApp.activate(options: .activateIgnoringOtherApps) {
             logger.warning("TextInjector: activate() failed for \(targetApp.bundleIdentifier ?? targetApp.localizedName ?? "unknown")")
         }
 
@@ -219,6 +267,17 @@ struct TextInjector {
         map[" "]  = (0x31, false)   // Space
         map["\t"] = (0x30, false)   // Tab
         map["\n"] = (0x24, false)   // Return
+        // Shifted punctuation entries (Bug 94 fix): needsShift = true
+        // These are the Shift+<key> characters on ANSI US layout.
+        let shiftedKeys: [(Unicode.Scalar, UInt16)] = [
+            ("!", 0x12), ("@", 0x13), ("#", 0x14), ("$", 0x15),
+            ("%", 0x17), ("^", 0x16), ("&", 0x1A), ("*", 0x1C),
+            ("(", 0x19), (")", 0x1D), ("_", 0x1B), ("+", 0x18),
+            ("{", 0x21), ("}", 0x1E), ("|", 0x2A), (":", 0x29),
+            ("\"", 0x27), ("<", 0x2B), (">", 0x2F), ("?", 0x2C),
+            ("~", 0x32),
+        ]
+        for (char, code) in shiftedKeys { map[char] = (code, true) }
         return map
     }()
 }

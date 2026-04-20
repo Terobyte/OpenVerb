@@ -28,7 +28,13 @@ struct ShortcutRecorderView: NSViewRepresentable {
         return view
     }
 
-    func updateNSView(_ nsView: ShortcutCaptureView, context: Context) {}
+    func updateNSView(_ nsView: ShortcutCaptureView, context: Context) {
+        // Bug 125: updateNSView was a no-op, so when the binding changes
+        // out from under an active recording session (e.g. Reset to Default),
+        // the view remained stuck in recording mode. Stop recording so the
+        // view reflects the updated binding values.
+        nsView.stopRecordingIfActive()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -52,13 +58,24 @@ final class ShortcutCaptureView: NSView {
     override var acceptsFirstResponder: Bool { true }
 
     deinit {
+        // Bug 107: AppKit event monitor removal must happen on the main thread.
+        // deinit can run on any thread that drops the last reference, so dispatch
+        // to the main queue to ensure safe AppKit access.
         if let monitor = localMonitor {
-            NSEvent.removeMonitor(monitor)
+            DispatchQueue.main.async {
+                NSEvent.removeMonitor(monitor)
+            }
         }
     }
 
     override func mouseDown(with event: NSEvent) {
         if !isRecording { startRecording() }
+    }
+
+    /// Stops recording if currently active. Called by updateNSView to sync
+    /// the view when the binding changes externally (e.g. Reset to Default).
+    func stopRecordingIfActive() {
+        if isRecording { stopRecording() }
     }
 
     override func draw(_ dirtyRect: NSRect) {

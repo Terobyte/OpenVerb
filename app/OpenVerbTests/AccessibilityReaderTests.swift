@@ -38,4 +38,17 @@ final class AccessibilityReaderTests: XCTestCase {
         mock.selectedText = String(repeating: "a", count: 15_000)
         XCTAssertEqual(mock.readSelectedText(for: NSRunningApplication.current)?.count, 15_000)
     }
+
+    // Bug 133 fix: exercise the real AccessibilityReader implementation so
+    // regressions in the production code are not invisible to the test suite.
+    func testRealAccessibilityReaderInstantiatesWithoutCrash() {
+        let reader = AccessibilityReader()
+        // Calling the real implementation against the current process.
+        // Accessibility permission is typically not granted in test context,
+        // so we expect nil or empty string — the key invariant is that the
+        // real class exists and its methods are callable without crashing.
+        let title = reader.readWindowTitle(for: NSRunningApplication.current)
+        // nil is valid (no accessibility permission); just verify no crash.
+        _ = title
+    }
 }

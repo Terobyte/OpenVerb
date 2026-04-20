@@ -349,6 +349,10 @@ std::string LlamaContext::infer(const std::string&         text_prompt,
             "infer() requires 16 kHz PCM — resample first (got " +
             std::to_string(sample_rate) + " Hz)");
 
+    // Guard against empty audio: zero-length PCM must be rejected before any
+    // mtmd call to avoid crashes in feature extraction on some builds.
+    if (audio_pcm.empty()) return "";
+
     // -----------------------------------------------------------------------
     // Step 1: Build Gemma 4 chat prompt with <__media__> marker
     // -----------------------------------------------------------------------

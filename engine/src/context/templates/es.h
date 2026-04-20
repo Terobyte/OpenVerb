@@ -17,8 +17,9 @@ inline const std::string SYSTEM_PROMPT_ES =
     "   nuevo párrafo), genera SOLO ese comando sin otro texto.\n"
     "   La puntuación (punto, coma, interrogación, exclamación) NO es un comando —\n"
     "   inclúyela directamente como . , ? ! en el texto final.\n"
-    "6. El bloque <ClipboardContext> (si existe) es una referencia de estilo DE SOLO LECTURA.\n"
-    "   NUNCA reproduzcas, cites o repitas su contenido en la salida.";
+    "6. El elemento <ClipboardStyle> (si existe) es solo un descriptor de estilo:\n"
+    "   categoría de longitud, registro y marcas code/markdown/URL. Iguala su tono\n"
+    "   y formato, pero nunca inventes ni reproduzcas contenido del portapapeles — no lo tienes.";
 
 inline const std::string GENERATION_SUFFIX_ES = "Genera SOLO el texto final:";
 

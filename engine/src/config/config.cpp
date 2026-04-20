@@ -253,7 +253,7 @@ void resolve_config(Config& cfg) {
 
     // ---- Validate context JSON if provided -----------------------------
     // The documented schema is a JSON object with optional string fields
-    // "app", "window", "clipboard", "selected".  Arrays, scalars, and any
+    // "app", "window", "clipboard_style", "selected".  Arrays, scalars, and any
     // other non-object JSON value are rejected here so callers never receive
     // a Config whose context_json does not conform to the object contract.
     if (!cfg.context_json.empty()) {

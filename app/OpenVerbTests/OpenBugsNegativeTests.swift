@@ -246,7 +246,9 @@ final class OpenBugsNegativeTests: XCTestCase {
         }
         // Bug 28's socketReadLock added ~1100 chars to the function header;
         // bump the scan window so the POLLHUP/POLLIN guards are still reached.
-        let body = substring(content, from: fnRange.lowerBound, length: 3000)
+        // Bug 140 fix: raised from 3000 to 5000 — recvJSONSync is already ~3600
+        // chars and further growth would push the POLLHUP check outside a 3000-char window.
+        let body = substring(content, from: fnRange.lowerBound, length: 5000)
         guard let pollhupRange = body.range(of: "POLLHUP | POLLERR"),
               let pollinRange  = body.range(of: "guard pfd.revents & Int16(POLLIN)") else {
             XCTFail("Cannot locate POLLHUP or POLLIN guard in recvJSONSync"); return

@@ -24,6 +24,7 @@
 		B3A1E2F3D4C5B6A7E8F9C006 /* AudioSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9A056 /* AudioSession.swift */; };
 		B3A1E2F3D4C5B6A7E8F9C007 /* HotkeyManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9A057 /* HotkeyManager.swift */; };
 		B3A1E2F3D4C5B6A7E8F9C008 /* ContextBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9A058 /* ContextBuilder.swift */; };
+		B3A1E2F3D4C5B6A7E8F9C026 /* ClipboardStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9A07C /* ClipboardStyle.swift */; };
 		B3A1E2F3D4C5B6A7E8F9C009 /* ProcessingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9A059 /* ProcessingView.swift */; };
 		B3A1E2F3D4C5B6A7E8F9C00A /* RecordingWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9A05A /* RecordingWindow.swift */; };
 		B3A1E2F3D4C5B6A7E8F9C00B /* StatusBarItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9A05B /* StatusBarItem.swift */; };
@@ -77,6 +78,7 @@
 		B3A1E2F3D4C5B6A7E8F9A056 /* AudioSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioSession.swift; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9A057 /* HotkeyManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HotkeyManager.swift; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9A058 /* ContextBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContextBuilder.swift; sourceTree = "<group>"; };
+		B3A1E2F3D4C5B6A7E8F9A07C /* ClipboardStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardStyle.swift; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9A059 /* ProcessingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessingView.swift; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9A05A /* RecordingWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingWindow.swift; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9A05B /* StatusBarItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusBarItem.swift; sourceTree = "<group>"; };
@@ -217,6 +219,7 @@
 			isa = PBXGroup;
 			children = (
 				B3A1E2F3D4C5B6A7E8F9A058 /* ContextBuilder.swift */,
+				B3A1E2F3D4C5B6A7E8F9A07C /* ClipboardStyle.swift */,
 				B3A1E2F3D4C5B6A7E8F9A06A /* AccessibilityReader.swift */,
 			);
 			path = Context;
@@ -392,6 +395,7 @@
 				B3A1E2F3D4C5B6A7E8F9C006 /* AudioSession.swift in Sources */,
 				B3A1E2F3D4C5B6A7E8F9C007 /* HotkeyManager.swift in Sources */,
 				B3A1E2F3D4C5B6A7E8F9C008 /* ContextBuilder.swift in Sources */,
+				B3A1E2F3D4C5B6A7E8F9C026 /* ClipboardStyle.swift in Sources */,
 				B3A1E2F3D4C5B6A7E8F9C009 /* ProcessingView.swift in Sources */,
 				B3A1E2F3D4C5B6A7E8F9C00A /* RecordingWindow.swift in Sources */,
 				B3A1E2F3D4C5B6A7E8F9C00B /* StatusBarItem.swift in Sources */,

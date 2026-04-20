@@ -46,8 +46,8 @@ Session::~Session() {
 // ---------------------------------------------------------------------------
 
 void Session::stop() {
-    stop_requested_.store(true, std::memory_order_relaxed);
-    pipeline_active_.store(false, std::memory_order_relaxed);
+    stop_requested_.store(true, std::memory_order_release);
+    pipeline_active_.store(false, std::memory_order_release);
     chunk_queue_.shutdown();
     result_cv_.notify_all();
     if (worker_thread_.joinable()) worker_thread_.join();
@@ -99,11 +99,11 @@ void Session::run_inference_worker_(int fd, Engine& engine) {
                 stop_requested_, progress_queue_);
         } catch (const std::exception& e) {
             LOG_WARN("session: worker inference error: %s", e.what());
-            stop_requested_.store(true, std::memory_order_relaxed);
+            stop_requested_.store(true, std::memory_order_release);
             break;
         } catch (...) {
             LOG_WARN("session: worker inference non-std exception");
-            stop_requested_.store(true, std::memory_order_relaxed);
+            stop_requested_.store(true, std::memory_order_release);
             break;
         }
 
@@ -159,6 +159,7 @@ void Session::run_inference_worker_(int fd, Engine& engine) {
 // ---------------------------------------------------------------------------
 
 void Session::run(int fd, Engine& engine, const SessionConfig& cfg) {
+    engine_ptr_ = &engine;
     RecvBuffer buf{};
     State state = State::IDLE;
     bool first_frame_seen = false;
@@ -169,7 +170,7 @@ void Session::run(int fd, Engine& engine, const SessionConfig& cfg) {
     };
 
     while (state != State::DESTROYED &&
-           !g_interrupted.load(std::memory_order_relaxed)) {
+           !stop_requested_.load(std::memory_order_acquire)) {
 
         switch (state) {
 
@@ -241,7 +242,7 @@ void Session::run(int fd, Engine& engine, const SessionConfig& cfg) {
                     timed_out = true;
                     LOG_WARN("session: model load timed out after %ds",
                              cfg.load_timeout_secs);
-                    load_thread.join();  // block until done — prevents use-after-free on engine
+                    load_thread.detach();  // detach so the session is not blocked indefinitely
                 } else {
                     load_thread.join();
                     try {
@@ -264,23 +265,24 @@ void Session::run(int fd, Engine& engine, const SessionConfig& cfg) {
             } else {
                 send_json(fd, nlohmann::json{{"type", "session.ready"}});
                 state            = State::STREAMING_AUDIO;
+                buf.accumulated.clear();
                 first_frame_seen = false;
                 // Initialise streaming pipeline.
                 chunk_queue_.reset();
                 infer_speed_ewma_ = DEFAULT_CHUNK_INFER_SPEED;
-                pipeline_active_.store(true, std::memory_order_relaxed);
+                pipeline_active_.store(true, std::memory_order_release);
                 stop_requested_.store(false, std::memory_order_relaxed);
                 inference_result_.reset();
                 progress_queue_.drain();
                 // VadScanner with callback that pushes completed chunks to the queue.
                 chunker_.emplace([this](Chunk c) {
-                    if (pipeline_active_.load(std::memory_order_relaxed)) {
+                    if (pipeline_active_.load(std::memory_order_acquire)) {
                         chunk_queue_.push(c);
                     }
                 });
                 // Launch the inference worker.
                 worker_thread_ = std::thread(
-                    [this, fd, &engine]() { run_inference_worker_(fd, engine); });
+                    [this, fd]() { run_inference_worker_(fd, *engine_ptr_); });
                 LOG_INFO("session: WAITING_READY → STREAMING_AUDIO");
             }
             break;
@@ -306,7 +308,7 @@ void Session::run(int fd, Engine& engine, const SessionConfig& cfg) {
                     if (chunker_) {
                         chunker_->flush();
                     }
-                    pipeline_active_.store(false, std::memory_order_relaxed);
+                    pipeline_active_.store(false, std::memory_order_release);
                     chunk_queue_.shutdown();
                     if (worker_thread_.joinable()) worker_thread_.join();
 
@@ -336,12 +338,14 @@ void Session::run(int fd, Engine& engine, const SessionConfig& cfg) {
                         }
 
                         std::string final_text = result->text;
-                        try {
-                            send_polish_started(fd);
-                            final_text = engine.polish_text(result->text, ctx);
-                            send_polished_result(fd, final_text);
-                        } catch (...) {
-                            // Polish failure is non-fatal; send the raw transcript.
+                        if (pipeline_active_.load(std::memory_order_relaxed)) {
+                            try {
+                                send_polish_started(fd);
+                                final_text = engine.polish_text(result->text, ctx);
+                                send_polished_result(fd, final_text);
+                            } catch (...) {
+                                // Polish failure is non-fatal; send the raw transcript.
+                            }
                         }
 
                         nlohmann::json msg;
@@ -359,15 +363,25 @@ void Session::run(int fd, Engine& engine, const SessionConfig& cfg) {
 
                 // --- Feed PCM frame to VadScanner ---
                 if (chunker_) {
-                    const int16_t* samples =
-                        reinterpret_cast<const int16_t*>(frame.data());
-                    int n_samples = static_cast<int>(frame.size() / sizeof(int16_t));
-                    chunker_->push_frame(samples, n_samples);
+                    // Guard: frame must have an even byte count for int16_t samples.
+                    // An odd byte count means the last byte is incomplete; drop it.
+                    if (frame.size() % 2 != 0) {
+                        LOG_WARN("session: odd PCM frame size %zu — dropping last byte",
+                                 frame.size());
+                    }
+                    const size_t n_bytes = frame.size() & ~size_t(1);  // round down to even
+                    // Use memcpy into an aligned std::vector<int16_t> rather than a raw
+                    // reinterpret_cast<const int16_t*> to guarantee alignment (UB on unaligned).
+                    std::vector<int16_t> samples_buf(n_bytes / sizeof(int16_t));
+                    std::memcpy(samples_buf.data(), frame.data(), n_bytes);
+                    int n_samples = static_cast<int>(samples_buf.size());
+                    chunker_->push_frame(samples_buf.data(), n_samples);
                 }
 
             } catch (const ConnectionClosed&) {
                 // Client dropped — clean up the pipeline.
-                pipeline_active_.store(false, std::memory_order_relaxed);
+                stop_requested_.store(true, std::memory_order_release);
+                pipeline_active_.store(false, std::memory_order_release);
                 chunk_queue_.shutdown();
                 if (worker_thread_.joinable()) worker_thread_.join();
                 chunker_.reset();
@@ -377,11 +391,12 @@ void Session::run(int fd, Engine& engine, const SessionConfig& cfg) {
                     send_error(fd, ErrorCode::timeout,
                                first_frame_seen ? "stream stall" : "no audio received");
                 }
-                pipeline_active_.store(false, std::memory_order_relaxed);
+                stop_requested_.store(true, std::memory_order_release);
+                pipeline_active_.store(false, std::memory_order_release);
                 chunk_queue_.shutdown();
                 if (worker_thread_.joinable()) worker_thread_.join();
                 chunker_.reset();
-                state = State::IDLE;
+                state = State::SHUTDOWN;
             }
             break;
         }

@@ -81,6 +81,17 @@ public:
         std::function<void(float)> progress) { (void)prompt; (void)progress; return InferenceResult{}; }
 
     // -----------------------------------------------------------------------
+    // warmup — run a single throwaway inference to compile compute graphs and
+    // kernels so the first real session does not pay the cold-start cost.
+    //
+    // Called by Engine::ensure_loaded() immediately after the backend is
+    // constructed.  Must be robust: warmup failures must never surface to the
+    // caller (implementations swallow exceptions internally).  Default
+    // implementation is a no-op so mock backends need not provide one.
+    // -----------------------------------------------------------------------
+    virtual void warmup() {}
+
+    // -----------------------------------------------------------------------
     // name — short identifier for this backend (e.g. "gemma_audio").
     // -----------------------------------------------------------------------
     virtual std::string name() const = 0;

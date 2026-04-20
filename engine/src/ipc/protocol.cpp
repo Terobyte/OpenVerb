@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <mutex>
 #include <poll.h>
 #include <string>
 #include <unistd.h>
@@ -24,6 +25,10 @@ const char* error_code_string(ErrorCode code) {
 }
 
 void send_json(int fd, const nlohmann::json& msg) {
+    // Bug H6: protect the write loop with a mutex so concurrent callers from
+    // different threads cannot interleave partial writes on the shared fd.
+    static std::mutex send_mutex;
+    std::lock_guard<std::mutex> lock(send_mutex);
     std::string data = msg.dump() + "\n";
     size_t total = data.size();
     size_t written = 0;

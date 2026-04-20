@@ -143,8 +143,9 @@ struct AccessibilityReader: AccessibilityReadable {
         // Clamp cursor position to valid range.
         let cursorPos = min(max(cfRange.location, 0), totalLen)
 
-        let beforeNS = nsString.substring(to: cursorPos)
-        let afterNS  = nsString.substring(from: cursorPos + max(cfRange.length, 0))
+        let beforeNS  = nsString.substring(to: cursorPos)
+        let afterStart = min(cursorPos + max(cfRange.length, 0), totalLen)
+        let afterNS   = nsString.substring(from: afterStart)
 
         return (before: beforeNS, after: afterNS)
     }

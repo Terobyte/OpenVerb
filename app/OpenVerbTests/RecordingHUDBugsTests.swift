@@ -11,7 +11,12 @@ final class RecordingHUDBugsTests: XCTestCase {
 
     private func readSource(_ relativePath: String) -> String? {
         let direct = URL(fileURLWithPath: relativePath)
-        return try? String(contentsOf: direct, encoding: .utf8)
+        if let content = try? String(contentsOf: direct, encoding: .utf8) { return content }
+        if let base = Bundle.main.resourceURL {
+            let bundled = base.appendingPathComponent(relativePath)
+            if let content = try? String(contentsOf: bundled, encoding: .utf8) { return content }
+        }
+        return nil
     }
 
     // =======================================================================

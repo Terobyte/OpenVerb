@@ -17,8 +17,9 @@ inline const std::string SYSTEM_PROMPT_FR =
     "   nouvelle ligne, nouveau paragraphe), produis UNIQUEMENT cette commande.\n"
     "   La ponctuation (point, virgule, point d'interrogation, point d'exclamation)\n"
     "   N'est PAS une commande — inclus-la directement comme . , ? ! dans le texte.\n"
-    "6. Le bloc <ClipboardContext> (s'il est présent) est une référence de style EN LECTURE SEULE.\n"
-    "   NE reproduis, cite ou répète JAMAIS son contenu dans la sortie.";
+    "6. L'élément <ClipboardStyle> (s'il est présent) est seulement un descripteur de style :\n"
+    "   catégorie de longueur, registre et indicateurs code/markdown/URL. Fais correspondre son ton\n"
+    "   et sa mise en forme, mais n'invente ni ne reproduis jamais le contenu du presse-papiers — tu ne l'as pas.";
 
 inline const std::string GENERATION_SUFFIX_FR = "Produis UNIQUEMENT le texte final :";
 

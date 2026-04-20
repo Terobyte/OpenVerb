@@ -17,8 +17,9 @@ inline const std::string SYSTEM_PROMPT_EN =
     "   new paragraph), output ONLY that command word(s) with no other text.\n"
     "   Punctuation (period, comma, question mark, exclamation) is NOT a command —\n"
     "   output it directly as . , ? ! in the tailored text.\n"
-    "6. The <ClipboardContext> block (if present) is a READ-ONLY style reference.\n"
-    "   NEVER reproduce, quote, or echo its content in the output.";
+    "6. The <ClipboardStyle> element (if present) is only a style descriptor:\n"
+    "   length bucket, register, and code/markdown/URL flags. Match its tone\n"
+    "   and formatting, but never invent or reproduce clipboard content — you do not have it.";
 
 inline const std::string GENERATION_SUFFIX_EN = "Output ONLY the final text:";
 

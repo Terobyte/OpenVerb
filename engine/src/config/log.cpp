@@ -33,24 +33,18 @@ void log_set_log_file(const char* path) {
 
 static void rotate_log() {
     if (s_log_path.empty() || !s_log_file) return;
-
-    long size = std::ftell(s_log_file);
-    if (size < 0 || static_cast<size_t>(size) < MAX_LOG_SIZE) return;
-
+    long sz = std::ftell(s_log_file);
+    if (sz < 0 || (size_t)sz < MAX_LOG_SIZE) return;
     std::fclose(s_log_file);
     s_log_file = nullptr;
-
-    std::string p3 = s_log_path + ".3";
-    std::string p2 = s_log_path + ".2";
-    std::string p1 = s_log_path + ".1";
-
-    std::remove(p3.c_str());
-    std::rename(p2.c_str(), p3.c_str());
-    std::rename(p1.c_str(), p2.c_str());
-    std::rename(s_log_path.c_str(), p1.c_str());
-
-    s_log_file = std::fopen(s_log_path.c_str(), "a");
+    const char* p = s_log_path.c_str();
+    std::remove((s_log_path + ".3").c_str());
+    std::rename((s_log_path + ".2").c_str(), (s_log_path + ".3").c_str());
+    std::rename((s_log_path + ".1").c_str(), (s_log_path + ".2").c_str());
+    std::rename(p, (s_log_path + ".1").c_str());
+    s_log_file = std::fopen(p, "a");
     if (!s_log_file) {
+        s_log_file = stderr;  // fallback: stderr if fopen fails after rotate
         std::fprintf(stderr, "[log] rotate: fopen failed: %s\n", std::strerror(errno));
     }
 }

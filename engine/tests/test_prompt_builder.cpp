@@ -7,6 +7,9 @@
 //                                          <SelectedText> all present
 //     EmptySelectedOmitsTag              — <SelectedText> absent when selected_text=""
 //     SecondElementIsOutputSuffix        — pair.second == "Output ONLY the final text:"
+//     NoClipboardContextTagEverEmitted   — legacy raw clipboard tag is never emitted
+//     ClipboardStyleTagEmittedWhenStylePresent — descriptor appears in <ClipboardStyle>
+//     ClipboardStyleTagOmittedWhenEmpty  — no <ClipboardStyle> tag for empty descriptor
 //
 //   resolve_style()
 //     AppNameSlackContainsCasual         — "Slack"  → style contains "Casual"
@@ -18,6 +21,8 @@
 //     EmptyObjectAllFieldsEmpty          — "{}" → all fields empty strings
 //     InvalidJsonThrows                  — malformed JSON → throws parse_error
 //     UnknownKeysIgnored                 — extra keys in object, no throw
+//     ClipboardStyleKeyIsRead            — "clipboard_style" populates field
+//     LegacyClipboardKeyIsIgnored        — legacy "clipboard" raw text is ignored
 // ---------------------------------------------------------------------------
 
 #include <gtest/gtest.h>
@@ -75,6 +80,37 @@ TEST(BuildPrompt, SecondElementIsOutputSuffix) {
     EXPECT_EQ(suffix, "Output ONLY the final text:");
 }
 
+TEST(BuildPrompt, NoClipboardContextTagEverEmitted) {
+    PromptContext ctx;
+    ctx.clipboard_style = "medium; code; neutral";
+
+    auto [xml, suffix] = build_prompt(ctx);
+
+    EXPECT_EQ(xml.find("ClipboardContext"), std::string::npos)
+        << "ClipboardContext must never appear in prompt XML";
+}
+
+TEST(BuildPrompt, ClipboardStyleTagEmittedWhenStylePresent) {
+    PromptContext ctx;
+    ctx.clipboard_style = "medium; code; neutral";
+
+    auto [xml, suffix] = build_prompt(ctx);
+
+    EXPECT_NE(
+        xml.find("<ClipboardStyle>medium; code; neutral</ClipboardStyle>"),
+        std::string::npos)
+        << "clipboard_style must be emitted as a single ClipboardStyle tag";
+}
+
+TEST(BuildPrompt, ClipboardStyleTagOmittedWhenEmpty) {
+    PromptContext ctx;
+
+    auto [xml, suffix] = build_prompt(ctx);
+
+    EXPECT_EQ(xml.find("</ClipboardStyle>"), std::string::npos)
+        << "ClipboardStyle tag must be absent when clipboard_style is empty";
+}
+
 // ===========================================================================
 // resolve_style — two-stage lookup
 // ===========================================================================
@@ -128,6 +164,23 @@ TEST(ParseContextJson, UnknownKeysInObjectIgnored) {
     EXPECT_EQ(ctx.app_name, "Terminal");
     EXPECT_TRUE(ctx.window_title.empty());
     EXPECT_TRUE(ctx.selected_text.empty());
+}
+
+TEST(ParseContextJson, ClipboardStyleKeyIsRead) {
+    PromptContext ctx = parse_context_json(R"({"clipboard_style":"short; url"})");
+
+    EXPECT_EQ(ctx.clipboard_style, "short; url")
+        << "clipboard_style JSON key must populate PromptContext::clipboard_style";
+}
+
+TEST(ParseContextJson, LegacyClipboardKeyIsIgnored) {
+    PromptContext ctx = parse_context_json(R"({"clipboard":"raw secret"})");
+
+    EXPECT_TRUE(ctx.app_name.empty());
+    EXPECT_TRUE(ctx.window_title.empty());
+    EXPECT_TRUE(ctx.selected_text.empty());
+    EXPECT_TRUE(ctx.clipboard_style.empty())
+        << "legacy clipboard key must not populate clipboard_style";
 }
 
 TEST(ParseContextJson, EmptyStringReturnsDefaultContext) {

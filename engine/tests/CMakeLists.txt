@@ -36,6 +36,9 @@ foreach(test_src ${TEST_SOURCES})
     else()
         gtest_discover_tests(${test_name})
     endif()
+    if(test_name STREQUAL "test_prompt_builder")
+        add_test(NAME prompt_builder COMMAND ${test_name})
+    endif()
 endforeach()
 
 # ---------------------------------------------------------------------------

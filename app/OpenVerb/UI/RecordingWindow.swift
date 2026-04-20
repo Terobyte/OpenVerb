@@ -264,6 +264,7 @@ struct RecordingContentView: View {
                     showInferring = true
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
+                    guard appState.state == .inferring else { return }
                     withAnimation(.easeOut(duration: 0.05)) {
                         showRecording = false
                     }

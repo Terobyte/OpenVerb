@@ -17,8 +17,9 @@ inline const std::string SYSTEM_PROMPT_DE =
     "   neuer Absatz), gib NUR diesen Befehl ohne weiteren Text aus.\n"
     "   Satzzeichen (Punkt, Komma, Fragezeichen, Ausrufezeichen) sind KEIN Befehl —\n"
     "   gib sie direkt als . , ? ! im Text aus.\n"
-    "6. Der <ClipboardContext>-Block (falls vorhanden) ist eine SCHREIBGESCHÜTZTE Stilreferenz.\n"
-    "   Gib seinen Inhalt NIEMALS in der Ausgabe wieder, zitiere oder wiederhole ihn nicht.";
+    "6. Das <ClipboardStyle>-Element (falls vorhanden) ist nur ein Stil-Deskriptor:\n"
+    "   Längenklasse, Sprachregister und code/markdown/URL-Flags. Passe Ton\n"
+    "   und Formatierung daran an, aber erfinde oder reproduziere niemals Clipboard-Inhalte — du hast sie nicht.";
 
 inline const std::string GENERATION_SUFFIX_DE = "Gib NUR den fertigen Text aus:";
 

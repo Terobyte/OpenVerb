@@ -34,7 +34,11 @@ final class AppSettings: ObservableObject {
 
     /// Shared instance used throughout the app.
     /// Use `init(defaults:)` in tests to inject a mock UserDefaults.
-    static let shared = AppSettings()
+    /// Bug 108: nonisolated(unsafe) documents that this reference may be read
+    /// from non-@MainActor contexts. MainActor.assumeIsolated satisfies the
+    /// @MainActor init constraint; safe because this is evaluated at startup
+    /// on the main thread before any concurrent access occurs.
+    nonisolated(unsafe) static let shared: AppSettings = MainActor.assumeIsolated { AppSettings() }
 
     // -----------------------------------------------------------------------
     // Dependencies
@@ -88,9 +92,21 @@ final class AppSettings: ObservableObject {
     @Published var language: String? {
         didSet {
             guard !isResetting else { return }
+            // Bug 115: validate language codes against the supported set.
+            // Unsupported codes (e.g. "zh-CN") leave the picker with no
+            // visible selection and may confuse the engine. Fall back to
+            // nil (engine default) rather than storing the raw code.
+            if let lang = language,
+               !AppSettings.supportedLanguageCodes.contains(lang) {
+                language = nil  // triggers didSet again with nil (isResetting is still false)
+                return
+            }
             defaults.set(language, forKey: Key.language)
         }
     }
+
+    /// Language codes offered in the PreferencesView picker.
+    static let supportedLanguageCodes: Set<String> = ["en", "de", "fr", "es", "it", "pt", "ru", "ja", "auto"]
 
     // -----------------------------------------------------------------------
     // Published settings — Sound & UI
@@ -205,11 +221,18 @@ final class AppSettings: ObservableObject {
         // Load persisted values (or fall back to defaults).
 
         // Hotkey
-        let storedKeyCode = defaults.integer(forKey: Key.hotkeyKeyCode)
-        if storedKeyCode != 0 { hotkeyKeyCode = UInt16(storedKeyCode) }
+        // Bug 103: defaults.integer(forKey:) returns 0 for both absent and
+        // stored-zero. Use object(forKey:) != nil to distinguish them, so that
+        // hotkeyKeyCode = 0 (the 'A' key) round-trips correctly.
+        if defaults.object(forKey: Key.hotkeyKeyCode) != nil {
+            hotkeyKeyCode = UInt16(defaults.integer(forKey: Key.hotkeyKeyCode))
+        }
 
-        let storedMods = defaults.integer(forKey: Key.hotkeyModifiers)
-        if storedMods != 0 { hotkeyModifiers = CGEventFlags(rawValue: UInt64(storedMods)) }
+        // Bug 124: same sentinel ambiguity for modifiers — use object(forKey:)
+        // so a stored value of 0 (no modifier flags) is not treated as absent.
+        if defaults.object(forKey: Key.hotkeyModifiers) != nil {
+            hotkeyModifiers = CGEventFlags(rawValue: UInt64(defaults.integer(forKey: Key.hotkeyModifiers)))
+        }
 
         // Backend
         if let raw = defaults.string(forKey: Key.backend) {
@@ -259,18 +282,18 @@ final class AppSettings: ObservableObject {
     func reset() {
         isResetting = true
         defer { isResetting = false }
-        // Set in-memory properties to defaults first (didSet writes skipped while resetting).
         hotkeyKeyCode = 0x31
         hotkeyModifiers = .maskAlternate
         backend = .gemmaAudio
-        language = Locale.current.language.languageCode?.identifier
+        // Bug 123: normalize trailing slash (same as init).
+        let p = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".openverb/models").path
+        modelDirectory = p.hasSuffix("/") ? String(p.dropLast()) : p
         soundEffectsEnabled = Default.soundEffectsEnabled
         showWaveform = Default.showWaveform
         showLiveTranscript = true
         includeClipboard = Default.includeClipboard
         maxRecordingDuration = Default.maxRecordingDuration
-        modelDirectory = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".openverb/models").path
+        language = Locale.current.language.languageCode?.identifier
 
         // Now remove persisted keys so UserDefaults is truly clean.
         defaults.removeObject(forKey: Key.hotkeyKeyCode)

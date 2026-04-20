@@ -139,7 +139,7 @@ struct CommandExecutor {
 
         // Focus sequence (same as TextInjector)
         window.orderOut(nil)
-        if !targetApp.activate(options: []) {
+        if !targetApp.activate(options: .activateIgnoringOtherApps) {
             logger.warning("CommandExecutor: activate() failed for \(targetApp.bundleIdentifier ?? targetApp.localizedName ?? "unknown")")
         }
         try? await Task.sleep(for: .milliseconds(50))

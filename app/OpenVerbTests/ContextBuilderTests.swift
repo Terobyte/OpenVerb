@@ -70,53 +70,134 @@ final class ContextBuilderTests: XCTestCase {
     // MARK: "clipboard" field
     // -----------------------------------------------------------------------
 
-    func testClipboardIncludedWhenPresent() async {
-        let pb = MockPasteboard()
-        pb.content = "Hello, World!"
-        let ctx = await ContextBuilder.build(targetApp: nil, pasteboard: pb)
-        XCTAssertEqual(ctx["clipboard"], "Hello, World!")
-    }
-
     func testClipboardOmittedWhenNil() async {
         let pb = MockPasteboard()
         pb.content = nil
         let ctx = await ContextBuilder.build(targetApp: nil, pasteboard: pb)
-        XCTAssertNil(ctx["clipboard"], "nil clipboard must omit the key entirely")
+        XCTAssertNil(ctx["clipboard_style"], "nil clipboard must omit the clipboard_style key entirely")
     }
 
     func testClipboardOmittedWhenEmpty() async {
         let pb = MockPasteboard()
         pb.content = ""
         let ctx = await ContextBuilder.build(targetApp: nil, pasteboard: pb)
-        XCTAssertNil(ctx["clipboard"], "Empty clipboard must omit the key entirely")
+        XCTAssertNil(ctx["clipboard_style"], "Empty clipboard must omit the clipboard_style key entirely")
     }
 
-    func testClipboardTruncatedTo10240Bytes() async {
-        // 15 KB of ASCII (each char = 1 byte) → must be truncated to 10 240 bytes.
-        let big = String(repeating: "a", count: 15_360)
+    func testClipboardKeyIsNeverEmittedWithRawText() async {
         let pb = MockPasteboard()
-        pb.content = big
+        pb.content = "sensitive clipboard text"
         let ctx = await ContextBuilder.build(targetApp: nil, pasteboard: pb)
-        let result = ctx["clipboard"] ?? ""
-        XCTAssertLessThanOrEqual(result.utf8.count, 10_240,
-                                 "Clipboard must not exceed 10 240 UTF-8 bytes")
-        XCTAssertEqual(result.utf8.count, 10_240,
-                       "ASCII clipboard must be truncated to exactly 10 240 bytes")
+        // Production code writes "clipboard_style" (a descriptor), never raw text.
+        // Verify the descriptor does NOT contain the raw clipboard content.
+        let descriptor = ctx["clipboard_style"] ?? ""
+        XCTAssertFalse(descriptor.contains("sensitive clipboard text"),
+                       "clipboard_style must never contain raw clipboard text")
     }
 
-    func testClipboardTruncationPreservesCharacterBoundary() async {
-        // 4-byte emoji: if the limit falls in the middle of an emoji, the
-        // result must not contain partial codepoints.
-        let emoji = String(repeating: "😀", count: 3000)  // 3000 × 4 = 12 000 bytes
+    func testClipboardStyleEmittedWhenClipboardPresent() async {
         let pb = MockPasteboard()
-        pb.content = emoji
+        pb.content = "Hello"
         let ctx = await ContextBuilder.build(targetApp: nil, pasteboard: pb)
-        let result = ctx["clipboard"] ?? ""
-        XCTAssertLessThanOrEqual(result.utf8.count, 10_240)
-        // Result must be valid UTF-8 (no partial multi-byte sequences).
-        XCTAssertNotNil(result.data(using: .utf8))
-        // Every character must be a complete emoji.
-        XCTAssertTrue(result.unicodeScalars.allSatisfy { $0.value == 0x1F600 })
+        XCTAssertNotNil(ctx["clipboard_style"],
+                        "clipboard_style must be emitted when clipboard is present and non-empty")
+    }
+
+    func testClipboardStyleOmittedWhenEmpty() async {
+        let pb = MockPasteboard()
+        pb.content = ""
+        let ctx = await ContextBuilder.build(targetApp: nil, pasteboard: pb)
+        XCTAssertNil(ctx["clipboard_style"],
+                     "clipboard_style must be omitted when clipboard is empty")
+    }
+
+    func testClipboardStyleOmittedWhenToggleOff() async {
+        let pb = MockPasteboard()
+        pb.content = "some text"
+        let ctx = await ContextBuilder.build(
+            targetApp: MockAppIdentifiable(bundleIdentifier: "com.apple.Notes", localizedName: "Notes"),
+            pasteboard: pb,
+            includeClipboard: false
+        )
+        XCTAssertNil(ctx["clipboard_style"],
+                     "clipboard_style must be omitted when includeClipboard is false")
+    }
+
+    func testClipboardStyleDescriptorForShortText() async {
+        let shortText = "Hello, World!"
+        let pb = MockPasteboard()
+        pb.content = shortText
+        let ctx = await ContextBuilder.build(targetApp: nil, pasteboard: pb)
+        guard let descriptor = ctx["clipboard_style"] else {
+            XCTFail("clipboard_style must be present for non-empty clipboard")
+            return
+        }
+        XCTAssertTrue(descriptor.contains("len:\(shortText.utf8.count)"),
+                      "Descriptor must contain correct byte length")
+        XCTAssertTrue(descriptor.contains("coding:false"),
+                      "Short text without code fence must have coding:false")
+    }
+
+    func testClipboardStyleDescriptorForLongText() async {
+        let longText = String(repeating: "a", count: 15_360)
+        let pb = MockPasteboard()
+        pb.content = longText
+        let ctx = await ContextBuilder.build(targetApp: nil, pasteboard: pb)
+        guard let descriptor = ctx["clipboard_style"] else {
+            XCTFail("clipboard_style must be present for non-empty clipboard")
+            return
+        }
+        XCTAssertTrue(descriptor.contains("len:10240"),
+                      "Descriptor byte length must reflect truncation to 10240")
+    }
+
+    func testClipboardStyleDetectsCodeFence() async {
+        let codeText = "```\nprint(\"hello\")\n```"
+        let pb = MockPasteboard()
+        pb.content = codeText
+        let ctx = await ContextBuilder.build(targetApp: nil, pasteboard: pb)
+        guard let descriptor = ctx["clipboard_style"] else {
+            XCTFail("clipboard_style must be present for non-empty clipboard")
+            return
+        }
+        XCTAssertTrue(descriptor.contains("coding:true"),
+                      "Text with code fences must set coding:true")
+    }
+
+    func testClipboardStyleDetectsMarkdown() async {
+        let markdownText = "# Title\n\n- item 1\n- item 2\n**bold**"
+        let pb = MockPasteboard()
+        pb.content = markdownText
+        let ctx = await ContextBuilder.build(targetApp: nil, pasteboard: pb)
+        guard let descriptor = ctx["clipboard_style"] else {
+            XCTFail("clipboard_style must be present for non-empty clipboard")
+            return
+        }
+        XCTAssertTrue(descriptor.contains("markdown:true"),
+                      "Markdown-like text must set markdown:true")
+    }
+
+    func testClipboardStyleDetectsURL() async {
+        let urlText = "Check out https://example.com for more"
+        let pb = MockPasteboard()
+        pb.content = urlText
+        let ctx = await ContextBuilder.build(targetApp: nil, pasteboard: pb)
+        guard let descriptor = ctx["clipboard_style"] else {
+            XCTFail("clipboard_style must be present for non-empty clipboard")
+            return
+        }
+        XCTAssertTrue(descriptor.contains("url:true"),
+                      "Text containing a URL must set url:true")
+    }
+
+    func testClipboardStyleDescriptorContainsNoRawText() async {
+        let secret = "SUPER_SECRET_CLIPBOARD_CONTENT_12345"
+        let pb = MockPasteboard()
+        pb.content = secret
+        let ctx = await ContextBuilder.build(targetApp: nil, pasteboard: pb)
+        let descriptor = ctx["clipboard_style"] ?? ""
+        XCTAssertFalse(descriptor.contains(secret),
+                       "Descriptor must never contain raw clipboard text")
     }
 
     // -----------------------------------------------------------------------
@@ -137,21 +218,6 @@ final class ContextBuilderTests: XCTestCase {
             languageOverride: "ru"
         )
         XCTAssertEqual(ctx["language"], "ru")
-    }
-
-    // -----------------------------------------------------------------------
-    // MARK: clipboard toggle
-    // -----------------------------------------------------------------------
-
-    func testClipboardOmittedWhenToggleOff() async {
-        let pb = MockPasteboard()
-        pb.content = "some clipboard text"
-        let ctx = await ContextBuilder.build(
-            targetApp: MockAppIdentifiable(bundleIdentifier: "com.apple.Notes", localizedName: "Notes"),
-            pasteboard: pb,
-            includeClipboard: false
-        )
-        XCTAssertNil(ctx["clipboard"])
     }
 
     // -----------------------------------------------------------------------

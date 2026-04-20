@@ -73,6 +73,11 @@ private:
     // Context JSON supplied by the session.start message (empty if omitted).
     std::string context_;
 
+    // Set by run() before launching worker_thread_ so the lambda only needs
+    // to capture `this` rather than holding a lvalue-reference to run()'s
+    // Engine& parameter.
+    Engine* engine_ptr_ = nullptr;
+
     enum class State {
         IDLE,
         WAITING_READY,

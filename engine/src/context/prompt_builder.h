@@ -12,7 +12,7 @@
 // to populate from the JSON wire format, or construct directly in tests.
 //
 // Wire format (--context flag):
-//   {"app":"<bundle-id>","window":"<title>","clipboard":"<text>","selected":"<text>","language":"<bcp47>"}
+//   {"app":"<bundle-id>","window":"<title>","clipboard_style":"<descriptor>","selected":"<text>","language":"<bcp47>"}
 //
 // All fields are optional.  "language" defaults to "en" (English).  Supported
 // codes: en, ru, es, fr, de, ja.  Unknown codes silently fall back to "en".
@@ -21,7 +21,7 @@
 struct PromptContext {
     std::string app_name;              // macOS bundle ID of the frontmost app (e.g. "com.apple.Mail")
     std::string window_title;          // frontmost window title
-    std::string clipboard;             // clipboard text (read-only style reference for the model)
+    std::string clipboard_style;       // clipboard-derived style descriptor, never raw clipboard text
     std::string selected_text;         // text currently selected in the active app
     std::string language     = "en";   // BCP-47 language code for prompt localisation
 };
@@ -67,7 +67,7 @@ std::string resolve_style(const std::string& app_name);
 //     "app":       "<bundle-id>",
 //     "window":    "<window-title>",
 //     "selected":  "<selected-text>",
-//     "clipboard": "<clipboard-content>",
+//     "clipboard_style": "<descriptor>",   // renamed from "clipboard"
 //     "language":  "<language-code>"
 //   }
 //

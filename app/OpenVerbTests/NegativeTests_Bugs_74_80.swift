@@ -323,9 +323,9 @@ final class NegativeTests_Bugs_74_80: XCTestCase {
             XCTFail("Cannot find drainResult(generation:) in OpenVerbApp.swift"); return
         }
 
-        // Extract a large enough window to cover the whole drainResult body (~4500 chars).
+        // Extract a large enough window to cover the whole drainResult body.
         let bodyStart = drainRange.lowerBound
-        let bodyEnd = content.index(bodyStart, offsetBy: 5000, limitedBy: content.endIndex) ?? content.endIndex
+        let bodyEnd = content.index(bodyStart, offsetBy: 8000, limitedBy: content.endIndex) ?? content.endIndex
         let drainBody = String(content[bodyStart..<bodyEnd])
 
         // Find the switch-case .error inside this window.

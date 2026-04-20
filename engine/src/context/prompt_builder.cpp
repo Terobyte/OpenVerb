@@ -157,13 +157,11 @@ std::pair<std::string, std::string> build_prompt(const PromptContext& ctx) {
     xml += "Style: ";  xml += style;                        xml += "\n";
     xml += "</ApplicationContext>\n";
 
-    // <ClipboardContext> — omit tag entirely when clipboard is empty.
-    // Marked read-only in the system prompt so the model uses it as a style
-    // reference only and does not echo or quote its contents.
-    if (!ctx.clipboard.empty()) {
-        xml += "<ClipboardContext>\n";
-        xml += xml_escape(ctx.clipboard);
-        xml += "\n</ClipboardContext>\n";
+    // <ClipboardStyle> — omit tag entirely when clipboard_style is empty.
+    if (!ctx.clipboard_style.empty()) {
+        xml += "<ClipboardStyle>";
+        xml += xml_escape(ctx.clipboard_style);
+        xml += "</ClipboardStyle>\n";
     }
 
     // <SelectedText> — omit tag entirely when selected_text is empty.
@@ -218,10 +216,8 @@ PromptContext parse_context_json(const std::string& json_str) {
     if (j.contains("window") && j.at("window").is_string())
         ctx.window_title = j.at("window").get<std::string>();
 
-    if (j.contains("clipboard") && j.at("clipboard").is_string()) {
-        ctx.clipboard = j.at("clipboard").get<std::string>();
-        if (ctx.clipboard.size() > MAX_CONTEXT_BYTES)
-            ctx.clipboard = truncate_utf8(ctx.clipboard, MAX_CONTEXT_BYTES);
+    if (j.contains("clipboard_style") && j.at("clipboard_style").is_string()) {
+        ctx.clipboard_style = j.at("clipboard_style").get<std::string>();
     }
 
     if (j.contains("selected") && j.at("selected").is_string()) {

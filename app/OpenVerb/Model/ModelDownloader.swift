@@ -12,8 +12,8 @@ import os
 // after the delegate returns, so verification must happen inside the delegate.
 //
 // Checksums are hardcoded at compile time (pinned by build-release.sh before
-// signing). The sentinel value "TBD_PIN_BEFORE_RELEASE" bypasses verification,
-// which is safe for development but must never appear in a release binary.
+// signing). The placeholder hash is all-zeros; build-release.sh replaces it
+// with the real SHA256 before signing.
 // ---------------------------------------------------------------------------
 
 private let logger = Logger(subsystem: "io.openverb.app", category: "ModelDownloader")
@@ -25,7 +25,9 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
     // -----------------------------------------------------------------------
 
     /// SHA256 of the model file. Replaced by build-release.sh before signing.
-    static let expectedSHA256 = "TBD_PIN_BEFORE_RELEASE"
+    /// This is a placeholder hash (all zeros) used during development.
+    /// build-release.sh replaces it with the real SHA256 before signing.
+    static let expectedSHA256 = "0000000000000000000000000000000000000000000000000000000000000000"
 
     static let modelURL: URL = {
         guard let url = URL(string: "https://huggingface.co/ggml-org/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf") else {
@@ -92,6 +94,18 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
 
     func download() async throws {
         guard !isDownloading else { return }
+        // Bug 91: set isDownloading = true synchronously before the first await
+        // so no concurrent caller can pass the guard in the same actor turn.
+        isDownloading = true
+        error = nil
+
+        // Bug 112: if the destination/partial file no longer exists, discard
+        // any stale resumeData before attempting to resume — URLSession will
+        // fail with a corrupt download if the partial file is missing.
+        if !FileManager.default.fileExists(atPath: destinationURL.path) {
+            resumeData = nil
+        }
+
         try FileManager.default.createDirectory(
             at: destinationURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -103,8 +117,6 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
 
         let config = URLSessionConfiguration.default
         session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
-
-        await MainActor.run { isDownloading = true; error = nil }
 
         // Use URLSession native resume data when retrying after cancel().
         if let data = resumeData {
@@ -120,7 +132,14 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
     // -----------------------------------------------------------------------
 
     func cancel() {
-        downloadTask?.cancel(byProducingResumeData: { [weak self] data in
+        // Bug 104: guard against double-cancellation. A second rapid cancel()
+        // fires on an already-cancelled task, which delivers nil resume data
+        // and overwrites the valid resume token. Nil out downloadTask first
+        // so any concurrent call is a no-op.
+        guard downloadTask != nil else { return }
+        let task = downloadTask
+        downloadTask = nil
+        task?.cancel(byProducingResumeData: { [weak self] data in
             Task { @MainActor in
                 self?.resumeData = data
                 self?.isDownloading = false
@@ -160,10 +179,9 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
     // -----------------------------------------------------------------------
 
     func verifySHA256(at url: URL) -> Bool {
-        if Self.expectedSHA256 == "TBD_PIN_BEFORE_RELEASE" {
-            logger.warning("SHA256 not yet pinned — skipping verification")
-            return true
-        }
+        // Bug 87: the sentinel placeholder has been replaced with a 64-char
+        // hex string. This guard is removed so that the real hash comparison
+        // always runs in release builds.
         guard let fh = try? FileHandle(forReadingFrom: url) else { return false }
         defer { try? fh.close() }
 
@@ -196,7 +214,14 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
         totalBytesWritten: Int64,
         totalBytesExpectedToWrite: Int64
     ) {
-        let p = Double(totalBytesWritten) / Double(max(totalBytesExpectedToWrite, 1))
+        // Bug 86: when the server omits Content-Length, URLSession passes
+        // NSURLSessionTransferSizeUnknown (-1). Using max(-1, 1) == 1 as the
+        // denominator makes progress a number in the billions for a 1.5 GB file.
+        // Guard against it and report indeterminate progress instead.
+        guard totalBytesExpectedToWrite != NSURLSessionTransferSizeUnknown else {
+            return
+        }
+        let p = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
         Task { @MainActor in
             self.progress = p
             self.onProgress?(p)

@@ -20,6 +20,7 @@ struct OnboardingView: View {
     @ObservedObject var downloader: ModelDownloader
     @State private var step: OnboardingStep = .welcome
     @State private var micGranted = false
+    @State private var micDenied = false
 
     enum OnboardingStep: Int, CaseIterable {
         case welcome, microphone, accessibility, inputMonitoring, modelDownload, done
@@ -61,20 +62,49 @@ struct OnboardingView: View {
     }
 
     private var microphoneStep: some View {
-        permissionStep(
-            icon: "mic.fill",
-            title: "Microphone",
-            description: "OpenVerb needs microphone access to record your voice.",
-            action: {
-                AVCaptureDevice.requestAccess(for: .audio) { granted in
-                    Task { @MainActor in
-                        micGranted = granted
-                        step = .accessibility
+        VStack(spacing: 16) {
+            Image(systemName: "mic.fill")
+                .font(.system(size: 36))
+                .foregroundStyle(.tint)
+            Text("Microphone").font(.title2)
+            if micDenied {
+                Text("Microphone access was denied. Enable it in System Settings › Privacy & Security › Microphone, then try again.")
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("OpenVerb needs microphone access to record your voice.")
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            HStack {
+                if micDenied {
+                    // Bug 92: provide a forward path when mic is denied.
+                    Button("Skip") { step = .accessibility }
+                    Button("Open System Settings") {
+                        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+                            NSWorkspace.shared.open(url)
+                        }
                     }
+                    .buttonStyle(.borderedProminent)
+                } else {
+                    Button("Allow Microphone") {
+                        AVCaptureDevice.requestAccess(for: .audio) { granted in
+                            Task { @MainActor in
+                                micGranted = granted
+                                if granted {
+                                    step = .accessibility
+                                } else {
+                                    // Bug 92: handle denial — show error and Settings link.
+                                    micDenied = true
+                                }
+                            }
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
                 }
-            },
-            buttonTitle: "Allow Microphone"
-        )
+            }
+        }
     }
 
     private var accessibilityStep: some View {

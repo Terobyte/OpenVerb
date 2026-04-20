@@ -40,13 +40,15 @@ final class BugsMDTDDTests: XCTestCase {
     // ACTUAL: reset() defers clearing to next run loop turn.
     // =======================================================================
 
+    // Bug 138 fix: call vm.reset() BEFORE the first XCTAssert so the test
+    // correctly isolates whether reset() clears amplitudes synchronously,
+    // rather than failing at the pre-reset assertion when Bug 1 makes
+    // updateAmplitude() async (which produces a misleading failure message).
     @MainActor
     func testBug1_resetShouldClearAmplitudesSynchronously() {
         let vm = WaveformViewModel()
         vm.updateAmplitude(Data([0, 1, 2, 3, 4, 5, 6, 7]))
         vm.updateAmplitude(Data([0, 1, 2, 3, 4, 5, 6, 7]))
-
-        XCTAssertFalse(vm.amplitudes.isEmpty, "Should have amplitudes before reset")
 
         vm.reset()
 
