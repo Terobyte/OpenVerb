@@ -54,6 +54,13 @@ final class AudioSession {
     private var sendCallback: ((Data) -> Void)?
     private var _isCapturing = false
 
+    // Monotonically-increasing session counter.  Incremented on every start().
+    // Each processTapBuffer call captures the current value; the main-queue
+    // waveform block bails out early when the counter has advanced, closing the
+    // race where a stale block queued for session N fires after session N+1 has
+    // already called start() and flipped _isCapturing back to true.
+    private var _sessionGeneration: UInt64 = 0
+
     // Residual samples from the previous tap callback that did not fill a
     // complete 4096-byte chunk.
     private var residual = Data()
@@ -145,8 +152,14 @@ final class AudioSession {
         // (_isCapturing = true set after start()) silently dropped them,
         // producing an "empty first recording" symptom that cleared on the
         // second attempt once the AU was warm.
+        //
+        // Session-generation bump: increment _sessionGeneration here (under the
+        // same lock) so that any main-queue waveform blocks still in-flight from
+        // the previous session see a stale generation token and self-cancel,
+        // closing the rapid-restart stale-waveform race (Issue 1 review feedback).
         lock.lock()
         _isCapturing = true
+        _sessionGeneration &+= 1
         lock.unlock()
 
         do {
@@ -307,17 +320,31 @@ final class AudioSession {
             offset += Constants.CHUNK_BYTES
         }
         residual = Data(combined[offset...])  // safe: stop() hasn't run (we're still under lock)
-        let sendCb = sendCallback   // capture before releasing
+        let sendCb = sendCallback           // capture before releasing
+        let sessionGen = _sessionGeneration // capture generation token under same lock
         lock.unlock()
 
         // Fire waveform callback for each guaranteed 4096-byte chunk,
         // outside the lock so it cannot block audio-thread progress.
-        // Bug 128: guard on isCapturing inside the async block so that blocks
-        // enqueued just before stop() silently no-op instead of delivering stale
-        // audio data to the waveform view after the recording session ends.
+        // Bug 128: guard on isCapturing so blocks enqueued just before stop()
+        // silently no-op rather than delivering stale audio to the waveform view.
+        // Rapid-restart fix (Issue 1): also compare sessionGen against the current
+        // _sessionGeneration.  start() increments _sessionGeneration under the lock
+        // before audioEngine.start(), so any block whose token is stale knows it
+        // was queued for an older session and must not update the waveform — even
+        // when _isCapturing has already been flipped back to true by the new session.
+        // Bug 128: guard isCapturing inside each async block so blocks that are
+        // already enqueued when stop() fires silently no-op.  isCapturing uses
+        // the lock internally so no manual lock/unlock is needed for that check.
+        // Rapid-restart guard: also compare sessionGen so that stale blocks from
+        // a previous session do not fire after a new session's isCapturing = true.
         for chunk in chunksToDisplay {
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.isCapturing else { return }
+                self.lock.lock()
+                let currentGen = self._sessionGeneration
+                self.lock.unlock()
+                guard currentGen == sessionGen else { return }
                 waveformCallback(chunk)
             }
         }

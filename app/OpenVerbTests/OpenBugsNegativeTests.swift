@@ -27,7 +27,7 @@ import AppKit
 //   Bug 38 — ShortcutCaptureView leaks NSEvent monitor on dealloc      [MED]
 //   Bug 45 — ensureRunning() spin-wait 10 s freezes MainActor          [MED]
 //   Bug 46 — drainResult() .error path skips crash recovery            [MED]
-//   Bug 1  — updateAmplitude() defers append — stale amplitudes       [LOW]
+//   Bug 1  — updateFromChunk() must be @MainActor sync                 [LOW]
 //   Bug 48 — handleWake() self-deadlock: premature .starting           [HIGH]
 //   Bug 49 — drainResult .error path missing disconnect()              [MED]
 //   Bug 50 — showConflictAlert doesn't persist selected hotkey         [MED]
@@ -1225,51 +1225,34 @@ final class OpenBugsNegativeTests: XCTestCase {
     }
 
     // =======================================================================
-    // Bug 1 — WaveformViewModel.updateAmplitude() defers append to next
-    //          run loop — stale amplitudes on immediate read
+    // Bug 1 — WaveformViewModel.updateFromChunk() must be @MainActor and
+    //          NOT wrap mutations in DispatchQueue.main.async.
     //
-    // updateAmplitude() is nonisolated and wraps amplitudes.append(rms) in
-    // DispatchQueue.main.async. Even when called from a @MainActor context,
-    // the append is deferred to the next run-loop iteration. Any code that
-    // reads amplitudes synchronously after calling updateAmplitude() sees
-    // stale (empty) state.
+    // The old updateAmplitude() was nonisolated and deferred its mutation
+    // via DispatchQueue.main.async. The fix made the VM @MainActor with
+    // direct mutation. This test verifies the new updateFromChunk entry
+    // point preserves that invariant: it must run on MainActor without
+    // deferring mutations to a later run-loop iteration.
     //
-    // EXPECTED: updateAmplitude() is @MainActor and calls
-    //           amplitudes.append(rms) directly (with pure RMS computation
-    //           extracted into a nonisolated helper).
-    // ACTUAL:   nonisolated func wraps append in DispatchQueue.main.async.
+    // EXPECTED: updateFromChunk() is a regular method on a @MainActor class
+    //           and does NOT wrap mutations in DispatchQueue.main.async.
+    // ACTUAL:   bug would manifest as DispatchQueue.main.async wrapping.
     // =======================================================================
 
-    func testBug1_updateAmplitudeDefersAppendToNextRunLoop() {
+    func testBug1_updateFromChunkIsMainActorSync() {
         guard let content = readSource("OpenVerb/UI/WaveformView.swift") else {
             XCTFail("Cannot read WaveformView.swift"); return
         }
-        guard let fnRange = content.range(of: "func updateAmplitude") else {
-            XCTFail("Cannot find updateAmplitude in WaveformView.swift"); return
+        guard let fnRange = content.range(of: "func updateFromChunk") else {
+            XCTFail("Cannot find updateFromChunk in WaveformView.swift"); return
         }
         let fnBody = substring(content, from: fnRange.lowerBound, length: 400)
-        // The buggy pattern: nonisolated + DispatchQueue.main.async for the append.
-        let isNonisolated = fnBody.contains("nonisolated")
         let wrapsInMainAsync = fnBody.contains("DispatchQueue.main.async")
-        let appendsDirectly = fnBody.contains("amplitudes.append(") &&
-            !fnBody.contains("self.amplitudes.append(")  // direct call inside async block
-        // In the buggy code, the append IS inside DispatchQueue.main.async —
-        // so a direct (non-deferred) append would be the fix.
-        // Check if the function is @MainActor (fix) instead of nonisolated (bug).
-        let isAtMainActor = fnRange.lowerBound > content.startIndex &&
-            content[content.index(before: fnRange.lowerBound)...].prefix(30).contains("@MainActor") ||
-            content[content.index(before: fnRange.lowerBound)...].prefix(100).contains("@MainActor")
-
-        // The bug exists when: nonisolated + DispatchQueue.main.async wrapping the append.
-        let hasBug = isNonisolated && wrapsInMainAsync
-        XCTAssertFalse(hasBug,
-            "Bug 1 CONFIRMED: updateAmplitude() is `nonisolated` and wraps " +
-            "amplitudes.append(rms) in DispatchQueue.main.async. Any synchronous " +
-            "read of amplitudes after calling updateAmplitude() sees stale (empty) " +
-            "state because the append is deferred to the next run-loop iteration. " +
-            "Fix: annotate updateAmplitude() with @MainActor and call " +
-            "amplitudes.append(rms) directly. Extract the pure RMS computation " +
-            "into a nonisolated helper and call it before the actor hop.")
+        XCTAssertFalse(wrapsInMainAsync,
+            "Bug 1 CONFIRMED: updateFromChunk() wraps mutations in " +
+            "DispatchQueue.main.async. The method is on a @MainActor class " +
+            "and must call bins = ... directly without deferring. " +
+            "Fix: remove DispatchQueue.main.async — call bins assignment directly.")
     }
 
     // =======================================================================

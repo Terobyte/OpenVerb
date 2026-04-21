@@ -216,4 +216,93 @@ final class NegativeTests_Bugs_127_128: XCTestCase {
             "silently no-op after stop() has cleared the capturing flag."
         )
     }
+
+    // =======================================================================
+    // Bug 128 (rapid-restart variant) — Stale waveform bins from session N
+    //   displayed after session N+1 starts
+    //
+    // When stop() is called and start() is called immediately (rapid-restart),
+    // main-queue async blocks still in-flight from session N can fire AFTER
+    // isCapturing is already true again for session N+1.  A simple isCapturing
+    // guard in the async block is insufficient because session N+1 has already
+    // re-enabled it.
+    //
+    // EXPECTED: AudioSession maintains a monotonically-increasing session counter
+    //   (_sessionGeneration or similar).  start() increments the counter; each
+    //   waveform async block captures the generation token at dispatch time and
+    //   compares it inside the closure — stale blocks from session N bail out
+    //   even if isCapturing is true again.
+    // ACTUAL (before fix): only isCapturing is checked; stale bins from the
+    //   ended session can reach the waveform view after the new session starts.
+    // =======================================================================
+
+    func testBug128_RapidRestartStaleWaveformBinsDroppedViaGenerationCounter() {
+        guard let src = readSource("OpenVerb/Input/AudioSession.swift") else {
+            XCTFail("Bug 128 (rapid-restart) CONFIRMED: Cannot read AudioSession.swift.")
+            return
+        }
+
+        // 1. A session-generation counter property must exist.
+        let hasGenerationProperty =
+            src.contains("_sessionGeneration") || src.contains("sessionGeneration")
+        XCTAssertTrue(
+            hasGenerationProperty,
+            "Bug 128 (rapid-restart) CONFIRMED: no session-generation counter found in " +
+            "AudioSession.swift. Add a property such as `private var _sessionGeneration: UInt64 = 0` " +
+            "to distinguish successive recording sessions."
+        )
+        guard hasGenerationProperty else { return }
+
+        // 2. start() must increment the counter so old in-flight blocks become stale.
+        //    Look for an increment expression — wrapping add (&+=) or plain += — within
+        //    a reasonable window around the start() method body.
+        guard let startRange = src.range(of: "func start(") else {
+            XCTFail("Bug 128 (rapid-restart) CONFIRMED: func start( not found in AudioSession.swift.")
+            return
+        }
+        let afterStart = String(src[startRange.lowerBound...])
+        // Capture up to 3000 chars to cover the whole start() body.
+        let startBodyEnd = afterStart.index(
+            afterStart.startIndex, offsetBy: 5000, limitedBy: afterStart.endIndex
+        ) ?? afterStart.endIndex
+        let startBody = String(afterStart[afterStart.startIndex ..< startBodyEnd])
+
+        let startIncrementsGeneration =
+            startBody.contains("_sessionGeneration &+= 1") ||
+            startBody.contains("_sessionGeneration += 1") ||
+            startBody.contains("sessionGeneration &+= 1") ||
+            startBody.contains("sessionGeneration += 1")
+        XCTAssertTrue(
+            startIncrementsGeneration,
+            "Bug 128 (rapid-restart) CONFIRMED: start() does not increment the session-generation " +
+            "counter. Without incrementing the counter, async blocks from the old session cannot " +
+            "distinguish themselves from blocks enqueued by the new session."
+        )
+
+        // 3. The main-queue waveform async block must capture the generation token and
+        //    compare it before calling waveformCallback.  We look for a comparison of the
+        //    captured token inside the closure body.
+        guard let asyncRange = src.range(of: "DispatchQueue.main.async") else {
+            XCTFail("Bug 128 (rapid-restart) CONFIRMED: DispatchQueue.main.async not found in AudioSession.swift.")
+            return
+        }
+        let afterAsync = String(src[asyncRange.lowerBound...])
+        let closureEnd = afterAsync.index(
+            afterAsync.startIndex, offsetBy: 400, limitedBy: afterAsync.endIndex
+        ) ?? afterAsync.endIndex
+        let closureWindow = String(afterAsync[afterAsync.startIndex ..< closureEnd])
+
+        let guardsCapturedGen =
+            closureWindow.contains("sessionGen") ||
+            closureWindow.contains("generation") ||
+            closureWindow.contains("Generation")
+        XCTAssertTrue(
+            guardsCapturedGen,
+            "Bug 128 (rapid-restart) CONFIRMED: the waveform async closure in processTapBuffer " +
+            "does not compare the captured session generation. Without this comparison, stale " +
+            "waveform blocks from a stopped session fire as soon as the next session's " +
+            "isCapturing becomes true, causing stale bins to appear at the start of new recordings. " +
+            "Fix: capture the generation token before the loop and compare it inside the closure."
+        )
+    }
 }

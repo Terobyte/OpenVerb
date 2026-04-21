@@ -40,20 +40,31 @@ final class BugsMDTDDTests: XCTestCase {
     // ACTUAL: reset() defers clearing to next run loop turn.
     // =======================================================================
 
-    // Bug 138 fix: call vm.reset() BEFORE the first XCTAssert so the test
-    // correctly isolates whether reset() clears amplitudes synchronously,
-    // rather than failing at the pre-reset assertion when Bug 1 makes
-    // updateAmplitude() async (which produces a misleading failure message).
     @MainActor
     func testBug1_resetShouldClearAmplitudesSynchronously() {
         let vm = WaveformViewModel()
-        vm.updateAmplitude(Data([0, 1, 2, 3, 4, 5, 6, 7]))
-        vm.updateAmplitude(Data([0, 1, 2, 3, 4, 5, 6, 7]))
+        let sineData = Self.makeSine(frequency: 1000, amplitude: 0.8)
+        vm.updateFromChunk(sineData)
+        vm.updateFromChunk(sineData)
 
+        let preResetSum = vm.bins.reduce(0, +)
         vm.reset()
 
-        XCTAssertTrue(vm.amplitudes.isEmpty,
-                      "reset() should clear amplitudes synchronously, but bug causes async delay")
+        XCTAssertGreaterThan(preResetSum, 0.001,
+                             "Pre-reset: bins must be non-zero after feeding non-silent PCM")
+        XCTAssertEqual(vm.bins.reduce(0, +), 0, accuracy: 0.001,
+                       "reset() should clear bins synchronously, but bug causes async delay")
+    }
+
+    private static func makeSine(frequency: Float, amplitude: Float) -> Data {
+        let sampleRate: Float = 16_000
+        let sampleCount = Constants.CHUNK_BYTES / MemoryLayout<Int16>.size
+        var samples = [Int16](repeating: 0, count: sampleCount)
+        for i in 0..<sampleCount {
+            let value = amplitude * sin(2 * .pi * frequency * Float(i) / sampleRate)
+            samples[i] = Int16(value * Float(Int16.max))
+        }
+        return samples.withUnsafeBufferPointer { Data(buffer: $0) }
     }
 
     // =======================================================================
