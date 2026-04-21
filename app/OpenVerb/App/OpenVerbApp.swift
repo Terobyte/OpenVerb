@@ -435,6 +435,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // -----------------------------------------------------------------------
 
     private func startRecording() {
+        // Defense-in-depth: clear any stale isDraining flag from a prior session.
+        // The Bug 81 re-entrancy guard depends on drainResult's defer to reset
+        // isDraining, but several paths (handleCancel, onError mid-inferring,
+        // engine timeouts) can leave isDraining true if the drain task is still
+        // suspended at await when state moves on. Without this reset, the next
+        // stopRecording call would silently no-op and the user would see
+        // "recording starts but won't stop" — no UI transition at all.
+        // Bump drainGeneration too so any in-flight stale drain returns without
+        // touching state when its receiveMessage finally resolves.
+        if isDraining {
+            logger.warning("startRecording: isDraining was true (stale) — resetting")
+        }
+        isDraining = false
+        drainGeneration &+= 1
+
         // Bug 54: capture clipboard at ⌥Space press time so TextInjector's
         // 300 ms paste window never contaminates the session context.
         let clipboardSnapshot = appSettings.includeClipboard
@@ -469,7 +484,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // ---- Step 31: Start audio session (pre-buffering begins now) ----
         do {
             try audioSession.start(waveformCallback: { [weak self] chunk in
-                self?.waveformVM.updateAmplitude(chunk)
+                self?.waveformVM.updateFromChunk(chunk)
             })
         } catch AudioSessionError.permissionDenied {
             logger.error("AudioSession: microphone permission denied")
@@ -567,6 +582,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // -----------------------------------------------------------------------
 
     private func abortAndRestart() {
+        isDraining = false  // allow the new session to be stopped
         // Bug 22: leaving the active recording — kill the duration timer.
         maxDurationTimer?.cancel()
         maxDurationTimer = nil
@@ -608,7 +624,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             do {
                 try audioSession.start(waveformCallback: { [weak self] chunk in
-                    self?.waveformVM.updateAmplitude(chunk)
+                    self?.waveformVM.updateFromChunk(chunk)
                 })
             } catch {
                 logger.error("AudioSession restart failed after abort: \(error)")
@@ -823,6 +839,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // -----------------------------------------------------------------------
 
     private func drainResult(generation: UInt64) async {
+        defer {
+            // Reset re-entrancy guard only for the active drain.
+            // Stale drains (generation mismatch) must not reset it — the
+            // current drain is still in progress and owns the flag.
+            if generation == drainGeneration { isDraining = false }
+        }
         // Bug 93: track whether a polishedResult arrived without a subsequent
         // result message. After polishedResult, use a much shorter timeout so
         // the session does not block for the full 3-minute window if the engine

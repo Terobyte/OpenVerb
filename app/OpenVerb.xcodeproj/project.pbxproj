@@ -40,6 +40,7 @@
 		B3A1E2F3D4C5B6A7F0000001 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7F0000101 /* AVFoundation.framework */; };
 		B3A1E2F3D4C5B6A7F0000002 /* Carbon.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7F0000102 /* Carbon.framework */; };
 		B3A1E2F3D4C5B6A7F0000003 /* ApplicationServices.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7F0000103 /* ApplicationServices.framework */; };
+		B3A1E2F3D4C5B6A7E8F9C027 /* FFTProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9A083 /* FFTProcessor.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -86,6 +87,7 @@
 		B3A1E2F3D4C5B6A7E8F9A05D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9A05E /* OpenVerb.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = OpenVerb.entitlements; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9A05F /* TextInjector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextInjector.swift; sourceTree = "<group>"; };
+		B3A1E2F3D4C5B6A7E8F9A083 /* FFTProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FFTProcessor.swift; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9A068 /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettings.swift; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9A069 /* PreferencesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreferencesView.swift; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9A06A /* AccessibilityReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityReader.swift; sourceTree = "<group>"; };
@@ -211,6 +213,7 @@
 				B3A1E2F3D4C5B6A7E8F9A056 /* AudioSession.swift */,
 				B3A1E2F3D4C5B6A7E8F9A057 /* HotkeyManager.swift */,
 				B3A1E2F3D4C5B6A7E8F9A06B /* ShortcutRecorder.swift */,
+				B3A1E2F3D4C5B6A7E8F9A083 /* FFTProcessor.swift */,
 			);
 			path = Input;
 			sourceTree = "<group>";
@@ -408,6 +411,7 @@
 				B3A1E2F3D4C5B6A7E8F9C023 /* ShortcutRecorder.swift in Sources */,
 				B3A1E2F3D4C5B6A7E8F9C024 /* ModelDownloader.swift in Sources */,
 				B3A1E2F3D4C5B6A7E8F9C025 /* OnboardingView.swift in Sources */,
+				B3A1E2F3D4C5B6A7E8F9C027 /* FFTProcessor.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
