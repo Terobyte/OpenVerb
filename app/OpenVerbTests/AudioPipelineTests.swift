@@ -11,6 +11,9 @@ import XCTest
 //   testCancelFromCapturingGoesToIdle — cancel(handle) → .idle
 //   testDoubleBeginIsNoOp           — second beginRecording while capturing is ignored
 //   testCancelStaleHandleIsNoOp     — cancel with wrong handle does not change state
+//
+// Phase 14 integration test (steps 78-79):
+//   testLivePartialTextUpdatesFromPartialResult — onPartialResult → livePartialText wiring
 // ---------------------------------------------------------------------------
 
 @MainActor
@@ -129,5 +132,40 @@ final class AudioPipelineTests: XCTestCase {
         XCTAssertEqual(pipeline.state, .capturing,
             "Bug 81: double endRecording must not corrupt state")
         pipeline.cancel(handle: handle)
+    }
+
+    // -----------------------------------------------------------------------
+    // MARK: Phase 14 — live subtitle wiring integration test
+    // -----------------------------------------------------------------------
+
+    func testLivePartialTextUpdatesFromPartialResult() async {
+        // Verify the onPartialResult → AppState.livePartialText wiring works
+        // correctly on @MainActor. This test replicates the closure assignment
+        // in OpenVerbApp.swift and checks the actor-hopped update.
+        let appState = AppState()
+
+        // Replicate the OpenVerbApp wiring: fire a Task { @MainActor } to update livePartialText.
+        let client = EngineClient()
+        client.onPartialResult = { text, _, _ in
+            Task { @MainActor in
+                guard appState.state == .inferring || appState.state == .recording else { return }
+                appState.livePartialText += text
+            }
+        }
+
+        // Simulate .recording state so the guard allows updates.
+        appState.transition(to: .preparing)
+        appState.transition(to: .recording)
+
+        // Fire a simulated partial result.
+        client.onPartialResult?("hello ", 1, false)
+        client.onPartialResult?("world", 2, true)
+
+        // Yield to allow the @MainActor Task hops to complete.
+        await Task.yield()
+        await Task.yield()
+
+        XCTAssertEqual(appState.livePartialText, "hello world",
+            "onPartialResult must update livePartialText via @MainActor hop during .recording")
     }
 }

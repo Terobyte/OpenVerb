@@ -1252,7 +1252,7 @@ final class OpenBugsNegativeTests: XCTestCase {
         guard let fnRange = content.range(of: "func connectAndRecord") else {
             XCTFail("Cannot find connectAndRecord in OpenVerbApp.swift"); return
         }
-        let fnBody = substring(content, from: fnRange.lowerBound, length: 6000)
+        let fnBody = substring(content, from: fnRange.lowerBound, length: 10000)
 
         // Locate the outer catch block: the one that contains audioSession.stop()
         // immediately after } catch { — uniquely identifies the top-level catch,

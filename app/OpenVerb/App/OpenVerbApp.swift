@@ -98,6 +98,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// later session. MainActor-isolated — no lock needed.
     private var maxDurationTimer: Task<Void, Never>?
 
+    /// Live partial reader Task: polls receiveMessage during .recording and
+    /// forwards .partialResult messages to onPartialResult so the SubtitleView
+    /// can show live text. Cancelled before sendEndOfAudio in every stop path.
+    private var livePartialTask: Task<Void, Never>?
+
     /// 1-second countdown tick timer, active only while in .inferring with a live ETA.
     /// Fires processingVM.tick() each second to decrement the countdown label.
     private var etaTickTimer: Timer?
@@ -488,6 +493,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // not fire during INFERRING or carry into the next session.
         maxDurationTimer?.cancel()
         maxDurationTimer = nil
+        livePartialTask?.cancel()
+        livePartialTask = nil
         audioSession.stop()
         engineManager.engineClient.sendEndOfAudio()
         appState.transition(to: .inferring)
@@ -545,6 +552,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Bug 22: leaving the active recording — kill the duration timer.
         maxDurationTimer?.cancel()
         maxDurationTimer = nil
+        livePartialTask?.cancel()
+        livePartialTask = nil
         etaTickTimer?.invalidate()
         etaTickTimer = nil
         processingVM.resetEta()
@@ -615,6 +624,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Bug 22: cancel the auto-stop timer if Escape interrupts recording.
         maxDurationTimer?.cancel()
         maxDurationTimer = nil
+        livePartialTask?.cancel()
+        livePartialTask = nil
         audioSession.stop()
         engineManager.disconnect()
         recordingWindow.hide()
@@ -735,6 +746,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             appState.transition(to: .recording)
             logger.info("Engine ready; streamed \(buffered.count) pre-buffered chunk(s)")
+
+            // livePartialReader — polls receiveMessage during .recording so
+            // partial_result messages from the engine reach onPartialResult live,
+            // enabling the SubtitleView to update while the user speaks.
+            livePartialTask?.cancel()
+            livePartialTask = Task { [weak self] in
+                guard let self else { return }
+                while !Task.isCancelled {
+                    guard await MainActor.run(body: { self.appState.state == .recording }) else { break }
+                    guard !Task.isCancelled else { break }
+                    do {
+                        let msg = try await engineManager.engineClient.receiveMessage(timeoutMs: 100)
+                        guard !Task.isCancelled else { break }
+                        if case .partialResult(let text, let chunkId, let isFinal) = msg {
+                            engineManager.engineClient.onPartialResult?(text, chunkId, isFinal)
+                        }
+                    } catch EngineClientError.timeout {
+                        continue
+                    } catch {
+                        break
+                    }
+                }
+            }
 
             // Bug 22: enforce AppSettings.maxRecordingDuration. The user-facing
             // "Max Recording Duration" preference was previously persisted but
