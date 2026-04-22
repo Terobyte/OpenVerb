@@ -172,6 +172,16 @@ final class EngineClient {
         if flags < 0 { flags = 0 }
         _ = fcntl(sock, F_SETFL, flags | O_NONBLOCK)
 
+        // macOS default SO_SNDBUF on AF_UNIX is ~2 KiB, below the size of a single
+        // 128 ms audio frame (4 KiB header+PCM). That guarantees a partial write
+        // on the first frame → writeAudioFrameOrDrop would hit EAGAIN mid-frame
+        // and tear down the stream. Request 128 KiB so a whole second of audio
+        // fits before backpressure kicks in; the kernel silently caps at whatever
+        // sysctl kern.ipc.maxsockbuf allows, so a smaller cap just means we get
+        // the best available.
+        var sndbuf: Int32 = 128 * 1024
+        _ = setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &sndbuf, socklen_t(MemoryLayout<Int32>.size))
+
         fd = sock
         recvLock.lock()
         recvBuffer = RecvAccumulator()
@@ -230,10 +240,21 @@ final class EngineClient {
     // writeAudioFrameOrDrop — writes a complete audio frame (4-byte header + payload)
     // as a single logical unit.  Returns false if EAGAIN fires before any bytes are
     // written (safe to drop the whole frame — brief audio glitch is acceptable).
-    // Throws connectionClosed if EAGAIN fires after a partial write, because the
-    // stream is already corrupted at that point.
+    // If EAGAIN fires mid-frame, polls POLLOUT (bounded total wait) and finishes
+    // the write — a partial write on a non-blocking socket is a normal
+    // backpressure condition, not stream corruption, since we know exactly how
+    // many bytes have been accepted by the kernel and can resume from that
+    // offset. Only gives up and throws if the peer stays unwritable beyond the
+    // poll budget (engine wedged / disconnected).
     @discardableResult
     private func writeAudioFrameOrDrop(header: [UInt8], payload: Data) throws -> Bool {
+        // Total budget for poll()ing across partial writes within one frame.
+        // 400 ms is ~3 × frame-duration at 128 ms — generous enough to ride out
+        // brief engine stalls (GC, disk), tight enough to surface a wedged engine
+        // before the AudioPipeline accumulates a long queue of stale audio.
+        let totalPollBudgetMs: Int32 = 400
+        var pollBudgetRemaining: Int32 = totalPollBudgetMs
+
         var combined = Data(header)
         combined.append(payload)
         return try combined.withUnsafeBytes { raw -> Bool in
@@ -250,9 +271,22 @@ final class EngineClient {
                             logger.warning("Audio frame dropped: socket send buffer full (backpressure)")
                             return false
                         }
-                        // Partial bytes already on the wire — stream corrupted.
-                        logger.error("Audio frame: partial write (\(offset) B) before EAGAIN — closing")
-                        throw EngineClientError.connectionClosed
+                        // Partial write: poll for writable, then retry from offset.
+                        if pollBudgetRemaining <= 0 {
+                            logger.error("Audio frame: partial write (\(offset) B) stuck beyond \(totalPollBudgetMs) ms poll budget — treating engine as unresponsive")
+                            throw EngineClientError.connectionClosed
+                        }
+                        var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+                        let waitMs = min(pollBudgetRemaining, 50)
+                        let pr = poll(&pfd, 1, waitMs)
+                        pollBudgetRemaining -= waitMs
+                        if pr < 0 {
+                            if errno == EINTR { continue }
+                            throw EngineClientError.writeFailed(errno)
+                        }
+                        // pr == 0 (poll timeout) or POLLOUT set: loop and retry write.
+                        // If POLLHUP/POLLERR set, the next write() will surface the error.
+                        continue
                     }
                     let e = errno
                     if e == EPIPE || e == ECONNRESET { throw EngineClientError.connectionClosed }
