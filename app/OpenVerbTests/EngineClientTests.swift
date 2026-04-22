@@ -10,11 +10,6 @@ final class EngineClientTests: XCTestCase {
         XCTAssertFalse(client.isConnected)
     }
 
-    func testCheckPhase2ErrorInitiallyNil() {
-        let client = EngineClient()
-        XCTAssertNil(client.checkPhase2Error())
-    }
-
     func testCallbacksInitiallyNil() {
         let client = EngineClient()
         XCTAssertNil(client.onError)
@@ -56,13 +51,6 @@ final class EngineClientTests: XCTestCase {
     func testSyncOnIOQueueDoesNotCrash() {
         let client = EngineClient()
         client.syncOnIOQueue()
-    }
-
-    func testStopPhase2MonitorWhenNotStartedIsNoOp() {
-        let client = EngineClient()
-        client.stopPhase2Monitor()
-        // still not connected, no phase2 error
-        XCTAssertNil(client.checkPhase2Error())
     }
 
     // MARK: EngineClientError descriptions
@@ -172,13 +160,4 @@ final class EngineClientTests: XCTestCase {
         wait(for: [exp], timeout: 3.0)
     }
 
-    func testBug174_stopPhase2MonitorIsSafeWhenNotStarted() {
-        // drainResult → phase2 handoff may be aborted before Phase 2 monitor
-        // ever starts. stopPhase2Monitor must tolerate that without touching
-        // the lock in a bad state.
-        let client = EngineClient()
-        client.stopPhase2Monitor()
-        client.stopPhase2Monitor()
-        XCTAssertNil(client.checkPhase2Error())
-    }
 }

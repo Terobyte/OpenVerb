@@ -473,72 +473,6 @@ final class OpenBugsNegativeTests: XCTestCase {
     }
 
     // =======================================================================
-    // Bug 17 — Phase 2 monitor fires onError after stopPhase2Monitor()
-    //
-    // stopPhase2Monitor() sets phase2MonitorStopped=true but does not join
-    // the monitor Task. If the monitor is inside recvJSONSync when the
-    // subsequent disconnect() closes fd, recvJSONSync throws; the monitor
-    // catches and — before this fix — calls onError?(errMsg) directly. The
-    // .error case in the switch has no re-check at all.  On the receive
-    // side, the AppDelegate onError handler runs teardown unconditionally,
-    // clobbering .preparing / .idle from abort+restart or cancel.
-    //
-    // EXPECTED: every onError call site goes through a helper that re-reads
-    //           phase2MonitorStopped under phase2Lock (send-side), AND the
-    //           AppDelegate onError closure guards on appState.state being
-    //           .recording or .inferring before running teardown (receive-side).
-    // ACTUAL:   at least one call site invokes onError?(...) directly without
-    //           re-checking, and/or the AppDelegate handler has no state guard.
-    // =======================================================================
-
-    func testBug17_phase2OnErrorRaceUnfixed() {
-        guard let clientSrc = readSource("OpenVerb/Engine/EngineClient.swift") else {
-            XCTFail("Cannot read EngineClient.swift"); return
-        }
-        guard let appSrc = readSource("OpenVerb/App/OpenVerbApp.swift") else {
-            XCTFail("Cannot read OpenVerbApp.swift"); return
-        }
-
-        // Send-side: helper exists and is used in runPhase2Monitor.
-        let hasHelper = clientSrc.contains("callOnErrorIfLive")
-        // Ensure no bare `onError?(` calls remain inside runPhase2Monitor.
-        let noBareOnErrorInMonitor: Bool = {
-            guard let r = clientSrc.range(of: "private func runPhase2Monitor") else { return false }
-            // scan from runPhase2Monitor to the next "func " outside it.
-            let after = clientSrc[r.lowerBound...]
-            guard let endRange = after.range(of: "\n    func ")
-                ?? after.range(of: "\n    private func ", range: after.index(after.startIndex, offsetBy: 10)..<after.endIndex)
-            else { return !after.contains("onError?(") }
-            let body = after[after.startIndex..<endRange.lowerBound]
-            return !body.contains("onError?(")
-        }()
-
-        // Receive-side: AppDelegate onError handler guards on appState.state.
-        let onErrorHandlerGuarded: Bool = {
-            guard let r = appSrc.range(of: "engineManager.engineClient.onError = ") else {
-                return false
-            }
-            let block = substring(appSrc, from: r.lowerBound, length: 1200)
-            // Must reference appState.state before any teardown call.
-            guard let stateRange = block.range(of: "appState.state"),
-                  let teardownRange = block.range(of: "audioSession.stop()") else {
-                return false
-            }
-            return stateRange.lowerBound < teardownRange.lowerBound
-        }()
-
-        XCTAssertTrue(
-            hasHelper && noBareOnErrorInMonitor && onErrorHandlerGuarded,
-            "Bug 17 CONFIRMED: Phase 2 monitor onError race is not fully closed. " +
-            "hasHelper=\(hasHelper), noBareOnErrorInMonitor=\(noBareOnErrorInMonitor), " +
-            "onErrorHandlerGuarded=\(onErrorHandlerGuarded). " +
-            "Fix: add a `callOnErrorIfLive(_:)` helper that re-reads phase2MonitorStopped " +
-            "under phase2Lock and only calls onError if not stopped; replace all onError?(...) " +
-            "call sites in runPhase2Monitor with it. AND in OpenVerbApp.swift, gate the " +
-            "onError closure on `appState.state == .recording || .inferring` before running teardown.")
-    }
-
-    // =======================================================================
     // Bug 25 (extended) — restartWithBackend must also refuse programmatic calls
     //
     // The UI-level picker gate (testBug25_backendPickerNotGatedOnAppState)
@@ -904,51 +838,6 @@ final class OpenBugsNegativeTests: XCTestCase {
             "Fix: add a public `syncOnIOQueue()` to EngineClient that executes " +
             "`ioQueue.sync {}` as a fence, or expose `sendBufferedFrames(_:)` that writes " +
             "frames synchronously. Call it after the for-loop and before startPhase2Monitor().")
-    }
-
-    // =======================================================================
-    // Bug 33 — Data race on wakeWrite/wakeRead between MainActor and ioQueue
-    //                                                                    [HIGH]
-    //
-    // stopPhase2Monitor() reads self.wakeWrite on the calling thread (MainActor
-    // in practice) and calls Darwin.write(wakeWrite, ...).  disconnect() writes
-    // self.wakeWrite = -1 inside ioQueue.async.  No lock or queue serialises
-    // these two accesses — undefined behaviour under the Swift memory model.
-    // Practical worst case: Darwin.write() is called with a closed fd (EBADF,
-    // harmless) or the wakeup signal is silently dropped, leaving the Phase 2
-    // monitor blocked in poll() for up to 100 ms after stop was requested.
-    //
-    // EXPECTED: wakeWrite access in stopPhase2Monitor is protected via
-    //           ioQueue.sync or a dedicated wakeLock so it cannot race with
-    //           disconnect's ioQueue.async write.
-    // ACTUAL:   bare `if wakeWrite >= 0 { Darwin.write(wakeWrite, ...) }` on
-    //           MainActor, concurrent with disconnect's ioQueue.async write.
-    // =======================================================================
-
-    func testBug33_wakeWriteRaceInStopPhase2Monitor() {
-        guard let content = readSource("OpenVerb/Engine/EngineClient.swift") else {
-            XCTFail("Cannot read EngineClient.swift"); return
-        }
-        guard let fnRange = content.range(of: "func stopPhase2Monitor()") else {
-            XCTFail("Cannot find stopPhase2Monitor() in EngineClient.swift"); return
-        }
-        let body = substring(content, from: fnRange.lowerBound, length: 600)
-
-        // The fix must serialise the wakeWrite read-check-write in stopPhase2Monitor
-        // with the wakeWrite = -1 assignment in disconnect().
-        let hasProtection = body.contains("ioQueue.sync")
-            || body.contains("wakeLock")
-            || body.contains("ioQueue.async")  // wakeup moved entirely to ioQueue
-
-        XCTAssertTrue(hasProtection,
-            "Bug 33 CONFIRMED: stopPhase2Monitor() accesses wakeWrite directly without " +
-            "synchronisation: `if wakeWrite >= 0 { Darwin.write(wakeWrite, &b, 1) }`. " +
-            "disconnect() writes `self.wakeWrite = -1` inside ioQueue.async. These are " +
-            "concurrent, unsynchronised accesses to a non-atomic stored property — " +
-            "undefined behaviour under the Swift memory model. " +
-            "Fix: wrap the wakeWrite check-and-write in stopPhase2Monitor inside " +
-            "`ioQueue.sync {}` so it is serialised with disconnect's ioQueue.async write, " +
-            "or add `private let wakeLock = NSLock()` and acquire it in both sites.")
     }
 
     // =======================================================================
@@ -1498,24 +1387,12 @@ final class OpenBugsNegativeTests: XCTestCase {
     // =======================================================================
 
     func testBug55_livePartialTextDeadDuringRecording() {
-        guard let clientSrc = readSource("OpenVerb/Engine/EngineClient.swift") else {
-            XCTFail("Cannot read EngineClient.swift"); return
-        }
         guard let appSrc = readSource("OpenVerb/App/OpenVerbApp.swift") else {
             XCTFail("Cannot read OpenVerbApp.swift"); return
         }
 
-        // Fix path A: runPhase2Monitor's default case calls onPartialResult
-        // directly for partial_result messages before (or instead of) prepend.
-        let monitorForwardsPartials: Bool = {
-            guard let r = clientSrc.range(of: "private func runPhase2Monitor") else { return false }
-            let body = substring(clientSrc, from: r.lowerBound, length: 1500)
-            guard let defaultR = body.range(of: "default:") else { return false }
-            let defaultBody = substring(body, from: defaultR.lowerBound, length: 400)
-            return defaultBody.contains("onPartialResult")
-        }()
-
-        // Fix path B: connectAndRecord has a recording-phase partial reader task.
+        // Fix: connectAndRecord has a recording-phase partial reader task or
+        // AudioPipeline.streamLive calls onPartialResult live during capture.
         let connectAndRecordHasLiveReader: Bool = {
             guard let r = appSrc.range(of: "func connectAndRecord") else { return false }
             let body = substring(appSrc, from: r.lowerBound, length: 6000)
@@ -1525,83 +1402,11 @@ final class OpenBugsNegativeTests: XCTestCase {
                     body.contains("onPartialResult"))
         }()
 
-        XCTAssertTrue(monitorForwardsPartials || connectAndRecordHasLiveReader,
-            "Bug 55 CONFIRMED: livePartialText is only updated inside drainResult() " +
-            "(invoked during .inferring, after ⌥Space release). During .recording, " +
-            "partial_result messages from the engine reach the phase2Monitor but are " +
-            "only prepended to recvBuffer — onPartialResult is never called live. " +
-            "monitorForwardsPartials=\(monitorForwardsPartials), " +
+        XCTAssertTrue(connectAndRecordHasLiveReader,
+            "Bug 55 CONFIRMED: livePartialText is not updated live during .recording. " +
             "connectAndRecordHasLiveReader=\(connectAndRecordHasLiveReader). " +
-            "showLiveTranscript=true has no visible effect during recording; text " +
-            "appears only in a burst after the user stops speaking. " +
-            "Fix (A): in runPhase2Monitor's default case, decode partial_result " +
-            "and call onPartialResult?() directly before or instead of prepend(). " +
-            "Fix (B): add a livePartialReader Task in connectAndRecord() that polls " +
+            "Fix: add a livePartialReader Task in connectAndRecord() that polls " +
             "receiveMessage with a short timeout during .recording and fires onPartialResult.")
-    }
-
-    // =======================================================================
-    // Bug 56 — phase2Monitor prepend-spin-loop: non-error Phase 2
-    //          messages are infinitely re-read                        [HIGH]
-    //
-    // When any non-error JSON (e.g. partial_result) arrives during Phase 2,
-    // runPhase2Monitor's `default` case calls recvBuffer.prepend(restored)
-    // then falls through to the shared stopped-check at the loop bottom.
-    // The next iteration calls recvJSONSync, which checks the in-memory buffer
-    // BEFORE polling the socket — it finds the just-prepended message
-    // immediately and re-classifies it as non-error → prepend again, ad
-    // infinitum. The spin-loop pegs ~100 % of one CPU core and starves
-    // drainResult, producing ~50 % empty-result sessions.
-    //
-    // EXPECTED: the `default` case adds `continue` after recvLock.unlock(),
-    //           jumping directly to the outer while condition, which executes
-    //           ioQueue.sync { fd >= 0 } then poll(fd, 100 ms). This gives
-    //           drainResult an uncontested 100 ms window to extract the
-    //           buffered message.
-    // ACTUAL:   no `continue`; control falls through, recvJSONSync is called
-    //           again immediately and picks up the just-prepended message.
-    // =======================================================================
-
-    func testBug56_phase2MonitorPrependSpinLoop() {
-        guard let content = readSource("OpenVerb/Engine/EngineClient.swift") else {
-            XCTFail("Cannot read EngineClient.swift"); return
-        }
-        guard let fnRange = content.range(of: "private func runPhase2Monitor") else {
-            XCTFail("Cannot find runPhase2Monitor in EngineClient.swift"); return
-        }
-        // The function is ~105 lines; use 5000 chars to capture the full body.
-        let fnBody = substring(content, from: fnRange.lowerBound, length: 5000)
-
-        guard let defaultRange = fnBody.range(of: "default:") else {
-            XCTFail("Cannot find default case in runPhase2Monitor"); return
-        }
-        // Inspect the default case body up to the end of the switch (closing brace).
-        let defaultBody = substring(fnBody, from: defaultRange.lowerBound, length: 400)
-
-        // The fix: `continue` appears after recvBuffer.prepend() in the default case.
-        // In Swift, `continue` inside a switch that is inside a while loop jumps
-        // to the while condition — NOT merely the end of the switch (that would be
-        // `break`, which is insufficiently strong here). This forces the next
-        // iteration to execute ioQueue.sync + poll before calling recvJSONSync,
-        // giving drainResult an uncontested window to drain the buffer.
-        let hasContinueAfterPrepend: Bool = {
-            guard let prependR = defaultBody.range(of: "recvBuffer.prepend("),
-                  let continueR = defaultBody.range(of: "continue") else { return false }
-            return prependR.lowerBound < continueR.lowerBound
-        }()
-
-        XCTAssertTrue(hasContinueAfterPrepend,
-            "Bug 56 CONFIRMED: runPhase2Monitor `default` case has no `continue` " +
-            "after recvBuffer.prepend(). Without it, the loop immediately calls " +
-            "recvJSONSync on the next iteration — which reads the just-prepended " +
-            "message from the in-memory buffer (before any poll syscall) and " +
-            "re-prepends it again, spinning infinitely. ~100% CPU on one core and " +
-            "~50% empty-result sessions when the engine emits partial_result during " +
-            "Phase 2. " +
-            "Fix: add `continue` immediately after `recvLock.unlock()` in the default " +
-            "case. `continue` in a switch inside a while loop jumps to the while " +
-            "condition — triggering `ioQueue.sync { fd >= 0 }` then `poll(&pfds, 2, 100)` " +
-            "— giving drainResult a 100 ms uncontested window to extract the message.")
     }
 
     // =======================================================================

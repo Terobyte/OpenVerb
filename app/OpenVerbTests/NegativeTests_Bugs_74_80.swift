@@ -181,67 +181,6 @@ final class NegativeTests_Bugs_74_80: XCTestCase {
     }
 
     // =======================================================================
-    // Bug 77 — wakeRead/wakeWrite data race: written on main thread, read on ioQueue
-    //
-    // startPhase2Monitor() assigns wakeRead and wakeWrite directly on the calling
-    // thread (the @MainActor call site).  disconnect() and stopPhase2Monitor() read
-    // those same vars inside ioQueue.async blocks.  No lock or queue serialises
-    // these cross-thread accesses, creating a data race on Int32 values.
-    //
-    // EXPECTED: All accesses to wakeRead and wakeWrite must be serialised — either
-    //           all inside ioQueue, or protected by a dedicated lock.
-    // ACTUAL:   startPhase2Monitor() writes `wakeRead = rfd` and `wakeWrite = wfd`
-    //           directly (outside any ioQueue dispatch), while disconnect() and
-    //           stopPhase2Monitor() read them inside ioQueue.async blocks.
-    // =======================================================================
-
-    func testBug77_wakeReadWriteAccessesSerialisedOnSameQueue() {
-        guard let content = readSource("OpenVerb/Engine/EngineClient.swift") else {
-            XCTFail("Cannot read EngineClient.swift"); return
-        }
-
-        // Find startPhase2Monitor body.
-        guard let monitorRange = content.range(of: "func startPhase2Monitor()") else {
-            XCTFail("Cannot find startPhase2Monitor in EngineClient.swift"); return
-        }
-
-        let bodyStart = monitorRange.lowerBound
-        let bodyEnd = content.index(bodyStart, offsetBy: 800, limitedBy: content.endIndex) ?? content.endIndex
-        let monitorBody = String(content[bodyStart..<bodyEnd])
-
-        // The assignments `wakeRead  = rfd` and `wakeWrite = wfd` in startPhase2Monitor
-        // must be inside an ioQueue dispatch block to be synchronised with the ioQueue
-        // readers in disconnect() and stopPhase2Monitor().
-        //
-        // Find whether the assignments appear BEFORE any `ioQueue` reference in the
-        // function body (direct assignment = data race).
-        let ioQueuePos      = monitorBody.range(of: "ioQueue")
-        let wakeReadAssPos  = monitorBody.range(of: "wakeRead  = rfd") ??
-                              monitorBody.range(of: "wakeRead = rfd")
-        let wakeWriteAssPos = monitorBody.range(of: "wakeWrite = wfd") ??
-                              monitorBody.range(of: "wakeWrite = wfd")
-
-        if let wakeRA = wakeReadAssPos, let wakeWA = wakeWriteAssPos {
-            let assignBeforeQueue: Bool
-            if let ioQ = ioQueuePos {
-                assignBeforeQueue = wakeRA.lowerBound < ioQ.lowerBound ||
-                                    wakeWA.lowerBound < ioQ.lowerBound
-            } else {
-                assignBeforeQueue = true
-            }
-
-            XCTAssertFalse(assignBeforeQueue,
-                "Bug 77 CONFIRMED: startPhase2Monitor() assigns wakeRead and wakeWrite " +
-                "directly on the calling thread (MainActor) before any ioQueue dispatch. " +
-                "disconnect() and stopPhase2Monitor() read wakeWrite inside ioQueue.async, " +
-                "creating an unsynchronised cross-thread access on the Int32 pipe fds. " +
-                "Fix: move the wakeRead/wakeWrite assignments into an ioQueue.async (or sync) " +
-                "block so all accesses are serialised on the same queue as the readers.")
-        }
-        // If the assignments are no longer present in this form, the code was restructured — pass.
-    }
-
-    // =======================================================================
     // Bug 78 — drainResult .result case tears down new session after abortAndRestart()
     //
     // drainResult() captures a generation counter at spawn time.  The .result case

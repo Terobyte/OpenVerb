@@ -9,7 +9,7 @@ import os
 // ensureRunning():
 //   1. Try connect + ping on existing/running engine.
 //   2. On failure: remove stale socket file → spawn openverb-engine --listen.
-//   3. Poll socket up to 5 s (100 ms intervals) until ping succeeds.
+//   3. Poll socket up to 30 s (100 ms intervals) until ping succeeds.
 //
 // shutdown():
 //   Sends session.shutdown via live socket, then closes fd.
@@ -59,7 +59,7 @@ final class EngineManager: ObservableObject {
 
     let engineClient: EngineClient
     private var enginePath: String
-    private let socketPath: String
+    let socketPath: String
     private let modelDirOverride: String?
     var modelDirPath: String {
         let dir = AppSettings.shared.modelDirectory
@@ -269,8 +269,11 @@ final class EngineManager: ObservableObject {
         // Launch engine subprocess.
         try await launchEngine()
 
-        // Poll up to 5 s.
-        let deadline = Date().addingTimeInterval(5.0)
+        // Poll up to 30 s.  The engine now calls ensure_loaded() synchronously
+        // before binding the socket (Phase 1 fix), so model load (5-10 s on
+        // cold start) must complete before tryPing() can succeed.  30 s gives
+        // headroom for slow hardware and large models.
+        let deadline = Date().addingTimeInterval(30.0)
         while Date() < deadline {
             if await tryPing() {
                 status = .running
@@ -280,7 +283,7 @@ final class EngineManager: ObservableObject {
             try await Task.sleep(for: .milliseconds(100))
         }
 
-        status = .error("Engine did not respond within 5 seconds")
+        status = .error("Engine did not respond within 30 seconds")
         throw EngineManagerError.launchTimeout
     }
 
@@ -566,9 +569,7 @@ final class EngineManager: ObservableObject {
         // clean .stopped state.
         // (1) UI teardown (audio stop, window hide, state transition).
         onPreSleep?()
-        // (2) Stop the Phase 2 monitor before closing the socket.
-        engineClient.stopPhase2Monitor()
-        // (3) engineClient.disconnect() — close the socket fd synchronously.
+        // (2) engineClient.disconnect() — close the socket fd synchronously.
         //     The engine process is intentionally kept alive so the model
         //     stays loaded in memory. On wake we reconnect without reloading.
         engineClient.disconnect()
@@ -614,7 +615,7 @@ enum EngineManagerError: Error, CustomStringConvertible {
 
     var description: String {
         switch self {
-        case .launchTimeout:      return "engine did not respond within 5 seconds"
+        case .launchTimeout:      return "engine did not respond within 30 seconds"
         case .crashLoop:          return "engine crash loop detected"
         case .recoveryInProgress: return "crash recovery already in progress"
         }

@@ -9,12 +9,10 @@ import os
 //
 // Thread safety:
 //   • fd is wrapped behind `fdLock` (Bug 5) — writes happen on ioQueue
-//     (connectSync / disconnect); reads also happen from the Phase 2 monitor's
-//     detached Task inside recvJSONSync, so the Int32 itself needs locked access.
+//     (connectSync / disconnect); reads from receiveMessage happen from async
+//     Tasks, so the Int32 itself needs locked access.
 //   • recvBuffer is protected by recvLock.
 //   • sendAudioFrame dispatches fire-and-forget onto ioQueue.
-//   • phase2Error is protected by phase2Lock (NSLock).
-//   • onError closure must capture [weak self] to prevent retain cycles.
 //
 // Wire protocol (same as engine's IPC server):
 //   Phase 1 : JSON (session.start → ready, ping/pong)
@@ -65,18 +63,7 @@ final class EngineClient {
     private let ioQueue = DispatchQueue(label: "io.openverb.engineclient",
                                         qos: .userInitiated)
 
-    // Phase 2 concurrent error monitoring
-    private var phase2Error: ServerMessage?
-    private let phase2Lock = NSLock()
-    private var phase2MonitorTask: Task<Void, Never>?
-    private var phase2MonitorStopped = false
-
-    // Wakeup pipe used to interrupt the phase2 poll loop quickly.
-    private var wakeRead: Int32 = -1
-    private var wakeWrite: Int32 = -1
-
-    /// Called when an error or fatal warning arrives during Phase 2 streaming.
-    /// Caller MUST capture [weak self] in the closure to avoid retain cycles.
+    /// Called when an error arrives during streaming. Caller MUST capture [weak self].
     var onError: ((ServerMessage) -> Void)?
 
     /// Called each time a partial_result message arrives from the engine.
@@ -193,19 +180,6 @@ final class EngineClient {
 
     func disconnect() {
         ioQueue.async {
-            // #41: move the wakeup write inside ioQueue to eliminate the TOCTOU
-            // race where the caller's thread checks wakeWrite >= 0 concurrently
-            // with the monitor's defer closing it.  Writing before close(fd) also
-            // ensures the monitor sees the signal before a POLLHUP from fd close.
-            if self.wakeWrite >= 0 {
-                var b: UInt8 = 0
-                _ = Darwin.write(self.wakeWrite, &b, 1)
-                // Bug 12 fix: clear the wake fds only AFTER the signal byte was
-                // delivered.  Previously stopPhase2Monitor() cleared them first,
-                // causing disconnect() to see wakeWrite < 0 and skip the signal.
-                self.wakeWrite = -1
-                self.wakeRead  = -1
-            }
             guard self.fd >= 0 else { return }
             close(self.fd)
             self.fd = -1
@@ -496,11 +470,6 @@ final class EngineClient {
 
     func sendAudioFrame(_ data: Data) {
         guard data.count > 0 else { return }
-        // Abort the write loop before each frame if Phase 2 monitor detected an error.
-        phase2Lock.lock()
-        let hasPhase2Error = phase2Error != nil
-        phase2Lock.unlock()
-        guard !hasPhase2Error else { return }
         let copy = data  // capture by value
         ioQueue.async {
             guard self.fd >= 0 else { return }
@@ -533,193 +502,12 @@ final class EngineClient {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Phase 2 concurrent error monitoring.
-    //
-    // A detached background Task polls the socket (100 ms interval).  If the
-    // engine sends an error or warning mid-stream, it sets phase2Error and
-    // calls onError so the UI can react.  The write loop checks phase2Error
-    // before each sendAudioFrame via checkPhase2Error().
-    // -----------------------------------------------------------------------
-
-    /// Bug 32 fix: execute a synchronous fence on ioQueue to guarantee all
-    /// previously-dispatched sendAudioFrame writes complete before any live
-    /// audio frame can overtake them on the serial queue.
+    /// Bug 32 fix: synchronous fence on ioQueue — guarantees all previously-dispatched
+    /// sendAudioFrame writes complete before the next operation on the serial queue.
     func syncOnIOQueue() {
         ioQueue.sync {}
     }
 
-    func startPhase2Monitor() {
-        // #21: protect phase2MonitorStopped with phase2Lock — it is written
-        // here (MainActor) and read from a detached background Task.
-        phase2Lock.lock()
-        phase2Error = nil
-        phase2MonitorStopped = false
-        phase2Lock.unlock()
-
-        // Create a wakeup pipe so stopPhase2Monitor() can interrupt poll()
-        // immediately rather than waiting for the 100 ms timeout.
-        var pipefds: [Int32] = [-1, -1]
-        guard Darwin.pipe(&pipefds) == 0 else { return }
-        let rfd = pipefds[0]
-        let wfd = pipefds[1]
-        _ = fcntl(rfd, F_SETFL, O_NONBLOCK)
-
-        // Bug 77: serialise wakeRead/wakeWrite assignments on ioQueue so all
-        // accesses (writes here, reads in disconnect/stopPhase2Monitor) run on
-        // the same queue and cannot race across threads.
-        ioQueue.sync {
-            wakeRead  = rfd
-            wakeWrite = wfd
-        }
-
-        // #22: capture the pipe fds as local constants so the task's defer
-        // closes the fds it opened — not self.wakeRead/wakeWrite, which a
-        // subsequent startPhase2Monitor() may have already overwritten with
-        // a new pipe.
-        let task = Task.detached(priority: .userInitiated) { [weak self] in
-            defer { close(rfd); close(wfd) }
-            guard let self else { return }
-            await self.runPhase2Monitor(wakeReadFD: rfd)
-        }
-        phase2MonitorTask = task
-    }
-
-    private func runPhase2Monitor(wakeReadFD: Int32) async {
-        phase2Lock.lock()
-        var stopped = phase2MonitorStopped
-        phase2Lock.unlock()
-
-        while !stopped && ioQueue.sync(execute: { self.fd >= 0 }) {
-            let currentFd = ioQueue.sync(execute: { self.fd })
-            var pfds = [
-                pollfd(fd: currentFd,   events: Int16(POLLIN), revents: 0),
-                pollfd(fd: wakeReadFD,  events: Int16(POLLIN), revents: 0),
-            ]
-            let pr = poll(&pfds, 2, 100)
-            if pr <= 0 {
-                phase2Lock.lock()
-                stopped = phase2MonitorStopped
-                phase2Lock.unlock()
-                continue
-            }
-            if pfds[1].revents & Int16(POLLIN) != 0 { break }
-            guard pfds[0].revents & Int16(POLLIN) != 0 else {
-                if pfds[0].revents & Int16(POLLHUP | POLLERR) != 0 {
-                    let errMsg = ServerMessage.error(code: "connection_closed",
-                                                     message: "Engine connection dropped mid-recording")
-                    callOnErrorIfLive(errMsg)
-                    return
-                }
-                phase2Lock.lock()
-                stopped = phase2MonitorStopped
-                phase2Lock.unlock()
-                continue
-            }
-
-            phase2Lock.lock()
-            stopped = phase2MonitorStopped
-            phase2Lock.unlock()
-            if stopped { break }
-
-            let data: Data
-            do {
-                data = try recvJSONSync(timeoutMs: 100)
-            } catch {
-                let errMsg = ServerMessage.error(code: "stream_read_error",
-                                                 message: "Phase 2 monitor read failed: \(error)")
-                callOnErrorIfLive(errMsg)
-                return
-            }
-
-            guard data.first == UInt8(ascii: "{") else {
-                let errMsg = ServerMessage.error(code: "protocol_violation",
-                                                 message: "Unexpected non-JSON byte in Phase 2 stream")
-                callOnErrorIfLive(errMsg)
-                return
-            }
-
-            let msg: ServerMessage
-            do {
-                msg = try ServerMessage.fromJSON(data)
-            } catch {
-                logger.warning("Phase 2 monitor JSON decode error: \(error)")
-                phase2Lock.lock()
-                stopped = phase2MonitorStopped
-                phase2Lock.unlock()
-                continue
-            }
-
-            switch msg {
-            case .error:
-                callOnErrorIfLive(msg)
-                return
-            case .warning(let code, let message):
-                logger.warning("Engine warning: \(code): \(message)")
-            default:
-                if case .partialResult(let t, let c, let f) = msg {
-                    phase2Lock.lock(); let st = phase2MonitorStopped; phase2Lock.unlock()
-                    if !st { onPartialResult?(t, c, f) }
-                } else { recvLock.lock(); recvBuffer.prepend(data + Data([UInt8(ascii: "\n")])); recvLock.unlock() }
-                continue
-            }
-
-            phase2Lock.lock()
-            stopped = phase2MonitorStopped
-            phase2Lock.unlock()
-        }
-    }
-
-    func checkPhase2Error() -> ServerMessage? {
-        phase2Lock.lock()
-        defer { phase2Lock.unlock() }
-        return phase2Error
-    }
-
-    /// Bug 17: invoke onError only if the monitor hasn't been stopped yet.
-    /// Re-reads phase2MonitorStopped under phase2Lock to close the race where
-    /// stopPhase2Monitor() flipped the flag while we were mid-message. Also
-    /// stores phase2Error atomically with the stopped check so the two fields
-    /// never disagree.
-    private func callOnErrorIfLive(_ msg: ServerMessage) {
-        phase2Lock.lock()
-        let stopped = phase2MonitorStopped
-        if !stopped { phase2Error = msg }
-        phase2Lock.unlock()
-        if stopped { return }
-        onError?(msg)
-    }
-
-    func stopPhase2Monitor() {
-        // #21: write under phase2Lock.
-        phase2Lock.lock()
-        phase2MonitorStopped = true
-        phase2Lock.unlock()
-
-        // Bug 33 fix: dispatch the wakeup write via ioQueue so that all
-        // accesses to wakeWrite/wakeRead are serialised on one queue.
-        // Previously this read wakeWrite directly on MainActor while
-        // disconnect() wrote wakeWrite = -1 on ioQueue — undefined behaviour.
-        ioQueue.async { [self] in
-            if wakeWrite >= 0 {
-                var b: UInt8 = 0
-                _ = Darwin.write(wakeWrite, &b, 1)
-            }
-        }
-        // #19: do NOT block waiting for the monitor task to finish.
-        // phase2MonitorStopped=true prevents it from processing further data.
-        // The task exits within ~200 ms (one poll + one recvJSONSync cycle).
-        // Pipe fds are closed by the task's defer in startPhase2Monitor().
-        //
-        // Bug 12 fix: do NOT clear wakeRead / wakeWrite here.  disconnect()
-        // may run right after stopPhase2Monitor() and also needs to write a
-        // wakeup byte; clearing the fd to -1 here would make disconnect()
-        // skip its signal and leave the monitor blocked in poll() for up to
-        // 100 ms.  disconnect() now owns the fd reset after its own wakeup
-        // write completes.
-        phase2MonitorTask?.cancel()
-        phase2MonitorTask = nil
-    }
 }
 
 // ---------------------------------------------------------------------------

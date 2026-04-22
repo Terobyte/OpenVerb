@@ -489,7 +489,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         maxDurationTimer?.cancel()
         maxDurationTimer = nil
         audioSession.stop()
-        engineManager.engineClient.stopPhase2Monitor()
         engineManager.engineClient.sendEndOfAudio()
         appState.transition(to: .inferring)
         playSound("Pop")
@@ -550,9 +549,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         etaTickTimer = nil
         processingVM.resetEta()
         audioSession.stop()
-        // #30: stop Phase 2 monitor before disconnect() so the monitor does not
-        // detect the fd close as POLLHUP and trigger spurious crash recovery.
-        engineManager.engineClient.stopPhase2Monitor()
         // Bug 16: invalidate any in-flight drainResult from the aborted session
         // BEFORE disconnect() closes fd — the stale drain's receiveMessage will
         // throw momentarily, and its catch block must see the bumped generation.
@@ -620,9 +616,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         maxDurationTimer?.cancel()
         maxDurationTimer = nil
         audioSession.stop()
-        // #31: stop Phase 2 monitor before disconnect() so the monitor does not
-        // detect the fd close as POLLHUP and trigger spurious crash recovery.
-        engineManager.engineClient.stopPhase2Monitor()
         engineManager.disconnect()
         recordingWindow.hide()
         if appState.state != .idle {
@@ -661,8 +654,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // (c) startSession   — sends session.start JSON to engine.
     // (d) wait .ready    — engine signals model loaded; times out after 15 s.
     // (e) flushAndSet    — atomically drains pre-buffer and activates live send.
-    // (f) phase2Monitor  — start concurrent error watchdog during streaming.
-    // (g) .recording     — transition UI to recording state.
+    // (f) .recording     — transition UI to recording state.
     //
     // On any error: stop audio, transition to .error.
     // -----------------------------------------------------------------------
@@ -741,11 +733,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             for chunk in interim {
                 engineManager.engineClient.sendAudioFrame(chunk)
             }
-            engineManager.engineClient.startPhase2Monitor()
-
             appState.transition(to: .recording)
-            // Bug 55 (livePartialReader): partial_result messages are forwarded
-            // live via onPartialResult in runPhase2Monitor's default: case.
             logger.info("Engine ready; streamed \(buffered.count) pre-buffered chunk(s)")
 
             // Bug 22: enforce AppSettings.maxRecordingDuration. The user-facing
