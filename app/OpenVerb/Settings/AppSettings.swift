@@ -141,6 +141,15 @@ final class AppSettings: ObservableObject {
         }
     }
 
+    /// Whether to show the floating SubtitlePanel below the recording HUD.
+    /// Safe accessor: returns false if the persisted value is absent.
+    @Published var showSubtitlePanel: Bool = true {
+        didSet {
+            guard !isResetting else { return }
+            defaults.set(showSubtitlePanel, forKey: Key.showSubtitlePanel)
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Published settings — Clipboard
     // -----------------------------------------------------------------------
@@ -195,6 +204,7 @@ final class AppSettings: ObservableObject {
         static let soundEffectsEnabled   = "app.settings.soundEffectsEnabled"
         static let showWaveform          = "app.settings.showWaveform"
         static let showLiveTranscript    = "showLiveTranscript"
+        static let showSubtitlePanel     = "app.settings.showSubtitlePanel"
         static let includeClipboard      = "includeClipboard"
         static let maxRecordingDuration  = "app.settings.maxRecordingDuration"
         static let modelDirectory        = "modelDirectory"
@@ -254,6 +264,11 @@ final class AppSettings: ObservableObject {
         // Live transcript
         if defaults.object(forKey: Key.showLiveTranscript) != nil {
             showLiveTranscript = defaults.bool(forKey: Key.showLiveTranscript)
+        }
+
+        // Subtitle panel (safe: absent → default true)
+        if defaults.object(forKey: Key.showSubtitlePanel) != nil {
+            showSubtitlePanel = defaults.bool(forKey: Key.showSubtitlePanel)
         }
 
         // Clipboard

@@ -336,6 +336,54 @@ final class EngineManagerTests: XCTestCase {
             XCTFail("Failed engine restart after wake must surface .error status, got \(sut.status)")
         }
     }
+
+    // -----------------------------------------------------------------------
+    // MARK: Poll deadline — ensureRunning must wait up to 30 s for the engine
+    // -----------------------------------------------------------------------
+    //
+    // The engine now calls ensure_loaded() BEFORE binding the socket
+    // (Phase 1 fix).  Model load takes 5-10 s on first cold start, so the
+    // old 5 s poll deadline was too short.  This test scans EngineManager.swift
+    // as a source contract: the deadline constant must be 30.0, the error
+    // message must mention "30 seconds", and EngineManagerError.description
+    // must also say "30 seconds".
+    //
+    // Source-scan strategy: cheaper than running a real 30 s timer in tests
+    // while still enforcing the exact values that matter for correctness.
+
+    func testEnsureRunningPollDeadlineIs30Seconds() throws {
+        // Locate EngineManager.swift relative to this test file's source directory.
+        // __FILE__ resolves at compile time to the absolute path of this .swift file.
+        let thisFile = URL(fileURLWithPath: #file)
+        // OpenVerbTests/ → app/ → OpenVerb/ → Engine/EngineManager.swift
+        let engineManagerURL = thisFile
+            .deletingLastPathComponent()               // OpenVerbTests/
+            .deletingLastPathComponent()               // app/
+            .appendingPathComponent("OpenVerb")
+            .appendingPathComponent("Engine")
+            .appendingPathComponent("EngineManager.swift")
+
+        let source = try String(contentsOf: engineManagerURL, encoding: .utf8)
+
+        // 1. The poll deadline must be 30 s.
+        XCTAssertTrue(
+            source.contains("addingTimeInterval(30.0)"),
+            "ensureRunning() poll deadline must be 30.0 seconds in EngineManager.swift"
+        )
+
+        // 2. The error message surfaced to the UI must say "30 seconds".
+        XCTAssertTrue(
+            source.contains("did not respond within 30 seconds") ||
+            source.contains("within 30 seconds"),
+            "The engine-timeout error message must reference 30 seconds"
+        )
+
+        // 3. EngineManagerError.launchTimeout.description must say "30 seconds".
+        XCTAssertTrue(
+            source.contains("engine did not respond within 30 seconds"),
+            "EngineManagerError.launchTimeout description must say 30 seconds"
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------

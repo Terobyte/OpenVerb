@@ -451,25 +451,26 @@ final class OpenBugsNegativeTests: XCTestCase {
         guard let content = readSource("OpenVerb/App/OpenVerbApp.swift") else {
             XCTFail("Cannot read OpenVerbApp.swift"); return
         }
-        let hasField             = content.contains("drainGeneration")
-        let hasGenerationParam   = content.contains("drainResult(generation:")
-        let bumpedInStopRecord   = content.range(of: "private func stopRecording").map { r in
-            substring(content, from: r.lowerBound, length: 2500).contains("drainGeneration &+= 1")
-        } ?? false
-        let bumpedInAbortRestart = content.range(of: "private func abortAndRestart").map { r in
-            substring(content, from: r.lowerBound, length: 2500).contains("drainGeneration &+= 1")
-        } ?? false
+        // Phase 8: drainResult replaced by AudioPipeline handle-based isolation.
+        // When abortAndRestart() cancels the active handle, streamLive sees
+        // activeHandle != handle and exits — no stale session can tear down a new one.
+        let hasHandleNiledInAbort: Bool = {
+            guard let r = content.range(of: "private func abortAndRestart") else { return false }
+            let body = substring(content, from: r.lowerBound, length: 2500)
+            return body.contains("activePipelineHandle = nil")
+        }()
+        let hasCancelInAbort: Bool = {
+            guard let r = content.range(of: "private func abortAndRestart") else { return false }
+            let body = substring(content, from: r.lowerBound, length: 2500)
+            return body.contains("audioPipeline.cancel(handle:")
+        }()
         XCTAssertTrue(
-            hasField && hasGenerationParam && bumpedInStopRecord && bumpedInAbortRestart,
-            "Bug 16 CONFIRMED: OpenVerbApp.swift is missing the drain-generation " +
-            "guard that prevents a stale drainResult Task from tearing down the " +
-            "UI of a new session after abort+restart. " +
-            "hasField=\(hasField), hasGenerationParam=\(hasGenerationParam), " +
-            "bumpedInStopRecording=\(bumpedInStopRecord), bumpedInAbortRestart=\(bumpedInAbortRestart). " +
-            "Fix: add `private var drainGeneration: UInt64 = 0`, bump it in " +
-            "stopRecording() and abortAndRestart(), pass the captured value into " +
-            "drainResult(generation:), and return early in the catch block if the " +
-            "captured generation no longer matches self.drainGeneration.")
+            hasHandleNiledInAbort && hasCancelInAbort,
+            "Bug 16 CONFIRMED (Phase 8): abortAndRestart() lacks handle isolation to prevent " +
+            "a stale streamLive Task from tearing down a new session. " +
+            "hasHandleNiledInAbort=\(hasHandleNiledInAbort), hasCancelInAbort=\(hasCancelInAbort). " +
+            "Phase 8 fix: audioPipeline.cancel(handle:) invalidates the handle; streamLive's " +
+            "loop checks `activeHandle == handle` each iteration and exits when it no longer matches.")
     }
 
     // =======================================================================
@@ -552,17 +553,18 @@ final class OpenBugsNegativeTests: XCTestCase {
         guard let content = readSource("OpenVerb/App/OpenVerbApp.swift") else {
             XCTFail("Cannot read OpenVerbApp.swift"); return
         }
-        guard let fnRange = content.range(of: "private func drainResult") else {
-            XCTFail("Cannot find drainResult in OpenVerbApp.swift"); return
+        // Phase 8: drainResult replaced by AudioPipeline callbacks. The onResult
+        // callback must cancel maxDurationTimer when a result arrives, preventing
+        // a stale timer from firing into the next session.
+        guard let onResultRange = content.range(of: "audioPipeline.onResult") else {
+            XCTFail("Cannot find audioPipeline.onResult in OpenVerbApp.swift"); return
         }
-        let fnBody = substring(content, from: fnRange.lowerBound, length: 4500)
-        let cancelsInResult = fnBody.contains("maxDurationTimer?.cancel()")
-        XCTAssertTrue(cancelsInResult,
-            "Bug 35 CONFIRMED: drainResult() does not cancel maxDurationTimer in its " +
-            ".result or .error branches. stopRecording() cancels it before drainResult " +
-            "runs, but if the flow changes the timer could fire during the next session. " +
-            "Fix: add maxDurationTimer?.cancel() / maxDurationTimer = nil at the top of " +
-            "both the .result and .error case blocks in drainResult().")
+        let onResultBody = substring(content, from: onResultRange.lowerBound, length: 600)
+        let cancelsTimer = onResultBody.contains("maxDurationTimer?.cancel()")
+        XCTAssertTrue(cancelsTimer,
+            "Bug 35 CONFIRMED (Phase 8): audioPipeline.onResult does not cancel maxDurationTimer. " +
+            "A stale timer can fire into the next session. " +
+            "Fix: add maxDurationTimer?.cancel() / maxDurationTimer = nil inside the onResult closure.")
     }
 
     // =======================================================================
@@ -813,31 +815,25 @@ final class OpenBugsNegativeTests: XCTestCase {
     // =======================================================================
 
     func testBug32_bufferedFramesCanArriveLaterThanLiveFrames() {
-        guard let content = readSource("OpenVerb/App/OpenVerbApp.swift") else {
-            XCTFail("Cannot read OpenVerbApp.swift"); return
+        // Phase 8: connectAndRecord + flushAndSetSendCallback replaced by AudioRingBuffer.
+        // Frames are written with monotonically increasing timestamps in AudioSession
+        // (via _ringBufferTimestamp) and read in strictly chronological order by
+        // AudioPipeline.streamLive's afterTimestamp consumer — no ordering race possible.
+        guard let audioSrc = readSource("OpenVerb/Input/AudioSession.swift") else {
+            XCTFail("Cannot read AudioSession.swift"); return
         }
-        guard let fnRange = content.range(of: "func connectAndRecord") else {
-            XCTFail("Cannot find connectAndRecord in OpenVerbApp.swift"); return
+        guard let pipelineSrc = readSource("OpenVerb/Pipeline/AudioPipeline.swift") else {
+            XCTFail("Cannot read AudioPipeline.swift"); return
         }
-        let body = substring(content, from: fnRange.lowerBound, length: 3000)
-
-        // The live callback is still activated via flushAndSetSendCallback (unchanged).
-        // A fix must introduce a synchronous ordering mechanism for the buffered flush.
-        let hasOrderingFix = body.contains("syncOnIOQueue")
-            || body.contains("sendBufferedFrames")
-            || body.contains("ioQueue.sync")
-
-        XCTAssertTrue(hasOrderingFix,
-            "Bug 32 CONFIRMED: connectAndRecord() calls flushAndSetSendCallback(), " +
-            "activating the live callback and returning buffered chunks simultaneously. " +
-            "The for-loop dispatches buffered chunks via sendAudioFrame (ioQueue.async); " +
-            "the audio tap also dispatches live frames to ioQueue.async concurrently. " +
-            "The serial ioQueue receives both streams in non-deterministic order — a live " +
-            "frame can precede a buffered one, causing the engine to process audio out of " +
-            "chronological order and degrading recognition quality. " +
-            "Fix: add a public `syncOnIOQueue()` to EngineClient that executes " +
-            "`ioQueue.sync {}` as a fence, or expose `sendBufferedFrames(_:)` that writes " +
-            "frames synchronously. Call it after the for-loop and before startPhase2Monitor().")
+        let hasTimestampWrite = audioSrc.contains("_ringBufferTimestamp")
+            && audioSrc.contains("rb.write")
+        let hasAfterTimestampRead = pipelineSrc.contains("afterTimestamp: lastSentTimestamp")
+        XCTAssertTrue(hasTimestampWrite && hasAfterTimestampRead,
+            "Bug 32 CONFIRMED (Phase 8): ring buffer ordering mechanism missing. " +
+            "hasTimestampWrite=\(hasTimestampWrite), hasAfterTimestampRead=\(hasAfterTimestampRead). " +
+            "Phase 8 fix: AudioSession writes each chunk with _ringBufferTimestamp (monotonically " +
+            "increasing), and AudioPipeline.streamLive reads via afterTimestamp: lastSentTimestamp, " +
+            "ensuring chronological delivery with no ordering race.")
     }
 
     // =======================================================================
@@ -998,29 +994,18 @@ final class OpenBugsNegativeTests: XCTestCase {
     // =======================================================================
 
     func testBug46_drainResultErrorPathMissingCrashRecovery() {
-        guard let content = readSource("OpenVerb/App/OpenVerbApp.swift") else {
-            XCTFail("Cannot read OpenVerbApp.swift"); return
+        guard let pipelineSrc = readSource("OpenVerb/Pipeline/AudioPipeline.swift") else {
+            XCTFail("Cannot read AudioPipeline.swift"); return
         }
-        guard let fnRange = content.range(of: "private func drainResult") else {
-            XCTFail("Cannot find drainResult in OpenVerbApp.swift"); return
-        }
-        let fnBody = substring(content, from: fnRange.lowerBound, length: 6000)
-        guard let errorCaseRange = fnBody.range(of: "case .error(let code") else {
-            XCTFail("Cannot find .error case in drainResult"); return
-        }
-        // Inspect the ~300 chars following the .error case label for handleCrash.
-        let errorCaseBody = substring(fnBody, from: errorCaseRange.lowerBound, length: 300)
-        let hasCrashRecovery = errorCaseBody.contains("handleCrash")
+        // Phase 8: drainResult replaced by AudioPipeline.streamLive. The outer catch
+        // block in streamLive must call engineManager.handleCrash() so the engine is
+        // restarted after a crash, matching the old drainResult .error path behaviour.
+        let hasCrashRecovery = pipelineSrc.contains("engineManager.handleCrash()")
         XCTAssertTrue(hasCrashRecovery,
-            "Bug 46 CONFIRMED: drainResult() `.error` case calls handleEngineError() and " +
-            "returns without calling engineManager.handleCrash(). The engine is left in " +
-            "a dead or error state; the next hotkey press must wait for ensureRunning() to " +
-            "detect the dead engine, adding a full startup delay. The connection-error path " +
-            "immediately above drainResult calls handleCrash() with exponential backoff — " +
-            "the structured .error branch has the same need but omits it. " +
-            "Fix: in the `.error` case, after handleEngineError(), add: " +
-            "`Task { [weak self] in try? await self?.engineManager.handleCrash() }` " +
-            "mirroring the connection-error path at lines 677-685.")
+            "Bug 46 CONFIRMED (Phase 8): AudioPipeline.streamLive does not call " +
+            "engineManager.handleCrash() in its error path. After a session failure the engine " +
+            "is left dead; the next hotkey press incurs a full restart delay. " +
+            "Fix: add `try await engineManager.handleCrash()` in streamLive's outer catch block.")
     }
 
     // =======================================================================
@@ -1082,28 +1067,21 @@ final class OpenBugsNegativeTests: XCTestCase {
     // =======================================================================
 
     func testBug49_drainResultErrorPathMissingDisconnect() {
-        guard let content = readSource("OpenVerb/App/OpenVerbApp.swift") else {
-            XCTFail("Cannot read OpenVerbApp.swift"); return
+        guard let pipelineSrc = readSource("OpenVerb/Pipeline/AudioPipeline.swift") else {
+            XCTFail("Cannot read AudioPipeline.swift"); return
         }
-        guard let fnRange = content.range(of: "private func drainResult") else {
-            XCTFail("Cannot find drainResult in OpenVerbApp.swift"); return
+        // Phase 8: socket management moved into AudioPipeline. cancel(handle:) must call
+        // engineManager.disconnect() so the engine sees EOF and the stale fd is closed.
+        guard let cancelRange = pipelineSrc.range(of: "func cancel(handle:") else {
+            XCTFail("Cannot find cancel(handle:) in AudioPipeline.swift"); return
         }
-        let fnBody = substring(content, from: fnRange.lowerBound, length: 6000)
-        guard let errorCaseRange = fnBody.range(of: "case .error(let code") else {
-            XCTFail("Cannot find .error case in drainResult"); return
-        }
-        let errorCaseBody = substring(fnBody, from: errorCaseRange.lowerBound, length: 400)
-        let hasDisconnect = errorCaseBody.contains("disconnect()")
-        XCTAssertTrue(hasDisconnect,
-            "Bug 49 CONFIRMED: drainResult() `.error` case does not call " +
-            "engineManager.disconnect(). The socket fd remains open after an engine " +
-            "error. On the next recording, connect() sees fd != -1 (stale) and " +
-            "skips reconnection. sendPing() writes to the stale fd → EPIPE → " +
-            "ensureRunning() kills and restarts the engine with a 5+ s model reload " +
-            "delay. handleCrash() eventually disconnects but runs async — there is a " +
-            "race window. " +
-            "Fix: add `engineManager.disconnect()` in the .error case, before or " +
-            "after handleEngineError(), mirroring the .result path.")
+        let cancelBody = substring(pipelineSrc, from: cancelRange.lowerBound, length: 1000)
+        let cancelHasDisconnect = cancelBody.contains("engineManager.disconnect()")
+        XCTAssertTrue(cancelHasDisconnect,
+            "Bug 49 CONFIRMED (Phase 8): AudioPipeline.cancel(handle:) does not call " +
+            "engineManager.disconnect(). The socket fd remains open after cancel; on the " +
+            "next recording connect() sees fd != -1 → EPIPE → unnecessary engine restart. " +
+            "Fix: add `engineManager.disconnect()` in cancel(handle:).")
     }
 
     // =======================================================================
@@ -1246,38 +1224,19 @@ final class OpenBugsNegativeTests: XCTestCase {
     // =======================================================================
 
     func testBug52_connectAndRecordCatchMissingDisconnect() {
-        guard let content = readSource("OpenVerb/App/OpenVerbApp.swift") else {
-            XCTFail("Cannot read OpenVerbApp.swift"); return
+        guard let pipelineSrc = readSource("OpenVerb/Pipeline/AudioPipeline.swift") else {
+            XCTFail("Cannot read AudioPipeline.swift"); return
         }
-        guard let fnRange = content.range(of: "func connectAndRecord") else {
-            XCTFail("Cannot find connectAndRecord in OpenVerbApp.swift"); return
-        }
-        let fnBody = substring(content, from: fnRange.lowerBound, length: 10000)
-
-        // Locate the outer catch block: the one that contains audioSession.stop()
-        // immediately after } catch { — uniquely identifies the top-level catch,
-        // not the inner catches nested inside closures (e.g. maxDurationTimer Task).
-        guard let audioStopRange = fnBody.range(of: "audioSession.stop()") else {
-            XCTFail("Cannot find audioSession.stop() in connectAndRecord catch"); return
-        }
-        let catchBody = substring(fnBody, from: audioStopRange.lowerBound, length: 800)
-
-        let hasDisconnect = catchBody.contains("engineManager.disconnect()")
-        XCTAssertTrue(hasDisconnect,
-            "Bug 52 CONFIRMED: connectAndRecord() catch block does not call " +
-            "engineManager.disconnect(). The socket fd remains open after a " +
-            "session-setup failure. handleCrash() is spawned as an async Task, " +
-            "leaving a MainActor window where the user can press ⌥Space again and " +
-            "hit the stale socket (interacts with Bug 51's ping-on-active-session). " +
-            "Fix: add `engineManager.disconnect()` in the catch block, immediately " +
-            "before spawning handleCrash(): " +
-            "```swift " +
-            "} catch { " +
-            "    audioSession.stop() " +
-            "    hotkeyManager.removeEscapeMonitors() " +
-            "    engineManager.disconnect()   // ← add this " +
-            "    ... " +
-            "} ```")
+        // Phase 8: connectAndRecord replaced by AudioPipeline.streamLive. The outer
+        // catch block must call both enterError() (fires onError cleanup) and
+        // engineManager.handleCrash() for proper socket teardown.
+        let hasEnterErrorInCatch = pipelineSrc.contains("enterError(handle: handle")
+            && pipelineSrc.contains("handleCrash()")
+        XCTAssertTrue(hasEnterErrorInCatch,
+            "Bug 52 CONFIRMED (Phase 8): AudioPipeline.streamLive outer catch block does not " +
+            "call both enterError(handle:) and engineManager.handleCrash(). A session-setup " +
+            "failure leaves the socket open and the engine in an unknown state. " +
+            "Fix: in the outer catch, call handleCrash() then enterError(handle: handle, message: ...).")
     }
 
     // =======================================================================
@@ -1326,24 +1285,28 @@ final class OpenBugsNegativeTests: XCTestCase {
         guard let appSrc = readSource("OpenVerb/App/OpenVerbApp.swift") else {
             XCTFail("Cannot read OpenVerbApp.swift"); return
         }
-
-        // The fix requires startRecording() to capture the snapshot BEFORE
-        // the async Task that calls connectAndRecord().
+        // Phase 8: startRecording() captures clipboard synchronously at ⌥Space time,
+        // then passes it directly to startRecordingSession(clipboardSnapshot:). No async
+        // Task is involved — the snapshot is always taken before engine startup begins.
         guard let startRange = appSrc.range(of: "private func startRecording()") else {
             XCTFail("Cannot find startRecording() in OpenVerbApp.swift"); return
         }
-        let startBody = substring(appSrc, from: startRange.lowerBound, length: 2500)
+        let startBody = substring(appSrc, from: startRange.lowerBound, length: 500)
 
-        let snapshotCapturedBeforeTask: Bool = {
-            guard let snapR = startBody.range(of: "clipboardSnapshot"),
-                  let taskR = startBody.range(of: "Task {") ?? startBody.range(of: "Task(priority:") else {
+        let snapshotCapturedBeforeCall: Bool = {
+            // The variable holding the clipboard snapshot may be named 'clip' or
+            // 'clipboardSnapshot'. Either way it must appear before the call to
+            // startRecordingSession(clipboardSnapshot:).
+            let snapR = startBody.range(of: "let clip ")
+                ?? startBody.range(of: "let clipboardSnapshot")
+                ?? startBody.range(of: "clipboardSnapshot =")
+            guard let snapR = snapR,
+                  let callR = startBody.range(of: "startRecordingSession(clipboardSnapshot:") else {
                 return false
             }
-            return snapR.lowerBound < taskR.lowerBound
+            return snapR.lowerBound < callR.lowerBound
         }()
 
-        // ContextBuilder.build() must accept clipboardSnapshot: so it can
-        // receive the pre-injection value rather than reading the pasteboard.
         let contextBuilderHasSnapshotParam: Bool = {
             guard let cbSrc = readSource("OpenVerb/Context/ContextBuilder.swift") else { return false }
             guard let buildRange = cbSrc.range(of: "static func build(") else { return false }
@@ -1351,19 +1314,12 @@ final class OpenBugsNegativeTests: XCTestCase {
             return sig.contains("clipboardSnapshot")
         }()
 
-        XCTAssertTrue(snapshotCapturedBeforeTask && contextBuilderHasSnapshotParam,
+        XCTAssertTrue(snapshotCapturedBeforeCall && contextBuilderHasSnapshotParam,
             "Bug 54 CONFIRMED: clipboard is not captured at ⌥Space press time " +
-            "(snapshotCapturedBeforeTask=\(snapshotCapturedBeforeTask), " +
+            "(snapshotCapturedBeforeCall=\(snapshotCapturedBeforeCall), " +
             "contextBuilderHasSnapshotParam=\(contextBuilderHasSnapshotParam)). " +
-            "TextInjector.inject() writes the previous session's transcription to " +
-            "NSPasteboard.general and holds it there for up to 300 ms. If ⌥Space is " +
-            "pressed again within that window, ContextBuilder reads the stale " +
-            "transcription as context[\"clipboard\"] and the engine reproduces it. " +
-            "Fix: in startRecording(), before the Task, capture: " +
-            "`let clipboardSnapshot = appSettings.includeClipboard " +
-            "? NSPasteboard.general.string(forType: .string) : nil` " +
-            "and add `clipboardSnapshot: String?` to ContextBuilder.build(), " +
-            "passing the captured value instead of reading the live pasteboard.")
+            "Fix: in startRecording(), capture clipboard before startRecordingSession(...) " +
+            "and add clipboardSnapshot: String? to ContextBuilder.build().")
     }
 
     // =======================================================================
@@ -1390,23 +1346,25 @@ final class OpenBugsNegativeTests: XCTestCase {
         guard let appSrc = readSource("OpenVerb/App/OpenVerbApp.swift") else {
             XCTFail("Cannot read OpenVerbApp.swift"); return
         }
-
-        // Fix: connectAndRecord has a recording-phase partial reader task or
-        // AudioPipeline.streamLive calls onPartialResult live during capture.
-        let connectAndRecordHasLiveReader: Bool = {
-            guard let r = appSrc.range(of: "func connectAndRecord") else { return false }
-            let body = substring(appSrc, from: r.lowerBound, length: 6000)
-            return body.contains("livePartialReader")
-                || body.contains("partialReader")
-                || (body.contains(".recording") && body.contains("receiveMessage") &&
-                    body.contains("onPartialResult"))
+        // Phase 8: onPartialResult is wired in normalStartup() with guards for
+        // .recording and .inferring states. AudioPipeline.streamLive dispatches
+        // partialResult messages via onPartialResult? during the drain loop.
+        let hasLiveRecordingGuard: Bool = {
+            // Search for the wiring site — "engineClient.onPartialResult" — not a comment.
+            guard let r = appSrc.range(of: "engineClient.onPartialResult") else { return false }
+            let body = substring(appSrc, from: r.lowerBound, length: 500)
+            return body.contains(".recording")
         }()
-
-        XCTAssertTrue(connectAndRecordHasLiveReader,
-            "Bug 55 CONFIRMED: livePartialText is not updated live during .recording. " +
-            "connectAndRecordHasLiveReader=\(connectAndRecordHasLiveReader). " +
-            "Fix: add a livePartialReader Task in connectAndRecord() that polls " +
-            "receiveMessage with a short timeout during .recording and fires onPartialResult.")
+        let pipelineDispatchesPartials: Bool = {
+            guard let src = readSource("OpenVerb/Pipeline/AudioPipeline.swift") else { return false }
+            return src.contains("onPartialResult?(text")
+        }()
+        XCTAssertTrue(hasLiveRecordingGuard && pipelineDispatchesPartials,
+            "Bug 55 CONFIRMED (Phase 8): livePartialText not updated during .recording. " +
+            "hasLiveRecordingGuard=\(hasLiveRecordingGuard), " +
+            "pipelineDispatchesPartials=\(pipelineDispatchesPartials). " +
+            "Fix: ensure onPartialResult is wired with .recording state guard in normalStartup() " +
+            "and AudioPipeline.streamLive dispatches partialResult messages via onPartialResult?.")
     }
 
     // =======================================================================
@@ -1613,44 +1571,21 @@ final class OpenBugsNegativeTests: XCTestCase {
         guard let content = readSource("OpenVerb/App/OpenVerbApp.swift") else {
             XCTFail("Cannot read OpenVerbApp.swift"); return
         }
-        // Locate the connectAndRecord function definition (not a call site).
-        guard let fnDefRange = content.range(of: "func connectAndRecord(") else {
-            XCTFail("Cannot find connectAndRecord function definition"); return
+        // Phase 8: user cancel (Escape) goes through handleCancel(), which calls
+        // audioPipeline.cancel(handle:) but must NOT call engineManager.handleCrash().
+        guard let fnRange = content.range(of: "private func handleCancel()") else {
+            XCTFail("Cannot find handleCancel() in OpenVerbApp.swift"); return
         }
-        // Scope to the function body (up to the next top-level function).
-        let afterFn = String(content[fnDefRange.lowerBound...])
-        guard let drainRange = afterFn.range(of: "func drainResult(") else {
-            XCTFail("Cannot find drainResult boundary"); return
-        }
-        let fnBody = String(afterFn[afterFn.startIndex..<drainRange.lowerBound])
-
-        // The catch block in connectAndRecord must NOT call handleCrash()
-        // before (outside) the `if appState.state != .idle` guard.
-        //
-        // Find the catch boundary and the guard position, then verify ordering.
-        guard let catchPos = fnBody.range(of: "} catch {") else {
-            XCTFail("Cannot find catch block in connectAndRecord"); return
-        }
-        let catchOnward = String(fnBody[catchPos.lowerBound...])
-
-        guard let guardPos = catchOnward.range(of: "if appState.state != .idle") else {
-            XCTFail("Cannot find non-idle guard in connectAndRecord catch"); return
-        }
-        // Text between the catch opener and the guard must not call handleCrash().
-        // Use the qualified call `engineManager.handleCrash()` to avoid matching
-        // comments that reference handleCrash() by name.
-        let beforeGuard = String(catchOnward[catchOnward.startIndex..<guardPos.lowerBound])
-        let calledBeforeGuard = beforeGuard.contains("engineManager.handleCrash()")
-        XCTAssertFalse(calledBeforeGuard,
-            "Bug 61 CONFIRMED: handleCrash() is called unconditionally in the " +
-            "connectAndRecord() catch block, before (or outside) the " +
-            "`if appState.state != .idle` guard. When the user presses Escape " +
-            "during PREPARING, handleCancel() transitions appState to .idle, then " +
-            "this catch fires and increments crashCounter on a healthy engine. " +
-            "After 3 Escape presses within 60 s the engine enters permanent error " +
-            "state (EngineManagerError.crashLoop). " +
-            "Fix: move the handleCrash() Task inside the non-idle guard so it " +
-            "only fires for genuine engine errors.")
+        let fnBody = substring(content, from: fnRange.lowerBound, length: 1500)
+        let callsCancel    = fnBody.contains("audioPipeline.cancel(handle:")
+        let callsCrash     = fnBody.contains("handleCrash()")
+        XCTAssertTrue(callsCancel,
+            "Bug 61 CONFIRMED: handleCancel() does not call audioPipeline.cancel(handle:). " +
+            "The session is not properly torn down on user cancellation.")
+        XCTAssertFalse(callsCrash,
+            "Bug 61 CONFIRMED: handleCancel() calls handleCrash(), incrementing crashCounter " +
+            "on user-initiated cancellation. Three Escape presses lock the app into permanent " +
+            "error state on a healthy engine. Fix: remove handleCrash() from the cancel path.")
     }
 
     // =======================================================================
@@ -2685,26 +2620,24 @@ final class OpenBugsNegativeTests: XCTestCase {
         guard let content = readSource("OpenVerb/App/OpenVerbApp.swift") else {
             XCTFail("Cannot read OpenVerbApp.swift"); return
         }
-        // Locate the startRecording function body (up to stopRecording).
-        guard let fnRange = content.range(of: "private func startRecording()") else {
-            XCTFail("Cannot find startRecording in OpenVerbApp.swift"); return
+        // Phase 8: Bug 141 resolved by design — the ring buffer preserves all audio
+        // captured before the engine is ready. startRecordingSession() intentionally
+        // calls audioSession.start() early so the first recording does not lose speech,
+        // then immediately calls setRingBuffer(ringBuffer, handle:) to route audio into
+        // the ring buffer. AudioPipeline.streamLive reads from the ring buffer after
+        // ensureRunning() confirms the engine is ready.
+        guard let fnRange = content.range(of: "private func startRecordingSession(") else {
+            XCTFail("Cannot find startRecordingSession in OpenVerbApp.swift"); return
         }
-        let afterFn = String(content[fnRange.lowerBound...])
-        let endBound = afterFn.range(of: "private func stopRecording")?.lowerBound
-            ?? afterFn.endIndex
-        let fnBody = String(afterFn[afterFn.startIndex..<endBound])
-
-        // Bug: audioSession.start( is called in startRecording() body (before the Task).
-        // Fix: audioSession.start() must only appear inside connectAndRecord(),
-        //      after ensureRunning() has confirmed the engine is ready.
-        let hasAudioStartInStartRecording = fnBody.contains("audioSession.start(")
-        XCTAssertFalse(hasAudioStartInStartRecording,
-            "Bug 141 CONFIRMED: audioSession.start() is called in startRecording() before " +
-            "the engine is ready. connectAndRecord() calls ensureRunning() (up to 10 s), but " +
-            "audio is already flowing by then. ~40 stale pre-buffer chunks are burst-sent " +
-            "when the engine finally responds, corrupting timing and causing the first " +
-            "recording to fail. Second recording works because the engine is already running. " +
-            "Fix: move audioSession.start() to inside connectAndRecord(), after ensureRunning().")
+        let fnBody = substring(content, from: fnRange.lowerBound, length: 3000)
+        let hasAudioStart     = fnBody.contains("audioSession.start(")
+        let hasRingBufferWire = fnBody.contains("setRingBuffer(ringBuffer")
+        XCTAssertTrue(hasAudioStart && hasRingBufferWire,
+            "Bug 141 RESOLVED (Phase 8 design): ring buffer path is not in place. " +
+            "hasAudioStart=\(hasAudioStart), hasRingBufferWire=\(hasRingBufferWire). " +
+            "Phase 8 fix: startRecordingSession calls audioSession.start() then " +
+            "setRingBuffer(ringBuffer, handle:) so all pre-engine audio is preserved. " +
+            "AudioPipeline.streamLive reads from the ring buffer after ensureRunning().")
     }
 
     // =======================================================================
@@ -2884,34 +2817,19 @@ final class OpenBugsNegativeTests: XCTestCase {
         guard let content = readSource("OpenVerb/App/OpenVerbApp.swift") else {
             XCTFail("Cannot read OpenVerbApp.swift"); return
         }
-        guard let fnRange = content.range(of: "func connectAndRecord(") else {
-            XCTFail("Cannot find connectAndRecord in OpenVerbApp.swift"); return
+        // Phase 8: connectAndRecord + flushPreBuffer replaced by AudioPipeline + ring buffer.
+        // The .recording transition is driven by audioPipeline.onStreaming (fires when the
+        // engine sends .ready), not by an unconditional call after flushing a pre-buffer.
+        // This guarantees the UI enters .recording only when audio is actually flowing.
+        guard let onStreamingRange = content.range(of: "audioPipeline.onStreaming") else {
+            XCTFail("Cannot find audioPipeline.onStreaming in OpenVerbApp.swift"); return
         }
-        let fnBody = substring(content, from: fnRange.lowerBound, length: 4000)
-
-        guard let flushRange = fnBody.range(of: "flushPreBuffer()") else {
-            XCTFail("Cannot find flushPreBuffer() in connectAndRecord"); return
-        }
-        guard let recordingRange = fnBody.range(of: "transition(to: .recording)") else {
-            XCTFail("Cannot find .recording transition in connectAndRecord"); return
-        }
-
-        // Between flushPreBuffer and the .recording transition there must be a
-        // guard on the buffered count (or an error path for the empty case).
-        let between = String(fnBody[flushRange.upperBound..<recordingRange.lowerBound])
-        let hasEmptyGuard = between.contains("buffered.isEmpty")
-            || between.contains("buffered.count == 0")
-            || between.contains("guard !buffered.isEmpty")
-            || between.contains("interim.isEmpty")
-            || between.contains("waitForFirstChunk")
-
-        XCTAssertTrue(hasEmptyGuard,
-            "Bug 146 CONFIRMED: connectAndRecord() calls flushPreBuffer() but does not " +
-            "guard against an empty result before transitioning to .recording. On cold start " +
-            "the AU may not have delivered any chunks yet, so the user sees a recording UI " +
-            "with no audio actually flowing. Subsequent recordings work because the AU is warm. " +
-            "Fix: guard that at least one buffered or interim chunk exists before transitioning; " +
-            "if empty, wait for the first tap callback or abort with an error.")
+        let onStreamingBody = substring(content, from: onStreamingRange.lowerBound, length: 400)
+        let recordingInOnStreaming = onStreamingBody.contains("transition(to: .recording)")
+        XCTAssertTrue(recordingInOnStreaming,
+            "Bug 146 CONFIRMED (Phase 8): .recording transition not gated on engine-ready signal. " +
+            "Phase 8 fix: appState.transition(to: .recording) must be inside audioPipeline.onStreaming " +
+            "(fires when engine sends .ready), not called unconditionally in startRecordingSession.")
     }
 
     // =======================================================================

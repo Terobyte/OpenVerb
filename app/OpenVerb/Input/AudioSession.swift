@@ -66,6 +66,20 @@ final class AudioSession {
     private var residual = Data()
 
     // -----------------------------------------------------------------------
+    // Private — ring buffer write path (Phase 7)
+    //
+    // Separate lock so the realtime audio thread never contends with the
+    // AudioRingBuffer's own lock under the main AudioSession lock.
+    // -----------------------------------------------------------------------
+
+    private let rbLock = OSAllocatedUnfairLock()
+    private weak var _ringBuffer: AudioRingBuffer?
+    private var _ringBufferHandle: AudioRingBuffer.Handle?
+    // Monotonically-increasing timestamp seed, advanced 128 ms per chunk so
+    // each chunk has a unique timestamp for AudioRingBuffer.readNext ordering.
+    private var _ringBufferTimestamp: TimeInterval = 0
+
+    // -----------------------------------------------------------------------
     // Public — read-only state
     // -----------------------------------------------------------------------
 
@@ -82,6 +96,24 @@ final class AudioSession {
         lock.lock()
         defer { lock.unlock() }
         return _sessionGeneration
+    }
+
+    // -----------------------------------------------------------------------
+    // setRingBuffer — called by AppDelegate to wire/unwire the ring buffer
+    // path for the current recording session.
+    //
+    // Pass (nil, nil) to clear the handle (stop writes) on session end.
+    // Thread-safe: protected by rbLock, separate from the main audio lock.
+    // -----------------------------------------------------------------------
+
+    func setRingBuffer(_ buffer: AudioRingBuffer?, handle: AudioRingBuffer.Handle?) {
+        rbLock.lock()
+        _ringBuffer = buffer
+        _ringBufferHandle = handle
+        if buffer != nil {
+            _ringBufferTimestamp = Date().timeIntervalSinceReferenceDate
+        }
+        rbLock.unlock()
     }
 
     // -----------------------------------------------------------------------
@@ -303,6 +335,7 @@ final class AudioSession {
         // Callbacks fire outside the lock so they never block audio.
         var chunksToSend: [Data] = []
         var chunksToDisplay: [Data] = []
+        var chunksForRingBuffer: [Data] = []
 
         lock.lock()
 
@@ -317,6 +350,7 @@ final class AudioSession {
         while offset + Constants.CHUNK_BYTES <= combined.count {
             let chunk = Data(combined[offset ..< offset + Constants.CHUNK_BYTES])
             chunksToDisplay.append(chunk)   // guaranteed 4096-byte chunk for waveform
+            chunksForRingBuffer.append(chunk)
             if sendCallback != nil {
                 // Will be dispatched after we release the lock.
                 chunksToSend.append(chunk)
@@ -360,6 +394,26 @@ final class AudioSession {
                 lock.unlock()
                 guard stillCapturing else { break }
                 send(chunk)
+            }
+        }
+
+        // Ring buffer write path — active whenever a handle is wired via
+        // setRingBuffer(). Timestamps are monotonically increasing (128 ms per
+        // chunk) so AudioRingBuffer.readNext ordering is always correct.
+        if !chunksForRingBuffer.isEmpty {
+            rbLock.lock()
+            let rb = _ringBuffer
+            let h = _ringBufferHandle
+            var ts = _ringBufferTimestamp
+            rbLock.unlock()
+            if let rb, let h {
+                for chunk in chunksForRingBuffer {
+                    rb.write(chunk, timestamp: ts, handle: h)
+                    ts += 0.128
+                }
+                rbLock.lock()
+                _ringBufferTimestamp = ts
+                rbLock.unlock()
             }
         }
     }

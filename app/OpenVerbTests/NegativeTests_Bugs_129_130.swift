@@ -53,90 +53,29 @@ final class NegativeTests_Bugs_129_130: XCTestCase {
 
     func testBug129_InterimFramesEnqueuedBeforeLiveCallbackCanRace() {
         guard let appSrc = readSource("OpenVerb/App/OpenVerbApp.swift") else {
-            XCTFail("Bug 129 CONFIRMED: Cannot read OpenVerbApp.swift. Fix: ensure interim frames are " +
-                    "dispatched to ioQueue before the live callback can race ahead — use a sync fence " +
-                    "or dispatch interim frames inside commitSendCallback.")
-            return
+            XCTFail("Cannot read OpenVerbApp.swift"); return
         }
-        guard readSource("OpenVerb/Engine/EngineClient.swift") != nil else {
-            XCTFail("Bug 129 CONFIRMED: Cannot read EngineClient.swift. Fix: ensure sendAudioFrame " +
-                    "ordering is guaranteed when flushing interim frames.")
-            return
+        // Phase 8: commitSendCallback + interim-frame ordering replaced by AudioRingBuffer.
+        // Frames are written to the ring buffer by the audio tap with monotonically
+        // increasing timestamps (_ringBufferTimestamp), and consumed by
+        // AudioPipeline.streamLive via afterTimestamp: lastSentTimestamp. Both write and
+        // read paths are strictly ordered — no concurrent main-thread/audio-thread race.
+        //
+        // Verify Phase 8 design: commitSendCallback is gone; ring buffer timestamps provide ordering.
+        let stillHasCommitSendCallback = appSrc.contains("commitSendCallback")
+        XCTAssertFalse(stillHasCommitSendCallback,
+            "Bug 129 CONFIRMED: commitSendCallback still present in OpenVerbApp.swift. " +
+            "Phase 8 should replace this with ring buffer writes from AudioSession.")
+
+        guard let audioSrc = readSource("OpenVerb/Input/AudioSession.swift") else {
+            XCTFail("Cannot read AudioSession.swift"); return
         }
-
-        // Isolate the section of OpenVerbApp.swift around the commitSendCallback call.
-        // The buggy code pattern is:
-        //   let interim = audioSession.commitSendCallback(liveCallback)
-        //   for chunk in interim {
-        //       engineManager.engineClient.sendAudioFrame(chunk)   <- ioQueue.async
-        //   }
-        //   engineManager.engineClient.syncOnIOQueue()
-        //
-        // The fix must ensure the interim frames reach ioQueue atomically before
-        // any live frame can be inserted by the audio thread.  Look for one of:
-        //   (a) an ioQueue.sync call wrapping (or replacing) the interim for-loop, OR
-        //   (b) interim frames dispatched inside commitSendCallback itself.
-
-        // Find the commitSendCallback call site in OpenVerbApp.swift.
-        // The outer guard verifies the symbol exists; the inner closure reuses
-        // the same search to avoid re-scanning (Swift warns if a guard-let result
-        // is unused, so we use it directly for the lookback window).
-        guard let firstCommitRange = appSrc.range(of: "commitSendCallback") else {
-            XCTFail("Bug 129 CONFIRMED: commitSendCallback not found in OpenVerbApp.swift — " +
-                    "the call site may have moved. Review manually.")
-            return
-        }
-
-        // Option (a): The interim loop uses a sync fence between dispatching frames.
-        // Specifically, the for-loop body should call something that synchronously
-        // waits (e.g. ioQueue.sync, or a syncOnIOQueue() before the loop) so no
-        // live frame can be inserted between interim dispatches.
-        //
-        // The minimal correct fix: move syncOnIOQueue() to BEFORE the live callback
-        // is installed, i.e., inside commitSendCallback, or perform:
-        //   engineManager.engineClient.syncOnIOQueue()  <- BEFORE commitSendCallback
-        //   let interim = audioSession.commitSendCallback(liveCallback)
-        //   for chunk in interim { sendAudioFrame(chunk) }
-        //
-        // Option (b): commitSendCallback in AudioSession.swift dispatches frames
-        // to ioQueue internally.  Check if AudioSession.swift contains an ioQueue
-        // reference at all (it should NOT normally, but the fix might pass ioQueue in).
-
-        // The buggy pattern: syncOnIOQueue() appears AFTER the interim for-loop,
-        // meaning the fence comes too late (live frames have already raced in).
-        // Detect that syncOnIOQueue() still follows the loop rather than preceding it.
-
-        let syncBeforeCommit: Bool = {
-            // Check if syncOnIOQueue() appears BEFORE commitSendCallback in the
-            // broader source window (within 200 chars preceding the commit call).
-            // Use firstCommitRange (already found above) to avoid re-scanning.
-            let lookbackStart = appSrc.index(firstCommitRange.lowerBound,
-                                             offsetBy: -200,
-                                             limitedBy: appSrc.startIndex) ?? appSrc.startIndex
-            let lookback = String(appSrc[lookbackStart ..< firstCommitRange.lowerBound])
-            return lookback.contains("syncOnIOQueue()")
-        }()
-
-        let syncInsideCommitSendCallback: Bool = {
-            guard let audioSrc = readSource("OpenVerb/Input/AudioSession.swift") else { return false }
-            // The fix could dispatch interim frames to ioQueue from within
-            // commitSendCallback — check if commitSendCallback body now contains
-            // an ioQueue reference.
-            guard let funcRange = audioSrc.range(of: "func commitSendCallback(") else { return false }
-            let funcWindow = String(audioSrc[funcRange.lowerBound...].prefix(400))
-            return funcWindow.contains("ioQueue")
-        }()
-
-        XCTAssertTrue(
-            syncBeforeCommit || syncInsideCommitSendCallback,
-            "Bug 129 CONFIRMED: commitSendCallback + interim-frame ordering race — " +
-            "the audio thread can dispatch a live frame to ioQueue via ioQueue.async before " +
-            "the main thread's interim for-loop has enqueued the earlier interim frames, " +
-            "causing a chronologically older frame to arrive at the engine after a newer one. " +
-            "Fix: call syncOnIOQueue() BEFORE commitSendCallback() so the audio thread cannot " +
-            "race the interim enqueue, OR dispatch interim frames inside commitSendCallback() " +
-            "itself (passing ioQueue as a parameter) so ordering is guaranteed atomically."
-        )
+        let hasTimestampOrdering = audioSrc.contains("_ringBufferTimestamp")
+        XCTAssertTrue(hasTimestampOrdering,
+            "Bug 129 CONFIRMED (Phase 8): AudioSession ring buffer path lacks monotonic " +
+            "timestamp writes (_ringBufferTimestamp). Frame ordering is not guaranteed. " +
+            "Fix: write each chunk with an incrementing timestamp so the consumer reads " +
+            "frames in strict chronological order via afterTimestamp: lastSentTimestamp.")
     }
 
     // =======================================================================

@@ -234,45 +234,19 @@ final class NegativeTests_Bugs_109_115: XCTestCase {
     // =======================================================================
 
     func testBug113_drainResultChecksGenerationBeforeProcessingMessage_sourceInspection() {
-        guard let content = readSource("OpenVerb/App/OpenVerbApp.swift") else {
-            XCTFail("Cannot read OpenVerbApp.swift"); return
+        // Phase 8: drainResult replaced by AudioPipeline.streamLive. The mid-loop
+        // stale-message bug is prevented by handle isolation: streamLive checks
+        // `self.activeHandle == handle` at the start of every loop iteration.
+        guard let pipelineSrc = readSource("OpenVerb/Pipeline/AudioPipeline.swift") else {
+            XCTFail("Cannot read AudioPipeline.swift"); return
         }
-        // The bug: generation is only in the `while` condition and in the catch
-        // block.  After a successful `await receiveMessage()` the loop body
-        // runs without re-checking generation — one stale message slips through.
-        //
-        // A correct implementation places the guard in the SUCCESS path:
-        //   msg = try await receiveMessage(...)
-        //   } catch { ... }           // catch block (already has guard)
-        //   guard generation == drainGeneration else { return }  // ← NEW
-        //   switch msg { ... }
-        //
-        // Strategy: extract the text BETWEEN the closing `}` of the catch block
-        // and the `switch msg {` line.  The guard must appear in that gap.
-        guard let drainRange = content.range(of: "func drainResult(generation:") else {
-            XCTFail("Cannot find drainResult in OpenVerbApp.swift"); return
-        }
-        let afterDrain = String(content[drainRange.lowerBound...])
-
-        // Find the end of the catch block — the `return` inside the catch,
-        // followed by the closing brace of the catch.
-        // We use the landmark `return\n        }\n\n        switch msg` which
-        // represents the normal (unfixed) layout.
-        let catchEndMarker = "return\n            }\n\n            switch msg {"
-        let fixedCatchEndMarker = "return\n            }\n\n            guard generation == drainGeneration else { return }\n            switch msg {"
-
-        let hasMidLoopGuard = afterDrain.contains(fixedCatchEndMarker)
-        let hasOriginalLayout = afterDrain.contains(catchEndMarker)
-
-        // Pass only if the mid-loop guard is present; fail if we see the
-        // original layout (guard absent between catch-end and switch msg).
-        XCTAssertTrue(hasMidLoopGuard || !hasOriginalLayout,
-            "Bug 113 CONFIRMED: drainResult() lacks a generation guard in the success path. " +
-            "After `await receiveMessage()` completes, the while-condition is not re-checked " +
-            "until the end of the loop body, so one message from an aborted session is fully " +
-            "processed (livePartialText +=) before the stale-generation check fires. " +
-            "Fix: add `guard generation == drainGeneration else { return }` immediately after " +
-            "the closing `}` of the do-catch block and before the `switch msg {` statement.")
+        let hasPerIterationHandleCheck = pipelineSrc.contains("self.activeHandle == handle")
+        XCTAssertTrue(hasPerIterationHandleCheck,
+            "Bug 113 CONFIRMED (Phase 8): AudioPipeline.streamLive does not check " +
+            "handle validity each loop iteration. A message from a cancelled session " +
+            "could be processed before the loop detects the invalidated handle. " +
+            "Fix: add `let isActive = await MainActor.run { self.activeHandle == handle }; " +
+            "guard isActive else { break }` at the top of each streaming loop iteration.")
     }
 
     // =======================================================================

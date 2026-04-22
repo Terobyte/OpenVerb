@@ -34,24 +34,23 @@ final class NegativeTests_Bugs_81_87: XCTestCase {
             XCTFail("Cannot read OpenVerbApp.swift"); return
         }
 
-        // The fix requires some guard that prevents a second drainResult Task.
-        // Acceptable patterns: `guard !isDraining`, `guard !isStoppingRecording`,
-        // or any boolean sentinel checked at the top of stopRecording().
-        let hasGuardIsDraining   = content.contains("guard !isDraining")
-        let hasGuardIsStop       = content.contains("guard !isStoppingRecording")
-        let hasIsDrainingSet     = content.contains("isDraining = true")
-        let hasIsStoppingSet     = content.contains("isStoppingRecording = true")
+        // Phase 8: drainResult is removed. Re-entrancy is now prevented by
+        // AudioPipeline's handle-based session isolation plus AppState guard.
+        // The first stopRecording() call transitions state to .inferring; a
+        // concurrent second call sees state != .recording and returns early.
+        // Acceptable patterns (in order of preference):
+        //   1. `guard appState.state == .recording` — state-based guard
+        //   2. `guard let handle = activePipelineHandle` — nil guard
+        //   3. legacy `guard !isDraining` — kept for backward compat
+        let hasStateGuard    = content.contains("guard appState.state == .recording")
+        let hasHandleGuard   = content.contains("guard let handle = activePipelineHandle")
+        let hasLegacyGuard   = content.contains("guard !isDraining")
 
-        let hasReentrancyGuard   = (hasGuardIsDraining || hasGuardIsStop)
-                                 && (hasIsDrainingSet   || hasIsStoppingSet)
-
-        XCTAssertTrue(hasReentrancyGuard,
+        XCTAssertTrue(hasStateGuard || hasHandleGuard || hasLegacyGuard,
             "Bug 81 CONFIRMED: stopRecording() has no re-entrancy guard. " +
-            "Two concurrent callers (Stop button + maxDurationTimer) each spawn a " +
-            "drainResult Task; both call receiveMessage() on the same socket, racing " +
-            "through socketReadLock. Fix: add a `guard !isDraining else { return }` " +
-            "boolean check at the top of stopRecording() and set `isDraining = true` " +
-            "before launching the drain Task.")
+            "Two concurrent callers (Stop button + maxDurationTimer) must be " +
+            "prevented from double-stopping. Phase 8 fix: guard on " +
+            "`appState.state == .recording` or `activePipelineHandle != nil`.")
     }
 
     // =======================================================================

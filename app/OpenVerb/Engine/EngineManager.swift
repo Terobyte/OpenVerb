@@ -273,8 +273,13 @@ final class EngineManager: ObservableObject {
         // before binding the socket (Phase 1 fix), so model load (5-10 s on
         // cold start) must complete before tryPing() can succeed.  30 s gives
         // headroom for slow hardware and large models.
+        // Bug 176: fast-fail if the process has already exited (e.g. /usr/bin/false
+        // in tests, or a real crash). No point polling for a socket that will never appear.
         let deadline = Date().addingTimeInterval(30.0)
         while Date() < deadline {
+            if let proc = process, !proc.isRunning {
+                break
+            }
             if await tryPing() {
                 status = .running
                 lastSuccessfulConnect = Date()

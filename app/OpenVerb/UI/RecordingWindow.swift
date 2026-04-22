@@ -25,6 +25,9 @@ final class RecordingWindow: NSPanel {
     /// Set after init by AppDelegate to wire the Stop button to stopRecording().
     var onStop: (() -> Void)?
 
+    /// Floating subtitle panel shown below this window during recording.
+    private var subtitlePanel: SubtitlePanel?
+
     // -----------------------------------------------------------------------
     // Init — build the panel and embed the SwiftUI content.
     // -----------------------------------------------------------------------
@@ -69,6 +72,7 @@ final class RecordingWindow: NSPanel {
         hosting.wantsLayer = true
         hosting.layer?.backgroundColor = .clear
         self.contentView = hosting
+        self.subtitlePanel = SubtitlePanel(appState: appState, settings: settings)
     }
 
     // -----------------------------------------------------------------------
@@ -78,6 +82,8 @@ final class RecordingWindow: NSPanel {
     func show() {
         recenterOnMouseScreen()
         orderFrontRegardless()
+        subtitlePanel?.attach(to: self)
+        subtitlePanel?.orderFrontRegardless()
     }
 
     // -----------------------------------------------------------------------
@@ -85,6 +91,7 @@ final class RecordingWindow: NSPanel {
     // -----------------------------------------------------------------------
 
     func hide() {
+        subtitlePanel?.orderOut(nil)
         orderOut(nil)
     }
 

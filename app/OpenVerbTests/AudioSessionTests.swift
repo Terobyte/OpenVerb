@@ -129,4 +129,38 @@ final class AudioSessionTests: XCTestCase {
         }
         wait(for: [exp], timeout: 2.0)
     }
+
+    // MARK: Phase 7 — ring buffer write path
+
+    func testAudioSessionDoesNotUsePreBuffer() {
+        // Phase 11: USE_RING_BUFFER_PIPELINE flag has been removed. AudioSession
+        // should always use the ring buffer path and must not rely on the
+        // preBuffer/sendCallback approach being the only write destination.
+        let sourcePath = URL(fileURLWithPath: #file)
+            .deletingLastPathComponent()  // OpenVerbTests/
+            .deletingLastPathComponent()  // app/
+            .appendingPathComponent("OpenVerb/Input/AudioSession.swift")
+        guard let source = try? String(contentsOf: sourcePath, encoding: .utf8) else {
+            XCTFail("Could not read AudioSession.swift — check path")
+            return
+        }
+        XCTAssertFalse(source.contains("USE_RING_BUFFER_PIPELINE"),
+            "Phase 11: USE_RING_BUFFER_PIPELINE flag must be absent from AudioSession.swift")
+        XCTAssertTrue(source.contains("setRingBuffer"),
+            "AudioSession must expose setRingBuffer() to wire ring buffer sessions")
+        XCTAssertTrue(source.contains("rb.write("),
+            "AudioSession must call AudioRingBuffer.write() for each PCM chunk")
+        XCTAssertTrue(source.contains("_ringBufferTimestamp"),
+            "AudioSession must track monotonic timestamps so readNext ordering is correct")
+    }
+
+    func testAudioSessionSetRingBufferClearsOnNil() {
+        // Setting (nil, nil) must clear the ring buffer reference without crashing.
+        let session = AudioSession()
+        let rb = AudioRingBuffer()
+        let handle = AudioRingBuffer.Handle()
+        session.setRingBuffer(rb, handle: handle)
+        session.setRingBuffer(nil, handle: nil as AudioRingBuffer.Handle?)
+        XCTAssertFalse(session.isCapturing)
+    }
 }

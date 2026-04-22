@@ -41,6 +41,9 @@
 		B3A1E2F3D4C5B6A7F0000002 /* Carbon.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7F0000102 /* Carbon.framework */; };
 		B3A1E2F3D4C5B6A7F0000003 /* ApplicationServices.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7F0000103 /* ApplicationServices.framework */; };
 		B3A1E2F3D4C5B6A7E8F9C027 /* FFTProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9A083 /* FFTProcessor.swift */; };
+		B3A1E2F3D4C5B6A7E8F9C028 /* AudioRingBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9A084 /* AudioRingBuffer.swift */; };
+		B3A1E2F3D4C5B6A7E8F9C029 /* AudioPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9A085 /* AudioPipeline.swift */; };
+		B3A1E2F3D4C5B6A7E8F9C030 /* SubtitlePanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9A086 /* SubtitlePanel.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -88,6 +91,9 @@
 		B3A1E2F3D4C5B6A7E8F9A05E /* OpenVerb.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = OpenVerb.entitlements; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9A05F /* TextInjector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextInjector.swift; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9A083 /* FFTProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FFTProcessor.swift; sourceTree = "<group>"; };
+		B3A1E2F3D4C5B6A7E8F9A084 /* AudioRingBuffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioRingBuffer.swift; sourceTree = "<group>"; };
+		B3A1E2F3D4C5B6A7E8F9A085 /* AudioPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioPipeline.swift; sourceTree = "<group>"; };
+		B3A1E2F3D4C5B6A7E8F9A086 /* SubtitlePanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubtitlePanel.swift; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9A068 /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettings.swift; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9A069 /* PreferencesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreferencesView.swift; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9A06A /* AccessibilityReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityReader.swift; sourceTree = "<group>"; };
@@ -156,6 +162,7 @@
 				B3A1E2F3D4C5B6A7E8F9D001 /* State */,
 				B3A1E2F3D4C5B6A7E8F9D002 /* Engine */,
 				B3A1E2F3D4C5B6A7E8F9D003 /* Input */,
+				B3A1E2F3D4C5B6A7E8F9D00A /* Pipeline */,
 				B3A1E2F3D4C5B6A7E8F9D004 /* Context */,
 				B3A1E2F3D4C5B6A7E8F9D005 /* UI */,
 				B3A1E2F3D4C5B6A7E8F9D007 /* Output */,
@@ -210,6 +217,7 @@
 		B3A1E2F3D4C5B6A7E8F9D003 /* Input */ = {
 			isa = PBXGroup;
 			children = (
+				B3A1E2F3D4C5B6A7E8F9A084 /* AudioRingBuffer.swift */,
 				B3A1E2F3D4C5B6A7E8F9A056 /* AudioSession.swift */,
 				B3A1E2F3D4C5B6A7E8F9A057 /* HotkeyManager.swift */,
 				B3A1E2F3D4C5B6A7E8F9A06B /* ShortcutRecorder.swift */,
@@ -235,6 +243,7 @@
 				B3A1E2F3D4C5B6A7E8F9A05A /* RecordingWindow.swift */,
 				B3A1E2F3D4C5B6A7E8F9A05B /* StatusBarItem.swift */,
 				B3A1E2F3D4C5B6A7E8F9A05C /* WaveformView.swift */,
+				B3A1E2F3D4C5B6A7E8F9A086 /* SubtitlePanel.swift */,
 				B3A1E2F3D4C5B6A7E8F9A069 /* PreferencesView.swift */,
 				B3A1E2F3D4C5B6A7E8F9A06D /* OnboardingView.swift */,
 			);
@@ -273,6 +282,14 @@
 				B3A1E2F3D4C5B6A7E8F9A06C /* ModelDownloader.swift */,
 			);
 			path = Model;
+			sourceTree = "<group>";
+		};
+		B3A1E2F3D4C5B6A7E8F9D00A /* Pipeline */ = {
+			isa = PBXGroup;
+			children = (
+				B3A1E2F3D4C5B6A7E8F9A085 /* AudioPipeline.swift */,
+			);
+			path = Pipeline;
 			sourceTree = "<group>";
 		};
 		B3A1E2F3D4C5B6A7F0000200 /* Frameworks */ = {
@@ -412,6 +429,9 @@
 				B3A1E2F3D4C5B6A7E8F9C024 /* ModelDownloader.swift in Sources */,
 				B3A1E2F3D4C5B6A7E8F9C025 /* OnboardingView.swift in Sources */,
 				B3A1E2F3D4C5B6A7E8F9C027 /* FFTProcessor.swift in Sources */,
+				B3A1E2F3D4C5B6A7E8F9C028 /* AudioRingBuffer.swift in Sources */,
+				B3A1E2F3D4C5B6A7E8F9C029 /* AudioPipeline.swift in Sources */,
+				B3A1E2F3D4C5B6A7E8F9C030 /* SubtitlePanel.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

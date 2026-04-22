@@ -196,35 +196,24 @@ final class NegativeTests_Bugs_74_80: XCTestCase {
     // =======================================================================
 
     func testBug78_drainResultResultCaseChecksGenerationBeforeTransition() {
-        guard let content = readSource("OpenVerb/App/OpenVerbApp.swift") else {
-            XCTFail("Cannot read OpenVerbApp.swift"); return
+        guard let pipelineSrc = readSource("OpenVerb/Pipeline/AudioPipeline.swift") else {
+            XCTFail("Cannot read AudioPipeline.swift"); return
         }
-
-        // Locate the .result case inside drainResult.
-        // The pattern `case .result(let text, let command):` is unique to drainResult.
-        guard let resultCaseRange = content.range(of: "case .result(let text, let command):") else {
-            XCTFail("Cannot find .result case in OpenVerbApp.swift"); return
+        // Phase 8: drainResult replaced by AudioPipeline. The .result case race is
+        // prevented by handle-based isolation: finalize(handle:) guards on
+        // `handle == activeHandle` before firing onResult.
+        guard let finalizeRange = pipelineSrc.range(of: "func finalize(handle:") else {
+            XCTFail("Cannot find finalize(handle:) in AudioPipeline.swift"); return
         }
-
-        // Extract the .result case body — it extends to `return` at approximately
-        // 600 chars from the case label.
-        let caseStart = resultCaseRange.lowerBound
-        let caseEnd = content.index(caseStart, offsetBy: 700, limitedBy: content.endIndex) ?? content.endIndex
-        let resultCaseBody = String(content[caseStart..<caseEnd])
-
-        // The fix requires a generation guard before teardown:
-        //   guard generation == drainGeneration else { return }
-        let hasGenerationGuardInResult =
-            resultCaseBody.contains("generation == drainGeneration") ||
-            resultCaseBody.contains("drainGeneration == generation")
-
-        XCTAssertTrue(hasGenerationGuardInResult,
-            "Bug 78 CONFIRMED: The .result case in drainResult() calls transition(to: .idle) " +
-            "and tears down the session without re-checking generation == drainGeneration. " +
-            "After abortAndRestart() bumps drainGeneration, the stale drain's .result fires " +
-            "and cancels the new session via the PREPARING→IDLE transition. " +
-            "Fix: add `guard generation == drainGeneration else { return }` at the top of " +
-            "the .result case body before any disconnect/teardown/transition calls.")
+        let end = pipelineSrc.index(finalizeRange.lowerBound,
+                                    offsetBy: 300, limitedBy: pipelineSrc.endIndex) ?? pipelineSrc.endIndex
+        let finalizeBody = String(pipelineSrc[finalizeRange.lowerBound..<end])
+        let hasHandleGuard = finalizeBody.contains("guard handle == activeHandle")
+        XCTAssertTrue(hasHandleGuard,
+            "Bug 78 CONFIRMED (Phase 8): AudioPipeline.finalize(handle:) lacks handle isolation guard. " +
+            "A stale streamLive Task reaching finalize after abortAndRestart() would fire onResult " +
+            "on the new session. Fix: add `guard handle == activeHandle else { return }` at the top " +
+            "of finalize(handle:).")
     }
 
     // =======================================================================
@@ -243,54 +232,24 @@ final class NegativeTests_Bugs_74_80: XCTestCase {
     // =======================================================================
 
     func testBug79_drainResultErrorCaseGuardsHandleCrashWithGeneration() {
-        guard let content = readSource("OpenVerb/App/OpenVerbApp.swift") else {
-            XCTFail("Cannot read OpenVerbApp.swift"); return
+        guard let pipelineSrc = readSource("OpenVerb/Pipeline/AudioPipeline.swift") else {
+            XCTFail("Cannot read AudioPipeline.swift"); return
         }
-
-        // Search the full file for the .error case inside the drainResult switch.
-        // The unique fingerprint is: the case label immediately followed by the
-        // unguarded handleCrash Task spawn on the next line.
-        //
-        // Buggy pattern:
-        //   case .error(let code, let message):
-        //       Task { [weak self] in try? await self?.engineManager.handleCrash() }
-        //
-        // Fixed pattern: must have a generation guard before the Task spawn.
-
-        // Find the drainResult function start.
-        guard let drainRange = content.range(of: "private func drainResult(generation:") else {
-            XCTFail("Cannot find drainResult(generation:) in OpenVerbApp.swift"); return
+        // Phase 8: drainResult replaced by AudioPipeline. The .error case race is
+        // prevented by handle-based isolation: enterError(handle:) guards on
+        // `handle == activeHandle` before firing onError or calling handleCrash.
+        guard let enterErrorRange = pipelineSrc.range(of: "func enterError(handle:") else {
+            XCTFail("Cannot find enterError(handle:) in AudioPipeline.swift"); return
         }
-
-        // Extract a large enough window to cover the whole drainResult body.
-        let bodyStart = drainRange.lowerBound
-        let bodyEnd = content.index(bodyStart, offsetBy: 8000, limitedBy: content.endIndex) ?? content.endIndex
-        let drainBody = String(content[bodyStart..<bodyEnd])
-
-        // Find the switch-case .error inside this window.
-        guard let errorCaseRange = drainBody.range(of: "case .error(let code, let message):") else {
-            XCTFail("Cannot find `case .error(let code, let message):` in drainResult body " +
-                    "(window may be too small — increase offset)"); return
-        }
-
-        // Extract the .error case body (~500 chars is enough to cover the whole case).
-        let caseStart = errorCaseRange.lowerBound
-        let caseEnd = drainBody.index(caseStart, offsetBy: 600, limitedBy: drainBody.endIndex) ?? drainBody.endIndex
-        let errorCaseBody = String(drainBody[caseStart..<caseEnd])
-
-        // The fix must include a generation guard before spawning handleCrash().
-        let hasGenerationGuardInError =
-            errorCaseBody.contains("generation == drainGeneration") ||
-            errorCaseBody.contains("drainGeneration == generation")
-
-        XCTAssertTrue(hasGenerationGuardInError,
-            "Bug 79 CONFIRMED: The .error case in drainResult() spawns " +
-            "`Task { handleCrash() }` as its first statement, with no generation guard. " +
-            "After abortAndRestart() creates a new session and bumps drainGeneration, the " +
-            "stale drain's .error fires and handleCrash() calls engineClient.disconnect() " +
-            "on the live new session socket, aborting the new recording. " +
-            "Fix: add `guard generation == drainGeneration else { return }` before " +
-            "spawning the handleCrash Task in the .error case.")
+        let eeEnd = pipelineSrc.index(enterErrorRange.lowerBound,
+                                      offsetBy: 300, limitedBy: pipelineSrc.endIndex) ?? pipelineSrc.endIndex
+        let enterErrorBody = String(pipelineSrc[enterErrorRange.lowerBound..<eeEnd])
+        let hasHandleGuard = enterErrorBody.contains("guard handle == activeHandle")
+        XCTAssertTrue(hasHandleGuard,
+            "Bug 79 CONFIRMED (Phase 8): AudioPipeline.enterError(handle:) lacks handle isolation guard. " +
+            "A stale streamLive error would fire onError on a new session, calling disconnect() on " +
+            "the live socket. Fix: add `guard handle == activeHandle else { return }` at the top of " +
+            "enterError(handle:).")
     }
 
     // =======================================================================

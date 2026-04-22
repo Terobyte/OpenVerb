@@ -12,7 +12,7 @@
 - [x] Phase 3: "Swift Poll Timeout" → steps 10-15
 - [x] Phase 4: "AudioRingBuffer TDD" → steps 16-23
 - [x] Phase 5: "AudioPipeline State Machine" → steps 24-28
-- [ ] Phase 6: "AudioPipeline Consumer" → steps 29-33
+- [x] Phase 6: "AudioPipeline Consumer" → steps 29-33
 - [ ] Phase 7: "AudioSession Migration" → steps 34-39
 - [ ] Phase 8: "AppDelegate Integration" → steps 40-49
 - [ ] Phase 9: "Bug Fix Audit" → steps 50-54
@@ -20,7 +20,7 @@
 - [ ] Phase 11: "Feature Flag Cleanup" → steps 62-66
 - [ ] Phase 12: "SubtitlePanel Component" → steps 67-70
 - [ ] Phase 13: "SubtitlePanel Wiring" → steps 71-74
-- [ ] Phase 14: "Live Subtitle Diagnosis" → steps 75-81
+- [x] Phase 14: "Live Subtitle Diagnosis" → steps 75-81
 - [ ] Phase 15: "Human Verification" → steps 82-87
 
 ## Steps
@@ -52,12 +52,12 @@
 - [x] [architect] Create app/OpenVerb/Pipeline/AudioPipeline.swift with @MainActor state machine scaffold
 - [x] [tdd-guide] Run AudioPipelineTests to confirm all six state machine tests pass
 - [x] [devops] Commit AudioPipeline state machine
-- [ ] [refactor] Expose socketPath in EngineManager by removing private keyword on line 62
-- [ ] [architect] Replace AudioPipeline.swift entirely with full streamLive implementation (async contextProvider, detached consumer, error recovery)
-- [ ] [devops] Run swift build to check for compile errors after AudioPipeline replacement
-- [ ] [tdd-guide] Run full swift test suite to confirm state machine tests still pass
-- [ ] [devops] Commit streamLive consumer coroutine
-- [ ] [architect] Add USE_RING_BUFFER_PIPELINE feature flag to Constants.swift
+- [x] [refactor] Expose socketPath in EngineManager by removing private keyword on line 62
+- [x] [architect] Replace AudioPipeline.swift entirely with full streamLive implementation (async contextProvider, detached consumer, error recovery)
+- [x] [devops] Run swift build to check for compile errors after AudioPipeline replacement
+- [x] [tdd-guide] Run full swift test suite to confirm state machine tests still pass
+- [x] [devops] Commit streamLive consumer coroutine
+- [x] [architect] Add USE_RING_BUFFER_PIPELINE feature flag to Constants.swift
 - [ ] [tdd-guide] Write failing testAudioSessionWritesToRingBufferWhenFlagEnabled source-scan test
 - [ ] [tdd-guide] Run the new AudioSession test to confirm it fails
 - [ ] [refactor] Refactor AudioSession.swift to write to AudioRingBuffer with OSAllocatedUnfairLock-protected handle and nil-guard
@@ -75,16 +75,16 @@
 - [ ] [devops] Commit wire AudioPipeline into AppDelegate
 - [ ] [tdd-guide] Grep all Bug N comments in AudioSession/EngineClient/EngineManager/OpenVerbApp
 - [ ] [refactor] Classify each bug comment as remove/port/delete in inline comments or commit message
-- [ ] [tdd-guide] Add prove_bug16_staleHandleIsNoOp and prove_bug81_doubleStopIsNoOp negative tests
-- [ ] [tdd-guide] Run full test suite with new negative tests included
-- [ ] [devops] Commit negative tests for bugs 16 and 81 under AudioPipeline
-- [ ] [refactor] Grep Phase 2 monitor code in EngineClient.swift to identify deletion scope
-- [ ] [refactor] Delete Phase 2 monitor code from EngineClient.swift (phase2Error/phase2Lock/wakeRead/wakeWrite/runPhase2Monitor/startPhase2/stopPhase2/callOnErrorIfLive)
-- [ ] [refactor] Remove startPhase2Monitor/stopPhase2Monitor call sites from OpenVerbApp.swift and EngineManager.swift
+- [x] [tdd-guide] Add prove_bug16_staleHandleIsNoOp and prove_bug81_doubleStopIsNoOp negative tests
+- [x] [tdd-guide] Run full test suite with new negative tests included
+- [x] [devops] Commit negative tests for bugs 16 and 81 under AudioPipeline
+- [x] [refactor] Grep Phase 2 monitor code in EngineClient.swift to identify deletion scope
+- [x] [refactor] Delete Phase 2 monitor code from EngineClient.swift (phase2Error/phase2Lock/wakeRead/wakeWrite/runPhase2Monitor/startPhase2/stopPhase2/callOnErrorIfLive)
+- [x] [refactor] Remove startPhase2Monitor/stopPhase2Monitor call sites from OpenVerbApp.swift and EngineManager.swift
 - [ ] [tdd-guide] Update or delete negative tests for bugs 17, 27, 28 that scan for removed Phase 2 monitor code
-- [ ] [devops] Run swift build to verify removal compiles
-- [ ] [tdd-guide] Run full swift test suite
-- [ ] [devops] Commit remove Phase 2 monitor from EngineClient
+- [x] [devops] Run swift build to verify removal compiles
+- [x] [tdd-guide] Run full swift test suite
+- [x] [devops] Commit remove Phase 2 monitor from EngineClient
 - [ ] [refactor] Delete USE_RING_BUFFER_PIPELINE line from Constants.swift
 - [ ] [refactor] Replace all Constants.USE_RING_BUFFER_PIPELINE if/else in AudioSession with true-branch content
 - [ ] [tdd-guide] Replace testAudioSessionWritesToRingBufferWhenFlagEnabled with testAudioSessionDoesNotUsePreBuffer
@@ -98,13 +98,13 @@
 - [ ] [frontend-dev] Wire show/hide SubtitlePanel with RecordingWindow.show/hide
 - [ ] [devops] Run swift build and swift test after SubtitlePanel wiring
 - [ ] [devops] Commit wire SubtitlePanel into RecordingWindow
-- [ ] [refactor] Add logger.debug instrumentation before onPartialResult call in EngineClient
-- [ ] [refactor] Grep existing onPartialResult and livePartialText wiring in AppDelegate
-- [ ] [architect] Verify AppState.livePartialText is @Published and SubtitleView observes it
-- [ ] [tdd-guide] Write testLivePartialTextUpdatesFromPartialResult integration test
-- [ ] [tdd-guide] Run partial result test and diagnose wiring vs engine-side issue
-- [ ] [refactor] Fix identified root cause of live subtitle wiring (closure assignment or actor isolation)
-- [ ] [devops] Commit fix live subtitle path wiring
+- [x] [refactor] Add logger.debug instrumentation before onPartialResult call in EngineClient
+- [x] [refactor] Grep existing onPartialResult and livePartialText wiring in AppDelegate
+- [x] [architect] Verify AppState.livePartialText is @Published and SubtitleView observes it
+- [x] [tdd-guide] Write testLivePartialTextUpdatesFromPartialResult integration test
+- [x] [tdd-guide] Run partial result test and diagnose wiring vs engine-side issue
+- [x] [refactor] Fix identified root cause of live subtitle wiring (closure assignment or actor isolation)
+- [x] [devops] Commit fix live subtitle path wiring
 - [ ] [general] HUMAN: Open Xcode and add AudioRingBuffer.swift, Pipeline/AudioPipeline.swift, SubtitlePanel.swift to OpenVerb app target, then run ov to confirm BUILD SUCCEEDED
 - [ ] [general] HUMAN: Launch fresh app, press hotkey immediately, speak 5s sentence, verify transcript contains beginning of utterance and ensure_loaded log appears before ipc listening
 - [ ] [general] HUMAN: Perform 5 consecutive recordings without pause, verify all 5 produce non-empty transcripts
