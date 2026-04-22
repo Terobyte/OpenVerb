@@ -273,6 +273,8 @@ final class AudioPipeline {
         }
 
         // --- Tail-follow consumer loop ---
+        var streamSentFrames = 0
+        var streamSentBytes = 0
         do {
             // Check current pipeline state on MainActor each iteration to respect
             // cancel() and endRecording() transitions.
@@ -298,6 +300,8 @@ final class AudioPipeline {
                 ) {
                     engineClient.sendAudioFrame(chunk)
                     lastSentTimestamp = ts
+                    streamSentFrames += 1
+                    streamSentBytes += chunk.count
                 }
                 // If readNext timed out, loop again — state may have changed.
             }
@@ -316,7 +320,10 @@ final class AudioPipeline {
                 ) {
                     engineClient.sendAudioFrame(chunk)
                     lastSentTimestamp = ts
+                    streamSentFrames += 1
+                    streamSentBytes += chunk.count
                 }
+                pipelineLogger.info("AudioPipeline streamLive: sent \(streamSentFrames) frames, \(streamSentBytes) bytes before sentinel")
                 engineClient.sendEndOfAudio()
 
                 // Wait for .result

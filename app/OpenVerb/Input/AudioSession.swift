@@ -53,6 +53,8 @@ final class AudioSession {
     private var preBuffer: [Data] = []
     private var sendCallback: ((Data) -> Void)?
     private var _isCapturing = false
+    private var _sessionPeak: Int32 = 0
+    private var _sessionSampleCount: Int = 0
 
     // Monotonically-increasing session counter.  Incremented on every start().
     // Each processTapBuffer call captures the current value; the main-queue
@@ -146,6 +148,8 @@ final class AudioSession {
         preBuffer.removeAll()
         residual = Data()
         sendCallback = nil
+        _sessionPeak = 0
+        _sessionSampleCount = 0
         lock.unlock()
 
         // Bump _isCapturing/_sessionGeneration before engine.start() to keep
@@ -287,7 +291,10 @@ final class AudioSession {
 
         audioEngine.inputNode.removeTap(onBus: 0)
         audioEngine.stop()
-        logger.info("AudioSession stopped")
+        let peak = _sessionPeak
+        let samples = _sessionSampleCount
+        let durationMs = samples * 1000 / 16_000  // output rate
+        logger.info("AudioSession stopped — session peak=\(peak)/32767 (\(peak < 500 ? "near-silence, VAD will reject" : peak < 2000 ? "very quiet, may fail VAD" : "OK")) duration=\(durationMs)ms")
     }
 
     // -----------------------------------------------------------------------
@@ -330,6 +337,24 @@ final class AudioSession {
 
         let byteCount = Int(outBuf.frameLength) * 2  // 2 bytes per Int16 sample
         let rawData = Data(bytes: int16Data[0], count: byteCount)
+
+        // One-shot peak-level diagnostic: log the max absolute sample of the
+        // first three converter output buffers so we can tell an empty mic
+        // capture (peak == 0) from "mic is loud but VAD rejects" at a glance.
+        // Session-wide peak tracker: every converter output buffer contributes.
+        // Session ends log the total in stop() so we can tell "mic was quiet
+        // whole time" (peak < 500) from "user spoke loudly" (peak > 5000).
+        do {
+            let samplePtr = int16Data[0]
+            var peak: Int32 = 0
+            for i in 0..<Int(outBuf.frameLength) {
+                let s = Int32(samplePtr[i])
+                let a = s < 0 ? -s : s
+                if a > peak { peak = a }
+            }
+            if peak > self._sessionPeak { self._sessionPeak = peak }
+            self._sessionSampleCount &+= Int(outBuf.frameLength)
+        }
 
         // Lock guards _isCapturing / preBuffer / residual against stop().
         // Callbacks fire outside the lock so they never block audio.

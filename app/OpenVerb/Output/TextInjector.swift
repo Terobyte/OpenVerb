@@ -44,11 +44,17 @@ struct TextInjector {
         targetApp: NSRunningApplication,
         window: RecordingWindow
     ) async {
-        guard !targetApp.isTerminated else { window.orderOut(nil); return }
+        guard !targetApp.isTerminated else {
+            logger.warning("TextInjector: abort — targetApp=\(targetApp.localizedName ?? "<?>") is terminated")
+            window.orderOut(nil); return
+        }
 
         let pasteboard = NSPasteboard.general
 
-        if isSecureField() { window.orderOut(nil); return }
+        if isSecureField() {
+            logger.warning("TextInjector: abort — focused field is secure; text discarded")
+            window.orderOut(nil); return
+        }
 
         let savedItems = pasteboard.pasteboardItems?.compactMap { item -> NSPasteboardItem? in
             let copy = NSPasteboardItem()
@@ -70,6 +76,7 @@ struct TextInjector {
 
         // Bug 154: guard targetApp.activate — abort on focus-transfer fail.
         guard targetApp.activate(options: .activateIgnoringOtherApps) else {
+            logger.warning("TextInjector: abort — \(targetApp.localizedName ?? "<?>").activate returned false; text discarded")
             // !targetApp.activate branch: restore clipboard and bail before ⌘V.
             pasteboard.clearContents()
             if let items = savedItems, !items.isEmpty { pasteboard.writeObjects(items) }
@@ -80,11 +87,13 @@ struct TextInjector {
 
         // Bug 157: re-check isTerminated before posting ⌘V.
         guard !targetApp.isTerminated else {
+            logger.warning("TextInjector: abort — targetApp terminated mid-activate")
             pasteboard.clearContents()
             if let items = savedItems, !items.isEmpty { pasteboard.writeObjects(items) }
             return
         }
 
+        logger.info("TextInjector: posting ⌘V to \(targetApp.localizedName ?? "<?>") (pid=\(targetApp.processIdentifier))")
         postPasteEvent()
 
         // Bug 155: 600 ms delay for Electron apps (≥500 ms needed).

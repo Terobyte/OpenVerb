@@ -644,21 +644,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // -----------------------------------------------------------------------
 
     private func handleResult(text: String?, command: Command?) async {
+        let textLen = text?.count ?? 0
+        let targetName = appState.targetApp?.localizedName ?? "<nil>"
+        logger.info("handleResult: text=\(textLen)ch cmd=\(command?.action ?? "<nil>") target=\(targetName)")
         if let cmd = command, !cmd.action.isEmpty {
             if let target = appState.targetApp {
                 await CommandExecutor.execute(
                     command: cmd, targetApp: target, window: recordingWindow)
             } else {
+                logger.warning("handleResult: command=\(cmd.action) but targetApp=nil — hiding window, nothing executed")
                 recordingWindow.hide()
             }
         } else if let t = text, !t.isEmpty {
             if let target = appState.targetApp {
+                logger.info("handleResult: injecting \(t.count)ch into \(target.localizedName ?? "<?>")")
                 await TextInjector.inject(
                     text: t, targetApp: target, window: recordingWindow)
             } else {
+                logger.warning("handleResult: text=\(t.count)ch but targetApp=nil — hiding window, nothing injected")
                 recordingWindow.hide()
             }
         } else {
+            logger.info("handleResult: empty text and empty command — hiding window")
             recordingWindow.hide()
         }
         hotkeyManager.removeEscapeMonitors()
