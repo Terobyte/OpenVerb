@@ -15,3 +15,7 @@ engine/third_party/onnxruntime/
 engine/third_party/silero-vad/
 
 validation/results/mmproj-test.log
+validation/results/engine-*.log
+validation/results/latest.json
+validation/results/ov-bench-history.jsonl
+validation/results/smoke-status.json
