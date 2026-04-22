@@ -125,6 +125,16 @@ struct PreferencesView: View {
                         guard appState.state == .idle else { return }
                         isSwitchingBackend = true
                         Task {
+                            // Bug 164: re-check appState.state == .idle inside
+                            // the Task body. The outer guard runs synchronously,
+                            // but a concurrent ⌥Space press can flip the state
+                            // to .preparing / .recording before this Task runs;
+                            // calling restartWithBackend() at that point would
+                            // silently kill a live recording.
+                            guard appState.state == .idle else {
+                                isSwitchingBackend = false
+                                return
+                            }
                             settings.backend = newValue
                             await engineManager.restartWithBackend(newValue)
                             isSwitchingBackend = false

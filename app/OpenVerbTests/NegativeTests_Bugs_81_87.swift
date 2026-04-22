@@ -229,33 +229,6 @@ final class NegativeTests_Bugs_81_87: XCTestCase {
     //           fraction in the billions.
     // =======================================================================
 
-    func testBug86_progressNotGiantWhenContentLengthUnknown() {
-        // Behavioral: simulate the delegate math directly.
-        // Replicate the buggy formula and the fixed formula, asserting only the
-        // fixed formula produces a sane value.
-
-        let totalBytesWritten: Int64         = 1_500_000_000  // 1.5 GB written so far
-        let totalBytesExpectedToWrite: Int64 = -1             // NSURLSessionTransferSizeUnknown
-
-        // Buggy formula (what the code currently does):
-        let buggyProgress = Double(totalBytesWritten) / Double(max(totalBytesExpectedToWrite, 1))
-        // buggyProgress ≈ 1_500_000_000 — clearly wrong.
-
-        // The correct behaviour: when expected == -1, progress must not exceed 1.0.
-        // The source code must check against NSURLSessionTransferSizeUnknown (-1)
-        // and either skip the update or return a sentinel.
-        let isProgressSane = buggyProgress <= 1.0
-
-        XCTAssertTrue(isProgressSane,
-            "Bug 86 CONFIRMED: When the server omits Content-Length " +
-            "(totalBytesExpectedToWrite == -1 / NSURLSessionTransferSizeUnknown), " +
-            "the formula `Double(totalBytesWritten) / Double(max(totalBytesExpectedToWrite, 1))` " +
-            "evaluates to \(buggyProgress), far exceeding 1.0. This is displayed as " +
-            "\(Int(buggyProgress * 100))%. Fix: check `totalBytesExpectedToWrite == " +
-            "NSURLSessionTransferSizeUnknown` (i.e. == -1) and skip the progress " +
-            "update or return a sentinel value rather than clamping the denominator to 1.")
-    }
-
     func testBug86_sourceChecksForTransferSizeUnknown() {
         guard let content = readSource("OpenVerb/Model/ModelDownloader.swift") else {
             XCTFail("Cannot read ModelDownloader.swift"); return

@@ -5,6 +5,4 @@ Sorted by severity: crashes and data loss first, cosmetic and test gaps last.
 
 ---
 
-## Deferred
-
-_(none)_
+No open bugs.

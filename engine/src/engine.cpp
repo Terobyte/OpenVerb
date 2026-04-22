@@ -143,9 +143,6 @@ void Engine::ensure_loaded() {
 }
 
 void Engine::unload_model() {
-    // Bug C1 fix: acquire exclusive writer lock so that any in-flight
-    // process_stream() / process_file() holding a shared reader lock must
-    // complete before we free the model weights.
     std::unique_lock<std::shared_mutex> lk_inference(inference_mutex_);
     std::lock_guard<std::mutex> lk(engine_mutex_);
     if (backend_) {

@@ -230,12 +230,14 @@ void IpcServer::start(const std::string& socket_path) {
             continue;
         }
 
-        // Join the previous session thread.  The thread resets session_active_
-        // before it exits, so after join() it is always false.  Any second
-        // client that arrived while the session was still running was queued by
-        // the kernel (backlog=1) and will be served here without rejection.
+        // Signal the previous session before joining so an in-progress inference
+        // aborts quickly.  exchange() saves the prior value so a real SIGINT
+        // arriving concurrently is not accidentally cleared after join().
+        // (Bugs 49/52 make this path unreachable in practice; defense-in-depth.)
         if (session_thread_.joinable()) {
+            bool was = g_interrupted.exchange(true, std::memory_order_acq_rel);
             session_thread_.join();
+            if (!was) g_interrupted.store(false, std::memory_order_release);
         }
 
         idle_unloaded = false;

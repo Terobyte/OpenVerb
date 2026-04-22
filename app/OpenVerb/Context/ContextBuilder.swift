@@ -79,7 +79,13 @@ struct ContextBuilder {
         if let override = languageOverride, !override.isEmpty {
             context["language"] = override
         } else {
-            context["language"] = Locale.current.language.languageCode?.identifier ?? "en"
+            // Bug 171: Locale.current.language.languageCode?.identifier can
+            // return "und" (ISO 639-2 undetermined) — not just nil. The
+            // `?? "en"` operator only catches nil, so "und" would otherwise
+            // pass through to the engine as a bogus BCP-47 tag and degrade
+            // transcript quality. Treat "und" like nil and fall back to "en".
+            let raw = Locale.current.language.languageCode?.identifier
+            context["language"] = (raw == nil || raw == "und") ? "en" : raw!
         }
 
         // "window" — from Accessibility API; empty string if unavailable.

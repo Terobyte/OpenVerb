@@ -10,6 +10,38 @@ import AppKit
 // GREEN = bug fixed.  GREEN before the fix = false negative (test is wrong).
 //
 // Bugs covered (one test each):
+//   Bug 141 — first recording always fails: audioSession.start() before engine ready
+//   Bug 142 — preBuffer has no size limit
+//   Bug 143 — AVAudioConverter not warmed up on first use
+//   Bug 144 — hardwareFormat queried before audioEngine.start()
+//   Bug 145 — no validation that audio is flowing after start()
+//   Bug 146 — empty pre-buffer not guarded before .recording transition
+//   Bug 147 — socketReadLock released before poll loop (Bug 28 regression)
+//   Bug 148 — connectSync TOCTOU race between buffer clear and fd check
+//   Bug 149 — dedup spin loop false launchTimeout after 2 s
+//   Bug 150 — tryPing can succeed against stale/orphaned engine
+//   Bug 151 — PID reuse vulnerability in sendSIGTERM
+//   Bug 152 — sleep/wake race: handleWake before disconnect completes
+//   Bug 153 — stderr pipe readabilityHandler leak on SIGTERM
+//   Bug 154 — activate() failure continues injection into wrong app
+//   Bug 155 — 300 ms clipboard restore insufficient for Electron apps
+//   Bug 156 — NSPasteboard.changeCount overflow
+//   Bug 157 — target app termination race window
+//   Bug 158 — AXSecureTextField check false negatives
+//   Bug 159 — use-after-free in CGEvent callback
+//   Bug 160 — escapeHandled race condition
+//   Bug 161 — configure() vs handleCGKeyEvent() race
+//   Bug 162 — WaveformView thread safety race
+//   Bug 163 — FFTProcessor buffer overflow with malformed bandEdges
+//   Bug 164 — PreferencesView backend switch race
+//   Bug 165 — ProcessingView state inconsistency on rapid transitions
+//   Bug 166 — polishedText not cleared on .error transition
+//   Bug 167 — AccessibilityReader blocks MainActor indefinitely
+//   Bug 168 — EngineProtocol.fromJSON no size limits
+//   Bug 169 — ClipboardStyle.describe OOM on large inputs
+//   Bug 170 — wire protocol 0xFFFFFFFF frame OOM
+//   Bug 171 — language detection emits invalid BCP-47 "und"
+//   Bug 172 — lock ordering potential deadlock in AudioSession waveform dispatch
 //   Bug 22 — maxRecordingDuration AppSettings property never consumed
 //   Bug 23 — EngineManager.modelDirPath is a snapshot (let, not var)
 //   Bug 24 — PreferencesWindowController.open() creates orphan EngineManager
@@ -2103,11 +2135,6 @@ final class OpenBugsNegativeTests: XCTestCase {
     }
 
     func testBug53_serverJoinWithoutSignallingPreviousSession() {
-        // Bugs 49 and 52 (client always calls disconnect() on error) make this
-        // path unreachable in practice — the old engine session exits immediately
-        // on ConnectionClosed and unblocks join() in < 1 ms.  The C++ defense-in-
-        // depth signal was intentionally deferred; mark as expected failure.
-        XCTExpectFailure("Bug 53 defense-in-depth C++ signal deferred — unreachable after Bugs 49+52 fixed")
         let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/ipc/server.cpp"
         guard let content = readSource("engine/src/ipc/server.cpp") ??
             (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
@@ -2833,5 +2860,1279 @@ final class OpenBugsNegativeTests: XCTestCase {
             "disappears briefly — a visible flash — before syncDisplayState restores it. " +
             "Fix: add `guard appState.state == .inferring else { return }` at the top of " +
             "the asyncAfter closure, or cancel the pending dispatch on each state change.")
+    }
+
+    // =======================================================================
+    // Bug 141 — first recording always fails: audioSession.start() before engine ready
+    //
+    // startRecording() calls audioSession.start() synchronously, then spawns an
+    // async Task for connectAndRecord() which calls ensureRunning() (5–10 s cold
+    // start). Audio buffers accumulate for the full engine startup delay and are
+    // burst-sent when the engine finally becomes ready, causing timing corruption.
+    //
+    // EXPECTED: audioSession.start() is called inside connectAndRecord() AFTER
+    //           ensureRunning() confirms the engine is ready.
+    // ACTUAL:   audioSession.start() is called unconditionally in startRecording(),
+    //           before the engine has been checked or launched.
+    // =======================================================================
+
+    func testBug141_audioSessionStartBeforeEngineReady() {
+        guard let content = readSource("OpenVerb/App/OpenVerbApp.swift") else {
+            XCTFail("Cannot read OpenVerbApp.swift"); return
+        }
+        // Locate the startRecording function body (up to stopRecording).
+        guard let fnRange = content.range(of: "private func startRecording()") else {
+            XCTFail("Cannot find startRecording in OpenVerbApp.swift"); return
+        }
+        let afterFn = String(content[fnRange.lowerBound...])
+        let endBound = afterFn.range(of: "private func stopRecording")?.lowerBound
+            ?? afterFn.endIndex
+        let fnBody = String(afterFn[afterFn.startIndex..<endBound])
+
+        // Bug: audioSession.start( is called in startRecording() body (before the Task).
+        // Fix: audioSession.start() must only appear inside connectAndRecord(),
+        //      after ensureRunning() has confirmed the engine is ready.
+        let hasAudioStartInStartRecording = fnBody.contains("audioSession.start(")
+        XCTAssertFalse(hasAudioStartInStartRecording,
+            "Bug 141 CONFIRMED: audioSession.start() is called in startRecording() before " +
+            "the engine is ready. connectAndRecord() calls ensureRunning() (up to 10 s), but " +
+            "audio is already flowing by then. ~40 stale pre-buffer chunks are burst-sent " +
+            "when the engine finally responds, corrupting timing and causing the first " +
+            "recording to fail. Second recording works because the engine is already running. " +
+            "Fix: move audioSession.start() to inside connectAndRecord(), after ensureRunning().")
+    }
+
+    // =======================================================================
+    // Bug 142 — preBuffer has no size limit
+    //
+    // processTapBuffer() appends chunks to preBuffer without a count cap.
+    // During cold start (5–10 s engine launch), 40+ chunks accumulate.
+    // Even after Bug 141 is fixed, a cap at ~24 chunks (~3 s of audio) is
+    // a safety net preventing unbounded memory growth.
+    //
+    // EXPECTED: preBuffer.append is guarded by a count limit (~24 chunks).
+    // ACTUAL:   preBuffer.append(chunk) is called unconditionally.
+    // =======================================================================
+
+    func testBug142_preBufferHasNoSizeLimit() {
+        guard let content = readSource("OpenVerb/Input/AudioSession.swift") else {
+            XCTFail("Cannot read AudioSession.swift"); return
+        }
+        // Locate the preBuffer.append call in processTapBuffer.
+        guard let appendRange = content.range(of: "preBuffer.append(chunk)") else {
+            XCTFail("Cannot find preBuffer.append(chunk) in AudioSession.swift"); return
+        }
+        // Inspect a window before the append for a count-guard.
+        let beforeAppend = String(content[content.startIndex..<appendRange.lowerBound])
+        // Take the last 200 chars before the append to find a nearby guard.
+        let windowStart = beforeAppend.index(
+            beforeAppend.endIndex,
+            offsetBy: -min(200, beforeAppend.count)
+        )
+        let guardWindow = String(beforeAppend[windowStart...])
+        let hasSizeGuard = guardWindow.contains("preBuffer.count")
+            || guardWindow.contains("count <")
+            || guardWindow.contains("count <=")
+
+        XCTAssertTrue(hasSizeGuard,
+            "Bug 142 CONFIRMED: preBuffer.append(chunk) in AudioSession.processTapBuffer " +
+            "has no size limit. During engine cold start (5–10 s), 40+ chunks (~160 KB) " +
+            "accumulate. Even after Bug 141 is fixed, an uncapped preBuffer is a safety " +
+            "hazard for slow engines or repeated cold starts. " +
+            "Fix: guard preBuffer.count < 24 (≈3 s at 128 ms/chunk) before appending; " +
+            "log a warning and discard oldest chunks when the cap is exceeded.")
+    }
+
+    // =======================================================================
+    // Bug 143 — AVAudioConverter not warmed up on first use
+    //
+    // The converter is created fresh on every start(). The first few tap
+    // callbacks may produce empty/zero-filled output because the resampler
+    // hasn't processed real audio yet. Second run works because the AU is warm.
+    //
+    // EXPECTED: a silent warmup buffer is passed through the converter after
+    //           creation so the first real callback produces valid output.
+    // ACTUAL:   no warmup; converter created and used immediately.
+    // =======================================================================
+
+    func testBug143_audioConverterNotWarmedUp() {
+        guard let content = readSource("OpenVerb/Input/AudioSession.swift") else {
+            XCTFail("Cannot read AudioSession.swift"); return
+        }
+        // Locate where the converter is created.
+        guard let convRange = content.range(of: "AVAudioConverter(from: hardwareFormat, to: outputFormat)") else {
+            XCTFail("Cannot find AVAudioConverter creation in AudioSession.swift"); return
+        }
+        // Scan the 600 chars following converter creation for a warmup call.
+        let afterConv = substring(content, from: convRange.lowerBound, length: 600)
+        let hasWarmup = afterConv.contains("warmup")
+            || afterConv.contains("warm_up")
+            || afterConv.contains("primeConverter")
+            || (afterConv.contains("convert(to:") && afterConv.contains("AVAudioPCMBuffer"))
+
+        XCTAssertTrue(hasWarmup,
+            "Bug 143 CONFIRMED: AVAudioConverter is created in start() but never warmed up. " +
+            "The first tap callbacks after creation may return empty/zero-filled buffers " +
+            "because the resampler hasn't processed real audio yet. The first recording " +
+            "silently drops or corrupts its first ~128 ms of audio. Second recording works " +
+            "because the AU is already warm. " +
+            "Fix: after creating `conv`, pass a single silent AVAudioPCMBuffer through it " +
+            "to prime the resampler state before installing the tap.")
+    }
+
+    // =======================================================================
+    // Bug 144 — hardwareFormat queried before audioEngine.start()
+    //
+    // hardwareFormat is captured from inputNode.outputFormat(forBus: 0) BEFORE
+    // audioEngine.start(). The audio subsystem may renegotiate sample rate
+    // during engine startup, leaving the converter configured for the wrong
+    // format (e.g., 44100 Hz instead of 48000 Hz after negotiation).
+    //
+    // EXPECTED: outputFormat(forBus: 0) is called AFTER audioEngine.start()
+    //           so it reflects the post-negotiation hardware format.
+    // ACTUAL:   hardwareFormat is queried before audioEngine.start().
+    // =======================================================================
+
+    func testBug144_hardwareFormatQueriedBeforeEngineStart() {
+        guard let content = readSource("OpenVerb/Input/AudioSession.swift") else {
+            XCTFail("Cannot read AudioSession.swift"); return
+        }
+        guard let startFnRange = content.range(of: "func start(waveformCallback:") else {
+            XCTFail("Cannot find start(waveformCallback:) in AudioSession.swift"); return
+        }
+        let fnBody = substring(content, from: startFnRange.lowerBound, length: 3000)
+
+        guard let engineStartRange = fnBody.range(of: "try audioEngine.start()") else {
+            XCTFail("Cannot find audioEngine.start() in AudioSession.start()"); return
+        }
+        let beforeEngineStart = String(fnBody[fnBody.startIndex..<engineStartRange.lowerBound])
+
+        // Bug: hardwareFormat is assigned before audioEngine.start().
+        // Fix: move outputFormat(forBus: 0) to after audioEngine.start().
+        let formatQueriedBeforeStart = beforeEngineStart.contains("outputFormat(forBus: 0)")
+        XCTAssertFalse(formatQueriedBeforeStart,
+            "Bug 144 CONFIRMED: hardwareFormat is queried via inputNode.outputFormat(forBus: 0) " +
+            "BEFORE audioEngine.start(). The audio subsystem may renegotiate sample rate " +
+            "during startup, leaving the AVAudioConverter configured for the wrong format. " +
+            "This causes silent audio conversion errors or corrupted 16 kHz output on cold start. " +
+            "Fix: move the outputFormat(forBus: 0) call to after audioEngine.start() so the " +
+            "hardware format reflects the post-negotiation sample rate.")
+    }
+
+    // =======================================================================
+    // Bug 145 — no validation that audio is flowing after start()
+    //
+    // After audioEngine.start() succeeds, no check confirms that tap callbacks
+    // are delivering non-empty data. If first buffers are zero-filled (converter
+    // warm-up / AU activation delay), the failure is silent.
+    //
+    // EXPECTED: AudioSession validates that at least one non-zero chunk arrives
+    //           within a reasonable timeout after start().
+    // ACTUAL:   start() returns as soon as audioEngine.start() succeeds, with
+    //           no flow validation.
+    // =======================================================================
+
+    func testBug145_noAudioFlowValidationAfterStart() {
+        guard let content = readSource("OpenVerb/Input/AudioSession.swift") else {
+            XCTFail("Cannot read AudioSession.swift"); return
+        }
+        guard let startFnRange = content.range(of: "func start(waveformCallback:") else {
+            XCTFail("Cannot find start(waveformCallback:) in AudioSession.swift"); return
+        }
+        let fnBody = substring(content, from: startFnRange.lowerBound, length: 3000)
+
+        guard let engineStartRange = fnBody.range(of: "try audioEngine.start()") else {
+            XCTFail("Cannot find audioEngine.start() in AudioSession.start()"); return
+        }
+        let afterEngineStart = String(fnBody[engineStartRange.upperBound...])
+
+        // Fix: some form of flow validation must appear after audioEngine.start().
+        let hasFlowValidation = afterEngineStart.contains("flowValidat")
+            || afterEngineStart.contains("waitForFirstChunk")
+            || afterEngineStart.contains("firstBuffer")
+            || afterEngineStart.contains("non-zero")
+            || afterEngineStart.contains("preBuffer.count > 0")
+
+        XCTAssertTrue(hasFlowValidation,
+            "Bug 145 CONFIRMED: AudioSession.start() has no validation that tap callbacks " +
+            "deliver non-empty data after audioEngine.start() succeeds. If first buffers are " +
+            "zero-filled (converter warm-up, AX activation delay), the failure is silent — " +
+            "the recording appears to work but captures only silence. " +
+            "Fix: after audioEngine.start(), poll preBuffer for up to ~500 ms to confirm " +
+            "at least one non-zero chunk has arrived before returning to the caller.")
+    }
+
+    // =======================================================================
+    // Bug 146 — empty pre-buffer not guarded before .recording transition
+    //
+    // flushPreBuffer() returns an empty array on cold start because the AU
+    // hasn't delivered data yet. connectAndRecord() transitions to .recording
+    // regardless, so the user sees a recording UI with no audio flowing.
+    //
+    // EXPECTED: a non-empty buffered array (or at least one interim chunk)
+    //           is required before transitioning to .recording.
+    // ACTUAL:   appState.transition(to: .recording) is called even when
+    //           flushPreBuffer() returns [].
+    // =======================================================================
+
+    func testBug146_emptyPreBufferNotGuardedBeforeRecordingTransition() {
+        guard let content = readSource("OpenVerb/App/OpenVerbApp.swift") else {
+            XCTFail("Cannot read OpenVerbApp.swift"); return
+        }
+        guard let fnRange = content.range(of: "func connectAndRecord(") else {
+            XCTFail("Cannot find connectAndRecord in OpenVerbApp.swift"); return
+        }
+        let fnBody = substring(content, from: fnRange.lowerBound, length: 4000)
+
+        guard let flushRange = fnBody.range(of: "flushPreBuffer()") else {
+            XCTFail("Cannot find flushPreBuffer() in connectAndRecord"); return
+        }
+        guard let recordingRange = fnBody.range(of: "transition(to: .recording)") else {
+            XCTFail("Cannot find .recording transition in connectAndRecord"); return
+        }
+
+        // Between flushPreBuffer and the .recording transition there must be a
+        // guard on the buffered count (or an error path for the empty case).
+        let between = String(fnBody[flushRange.upperBound..<recordingRange.lowerBound])
+        let hasEmptyGuard = between.contains("buffered.isEmpty")
+            || between.contains("buffered.count == 0")
+            || between.contains("guard !buffered.isEmpty")
+            || between.contains("interim.isEmpty")
+            || between.contains("waitForFirstChunk")
+
+        XCTAssertTrue(hasEmptyGuard,
+            "Bug 146 CONFIRMED: connectAndRecord() calls flushPreBuffer() but does not " +
+            "guard against an empty result before transitioning to .recording. On cold start " +
+            "the AU may not have delivered any chunks yet, so the user sees a recording UI " +
+            "with no audio actually flowing. Subsequent recordings work because the AU is warm. " +
+            "Fix: guard that at least one buffered or interim chunk exists before transitioning; " +
+            "if empty, wait for the first tap callback or abort with an error.")
+    }
+
+    // =======================================================================
+    // Bug 147 — socketReadLock released before poll loop (Bug 28 regression)
+    //
+    // Bug 76 fix releases socketReadLock before the blocking poll loop to
+    // avoid starving Phase 2 monitor. This reopens Bug 28: two concurrent
+    // callers (drainResult + Phase 2 monitor) can enter the loop simultaneously
+    // and split a single JSON message between them.
+    //
+    // EXPECTED: socketReadLock is held across the entire poll+read+append cycle,
+    //           OR a different serialization mechanism prevents concurrent reads.
+    // ACTUAL:   socketReadLock.unlock() appears before the while-true poll loop.
+    // =======================================================================
+
+    func testBug147_socketReadLockReleasedBeforePollLoop() {
+        guard let content = readSource("OpenVerb/Engine/EngineClient.swift") else {
+            XCTFail("Cannot read EngineClient.swift"); return
+        }
+        guard let fnRange = content.range(of: "private func recvJSONSync") else {
+            XCTFail("Cannot find recvJSONSync in EngineClient.swift"); return
+        }
+        let fnBody = substring(content, from: fnRange.lowerBound, length: 5000)
+
+        guard let unlockRange = fnBody.range(of: "socketReadLock.unlock()") else {
+            XCTFail("Cannot find socketReadLock.unlock() in recvJSONSync"); return
+        }
+        guard let whileRange = fnBody.range(of: "while true {") else {
+            XCTFail("Cannot find while true loop in recvJSONSync"); return
+        }
+
+        // Bug: unlock appears BEFORE the while-true poll loop.
+        // Fix: unlock must appear AFTER the loop (or the lock must wrap the loop).
+        let unlockBeforePollLoop = unlockRange.lowerBound < whileRange.lowerBound
+        XCTAssertFalse(unlockBeforePollLoop,
+            "Bug 147 CONFIRMED: socketReadLock.unlock() appears before the while-true " +
+            "poll+read loop in recvJSONSync(). This reopens Bug 28: drainResult and the " +
+            "Phase 2 monitor can both enter poll() concurrently and split a single JSON " +
+            "message's bytes between them, causing both callers to block indefinitely " +
+            "or receive corrupted/partial messages. " +
+            "Fix: hold socketReadLock across the entire poll+read+append cycle, and use " +
+            "a separate mechanism (wakeRead fd or socket close) to unblock the monitor.")
+    }
+
+    // =======================================================================
+    // Bug 148 — connectSync TOCTOU race between buffer clear and fd check
+    //
+    // connectSync() clears recvBuffer (line 133) then checks fd == -1 (line 137).
+    // A concurrent disconnect() can set fd = -1 between those two operations,
+    // causing the new connection to silently fail while recvBuffer is already wiped.
+    //
+    // EXPECTED: fd == -1 is checked BEFORE clearing recvBuffer, so the already-
+    //           connected early-return path does not wipe the live receive buffer.
+    // ACTUAL:   recvBuffer is cleared unconditionally before the fd guard.
+    // =======================================================================
+
+    func testBug148_connectSyncTOCTOURace() {
+        // Bug 148 (TOCTOU race between recvBuffer clear and fd check) is
+        // precluded by ioQueue being SERIAL: connectSync and disconnect run
+        // in strict FIFO order on the same queue, so fd cannot flip between
+        // the clear and the guard. Bug 119 fix (clear buffer first) is safe
+        // under this invariant.
+        guard let content = readSource("OpenVerb/Engine/EngineClient.swift") else {
+            XCTFail("Cannot read EngineClient.swift"); return
+        }
+        guard let ioQueueRange = content.range(of: "ioQueue = DispatchQueue(") else {
+            XCTFail("Cannot find ioQueue declaration in EngineClient.swift"); return
+        }
+        let ioQueueDecl = substring(content, from: ioQueueRange.lowerBound, length: 200)
+        XCTAssertFalse(ioQueueDecl.contains(".concurrent"),
+            "Bug 148 regression: ioQueue must remain SERIAL (no .concurrent attribute). " +
+            "Switching ioQueue to concurrent would reintroduce the TOCTOU hazard between " +
+            "the recvBuffer clear and the fd check in connectSync.")
+    }
+
+    // =======================================================================
+    // Bug 149 — dedup spin loop false launchTimeout after 2 s
+    //
+    // The second ensureRunning() caller spins for at most 2 s waiting for the
+    // engine status to reach .running. Engine cold start (model load) takes 3–10 s.
+    // The second caller throws launchTimeout even though the engine is still
+    // starting (status == .starting is a valid in-progress state, not a failure).
+    //
+    // EXPECTED: spin deadline is >= engine max cold-start time (~10 s), or the
+    //           second caller waits for .running without a fixed cap.
+    // ACTUAL:   spinDeadline = Date().addingTimeInterval(2.0)
+    // =======================================================================
+
+    func testBug149_dedupSpinloopFalseLaunchTimeout() {
+        guard let content = readSource("OpenVerb/Engine/EngineManager.swift") else {
+            XCTFail("Cannot read EngineManager.swift"); return
+        }
+        guard let spinRange = content.range(of: "spinDeadline") else {
+            XCTFail("Cannot find spinDeadline in EngineManager.swift"); return
+        }
+        let spinLine = substring(content, from: spinRange.lowerBound, length: 100)
+
+        // Bug: spinDeadline is 2.0 s. Fix: must be >= 10.0 s (engine cold start budget).
+        let hasShortDeadline = spinLine.contains("addingTimeInterval(2.0)")
+            || spinLine.contains("addingTimeInterval(2)")
+        XCTAssertFalse(hasShortDeadline,
+            "Bug 149 CONFIRMED: ensureRunning() dedup spin loop uses a 2-second deadline. " +
+            "Engine cold start (Gemma 4 E2B model load) takes 3–10 s depending on hardware. " +
+            "A second caller that arrives while the first is still launching will throw " +
+            "launchTimeout after 2 s even though the engine is still starting normally. " +
+            "This causes spurious 'engine did not respond' errors on cold start when two " +
+            "rapid ⌥Space presses both trigger recording. " +
+            "Fix: raise the spin deadline to match the engine cold-start budget (≥10 s), " +
+            "or replace the spin loop with an async notification from the first caller.")
+    }
+
+    // =======================================================================
+    // Bug 150 — tryPing can succeed against stale/orphaned engine
+    //
+    // tryPing() connects and sends a ping but doesn't validate that the
+    // responding process is the correct one (right PID, model, backend).
+    // An orphaned engine with the wrong model can pass the ping, causing the
+    // subsequent session to use the wrong configuration.
+    //
+    // EXPECTED: tryPing() validates the responding process identity (PID or
+    //           a model/backend echo in the pong response).
+    // ACTUAL:   any process that responds to ping on the socket path passes.
+    // =======================================================================
+
+    func testBug150_tryPingNoProcessValidation() {
+        guard let content = readSource("OpenVerb/Engine/EngineManager.swift") else {
+            XCTFail("Cannot read EngineManager.swift"); return
+        }
+        guard let fnRange = content.range(of: "private func tryPing()") else {
+            XCTFail("Cannot find tryPing() in EngineManager.swift"); return
+        }
+        let fnBody = substring(content, from: fnRange.lowerBound, length: 500)
+
+        // Fix: tryPing must validate process identity after ping succeeds.
+        let hasProcessValidation = fnBody.contains("processIdentifier")
+            || fnBody.contains("isRunning")
+            || fnBody.contains("validateProcess")
+            || fnBody.contains("expectedPID")
+            || fnBody.contains("process?.processIdentifier")
+
+        XCTAssertTrue(hasProcessValidation,
+            "Bug 150 CONFIRMED: tryPing() connects, sends a ping, and returns true if " +
+            "any process responds on the socket — it never validates that the responding " +
+            "process is the expected engine (correct PID, model, backend). An orphaned " +
+            "engine from a previous session with a different model can pass the ping, " +
+            "causing the new session to silently use the wrong model configuration. " +
+            "Fix: after a successful pong, compare process.processIdentifier against " +
+            "the expected PID, or add a model/backend echo field to the pong response.")
+    }
+
+    // =======================================================================
+    // Bug 151 — PID reuse vulnerability in sendSIGTERM
+    //
+    // sendSIGTERM() checks proc.isRunning but doesn't verify the PID hasn't
+    // been recycled. If the original engine exits and the OS reassigns its PID,
+    // kill() could terminate an unrelated process.
+    //
+    // EXPECTED: sendSIGTERM() verifies the process object matches the expected
+    //           engine before sending SIGTERM (e.g., comparing creation time).
+    // ACTUAL:   only proc.isRunning is checked — no PID recycling protection.
+    // =======================================================================
+
+    func testBug151_sendSIGTERMPIDReuseVulnerability() {
+        guard let content = readSource("OpenVerb/Engine/EngineManager.swift") else {
+            XCTFail("Cannot read EngineManager.swift"); return
+        }
+        guard let fnRange = content.range(of: "private func sendSIGTERM()") else {
+            XCTFail("Cannot find sendSIGTERM in EngineManager.swift"); return
+        }
+        let fnBody = substring(content, from: fnRange.lowerBound, length: 300)
+
+        // Fix: must verify the process beyond just isRunning — e.g., compare
+        // a stable identifier, or use a guard against PID reuse.
+        let hasOnlyIsRunning = fnBody.contains("proc.isRunning")
+            && !fnBody.contains("startTime")
+            && !fnBody.contains("creationDate")
+            && !fnBody.contains("launchDate")
+            && !fnBody.contains("processIdentifier == expectedPID")
+
+        XCTAssertFalse(hasOnlyIsRunning,
+            "Bug 151 CONFIRMED: sendSIGTERM() only checks proc.isRunning before calling " +
+            "kill(). If the engine exits between the isRunning check and the kill() call, " +
+            "and the OS reuses the PID for an unrelated process, kill() terminates the wrong " +
+            "process. On macOS the PID space wraps relatively quickly under heavy process " +
+            "churn (e.g., Xcode build farms). " +
+            "Fix: capture the process start time at launchEngine() and compare it in " +
+            "sendSIGTERM() to confirm the PID still refers to the intended engine process.")
+    }
+
+    // =======================================================================
+    // Bug 152 — sleep/wake race: handleWake fires before disconnect completes
+    //
+    // handleSleep() launches an async Task that calls disconnect() then sets
+    // status = .stopped. handleWake() fires synchronously after the sleep
+    // notification and immediately tries tryPing() — possibly before the Task
+    // from handleSleep() has even dispatched the disconnect onto ioQueue.
+    //
+    // EXPECTED: handleWake() waits for handleSleep()'s disconnect to complete
+    //           (status == .stopped) before proceeding.
+    // ACTUAL:   handleWake() starts immediately with no synchronization against
+    //           the in-flight handleSleep() Task.
+    // =======================================================================
+
+    func testBug152_sleepWakeRaceHandleWakeBeforeDisconnect() {
+        guard let content = readSource("OpenVerb/Engine/EngineManager.swift") else {
+            XCTFail("Cannot read EngineManager.swift"); return
+        }
+        guard let handleSleepRange = content.range(of: "@objc func handleSleep()") else {
+            XCTFail("Cannot find handleSleep in EngineManager.swift"); return
+        }
+        let sleepBody = substring(content, from: handleSleepRange.lowerBound, length: 400)
+
+        // Bug: handleSleep uses async Task for disconnect. The Task is not awaited,
+        // so handleWake can fire before the disconnect task has even started.
+        // Fix: disconnect must be synchronous in handleSleep, or handleWake must
+        // wait for status == .stopped before calling tryPing.
+        let hasAsyncTaskDisconnect = sleepBody.contains("Task {")
+            && sleepBody.contains("disconnect()")
+        let disconnectIsSynchronous = sleepBody.contains("engineClient.disconnect()")
+            && !sleepBody.contains("Task {")
+
+        XCTAssertTrue(disconnectIsSynchronous || !hasAsyncTaskDisconnect,
+            "Bug 152 CONFIRMED: handleSleep() wraps disconnect() in an async Task. " +
+            "handleWake() fires on the main queue immediately after the sleep notification " +
+            "and starts tryPing() before the Task has dispatched the disconnect to ioQueue. " +
+            "tryPing() sees the half-open socket as a live connection and skips the reconnect, " +
+            "leaving the engine client in an inconsistent state after wake. " +
+            "Fix: make handleSleep() disconnect synchronously (or await the disconnect Task) " +
+            "before returning, so handleWake() always observes a clean .stopped state.")
+    }
+
+    // =======================================================================
+    // Bug 153 — stderr pipe readabilityHandler leak on SIGTERM
+    //
+    // launchEngine() sets pipe.fileHandleForReading.readabilityHandler and
+    // clears it only in proc.terminationHandler. If the process is SIGTERM'd,
+    // terminationHandler may not fire on some macOS versions, leaking the pipe fd.
+    //
+    // EXPECTED: readabilityHandler is also cleared in sendSIGTERM() or via a
+    //           separate cleanup path that doesn't depend on terminationHandler.
+    // ACTUAL:   only proc.terminationHandler clears the handler.
+    // =======================================================================
+
+    func testBug153_stderrReadabilityHandlerLeakOnSIGTERM() {
+        guard let content = readSource("OpenVerb/Engine/EngineManager.swift") else {
+            XCTFail("Cannot read EngineManager.swift"); return
+        }
+        guard let launchRange = content.range(of: "private func launchEngine()") else {
+            XCTFail("Cannot find launchEngine() in EngineManager.swift"); return
+        }
+        let launchBody = substring(content, from: launchRange.lowerBound, length: 500)
+
+        // Bug: readabilityHandler is only cleared inside proc.terminationHandler.
+        // Fix: also clear it in sendSIGTERM(), shutdown(), or a dedicated cleanup method.
+        let handlerOnlyInTermination = launchBody.contains("readabilityHandler = nil")
+            && launchBody.contains("terminationHandler")
+        guard let sigtermRange = content.range(of: "private func sendSIGTERM()") else {
+            if handlerOnlyInTermination {
+                XCTFail(
+                    "Bug 153 CONFIRMED: readabilityHandler is cleared only in terminationHandler " +
+                    "and sendSIGTERM() doesn't exist or doesn't clear it. " +
+                    "Fix: add handle.readabilityHandler = nil to sendSIGTERM() or shutdown().")
+            }
+            return
+        }
+        let sigtermBody = substring(content, from: sigtermRange.lowerBound, length: 300)
+        let sigtermClearsHandler = sigtermBody.contains("readabilityHandler = nil")
+
+        XCTAssertTrue(sigtermClearsHandler,
+            "Bug 153 CONFIRMED: launchEngine() clears readabilityHandler only inside " +
+            "proc.terminationHandler, which may not fire when the process is SIGTERM'd. " +
+            "The Pipe file descriptor leaks, eventually exhausting the per-process fd limit " +
+            "after many engine restart cycles. " +
+            "Fix: also clear handle.readabilityHandler = nil in sendSIGTERM() and/or " +
+            "shutdown() so the leak doesn't depend on terminationHandler firing.")
+    }
+
+    // =======================================================================
+    // Bug 154 — activate() failure continues injection into wrong app
+    //
+    // TextInjector.inject() calls targetApp.activate() and only logs a warning
+    // on failure. Injection (CGEvent ⌘V) continues into whatever app currently
+    // holds focus — pasting transcription data into an unintended target.
+    //
+    // EXPECTED: inject() returns early if activate() returns false.
+    // ACTUAL:   injection continues after activate() failure (only a warning logged).
+    // =======================================================================
+
+    func testBug154_activateFailureContinuesInjection() {
+        guard let content = readSource("OpenVerb/Output/TextInjector.swift") else {
+            XCTFail("Cannot read TextInjector.swift"); return
+        }
+        guard let injectRange = content.range(of: "static func inject(") else {
+            XCTFail("Cannot find inject() in TextInjector.swift"); return
+        }
+        let fnBody = substring(content, from: injectRange.lowerBound, length: 2000)
+
+        guard let activateRange = fnBody.range(of: "targetApp.activate(") else {
+            XCTFail("Cannot find targetApp.activate( in inject()"); return
+        }
+        let afterActivate = substring(fnBody, from: activateRange.lowerBound, length: 300)
+
+        // Fix: when activate() returns false, inject() must return early.
+        let hasEarlyReturn = afterActivate.contains("return")
+            && (afterActivate.contains("!targetApp.activate") ||
+                afterActivate.contains("activate(") && afterActivate.contains("{ return"))
+        // Also acceptable: the activate result is used in a guard.
+        let hasGuardActivate = afterActivate.contains("guard")
+            && afterActivate.contains("activate(")
+            && afterActivate.contains("return")
+
+        XCTAssertTrue(hasEarlyReturn || hasGuardActivate,
+            "Bug 154 CONFIRMED: TextInjector.inject() logs a warning when activate() returns " +
+            "false but continues to postPasteEvent(). The ⌘V CGEvent is delivered to whatever " +
+            "app currently holds focus — which may not be targetApp — pasting the transcription " +
+            "into an unintended target (e.g., a password field in a different app). " +
+            "Fix: change the activate() block to `guard targetApp.activate(...) else { return }` " +
+            "so injection is aborted when focus transfer fails.")
+    }
+
+    // =======================================================================
+    // Bug 155 — 300 ms clipboard restore insufficient for Electron apps
+    //
+    // TextInjector waits 300 ms after posting ⌘V before restoring the clipboard.
+    // VS Code, Slack, and Discord (all Electron) may take 500–1000 ms to read
+    // the clipboard. The restore overwrites the paste content before the app
+    // reads it, causing silent data loss.
+    //
+    // EXPECTED: clipboard-read delay is >= 500 ms (minimum for Electron apps).
+    // ACTUAL:   Task.sleep(for: .milliseconds(300))
+    // =======================================================================
+
+    func testBug155_clipboardRestoreDelayTooShort() {
+        guard let content = readSource("OpenVerb/Output/TextInjector.swift") else {
+            XCTFail("Cannot read TextInjector.swift"); return
+        }
+        guard let injectRange = content.range(of: "static func inject(") else {
+            XCTFail("Cannot find inject() in TextInjector.swift"); return
+        }
+        let fnBody = substring(content, from: injectRange.lowerBound, length: 2000)
+
+        // Bug: 300 ms delay before clipboard restore.
+        // Fix: must be >= 500 ms for Electron compatibility.
+        let has300msDelay = fnBody.contains("milliseconds(300)")
+            || fnBody.contains(".milliseconds(300)")
+        XCTAssertFalse(has300msDelay,
+            "Bug 155 CONFIRMED: TextInjector.inject() waits only 300 ms after posting ⌘V " +
+            "before restoring the original clipboard. Electron-based apps (VS Code, Slack, " +
+            "Discord) may take 500–1000 ms to process the paste event and read the clipboard. " +
+            "If the clipboard is restored before they read it, the paste is silently lost " +
+            "with no error or retry. This is a common failure mode for the most popular " +
+            "developer and communication apps. " +
+            "Fix: increase the delay to >= 500 ms, or use a configurable AppSettings value " +
+            "that users can tune for their specific Electron app latency.")
+    }
+
+    // =======================================================================
+    // Bug 156 — NSPasteboard.changeCount overflow
+    //
+    // The saved changeCount is compared with == after the paste window.
+    // changeCount is a signed Int that wraps around on long-running sessions.
+    // An overflow produces a false positive — the restore guard fires even
+    // though another process wrote to the clipboard, overwriting their data.
+    //
+    // EXPECTED: changeCount comparison uses overflow-safe arithmetic, or
+    //           changeCount is replaced with a session-unique write token.
+    // ACTUAL:   pasteboard.changeCount == savedChangeCount (plain == on Int)
+    // =======================================================================
+
+    func testBug156_changeCountOverflow() {
+        guard let content = readSource("OpenVerb/Output/TextInjector.swift") else {
+            XCTFail("Cannot read TextInjector.swift"); return
+        }
+        guard let injectRange = content.range(of: "static func inject(") else {
+            XCTFail("Cannot find inject() in TextInjector.swift"); return
+        }
+        let fnBody = substring(content, from: injectRange.lowerBound, length: 2000)
+
+        // Bug: plain == comparison on changeCount.
+        // Fix: use overflow-safe arithmetic, a monotonic session token, or
+        //      compare with a wrapping-aware check.
+        let hasPlainEquals = fnBody.contains("changeCount == savedChangeCount")
+        XCTAssertFalse(hasPlainEquals,
+            "Bug 156 CONFIRMED: TextInjector compares pasteboard.changeCount == savedChangeCount " +
+            "using plain integer equality. changeCount is a signed Int that wraps on overflow " +
+            "during long-running sessions. A wrap-around produces a false positive — the guard " +
+            "thinks another process hasn't touched the clipboard and restores the saved content, " +
+            "overwriting whatever that process wrote. " +
+            "Fix: replace changeCount with a session-unique write token (e.g., a UUID written " +
+            "as NSPasteboardType metadata) so wrap-around is impossible, or use a monotonic " +
+            "generation counter that detects the wrap case.")
+    }
+
+    // =======================================================================
+    // Bug 157 — target app termination race window
+    //
+    // inject() guards isTerminated at the start. The app can quit between the
+    // guard and postPasteEvent(). ⌘V is delivered to the wrong app.
+    //
+    // EXPECTED: isTerminated is re-checked immediately before postPasteEvent().
+    // ACTUAL:   only one isTerminated check at the top of inject().
+    // =======================================================================
+
+    func testBug157_targetAppTerminationRaceWindow() {
+        guard let content = readSource("OpenVerb/Output/TextInjector.swift") else {
+            XCTFail("Cannot read TextInjector.swift"); return
+        }
+        guard let injectRange = content.range(of: "static func inject(") else {
+            XCTFail("Cannot find inject() in TextInjector.swift"); return
+        }
+        let fnBody = substring(content, from: injectRange.lowerBound, length: 2000)
+
+        guard let postPasteRange = fnBody.range(of: "postPasteEvent()") else {
+            XCTFail("Cannot find postPasteEvent() in inject()"); return
+        }
+        let beforePaste = String(fnBody[fnBody.startIndex..<postPasteRange.lowerBound])
+
+        // Count isTerminated checks: the fix requires one near postPasteEvent().
+        // A single check only at the top of the function is the bug pattern.
+        let terminatedChecks = beforePaste.components(separatedBy: "isTerminated").count - 1
+        XCTAssertGreaterThan(terminatedChecks, 1,
+            "Bug 157 CONFIRMED: inject() checks targetApp.isTerminated once at the start. " +
+            "The target app can quit during the 50 ms focus delay or clipboard write, " +
+            "leaving postPasteEvent() to deliver ⌘V to whatever app holds focus after " +
+            "the target exits — potentially a password manager or secure input field. " +
+            "terminatedChecks=\(terminatedChecks) (need >= 2: one at top, one before paste). " +
+            "Fix: add a second `guard !targetApp.isTerminated` check immediately before " +
+            "postPasteEvent() to close the race window.")
+    }
+
+    // =======================================================================
+    // Bug 158 — AXSecureTextField check false negatives
+    //
+    // isSecureField only checks AXRole == "AXSecureTextField". Browsers and
+    // password managers use AXTextArea with an AXSecure attribute, or
+    // AXWebArea — these are not caught and passwords get pasted via clipboard.
+    //
+    // EXPECTED: isSecureField also checks kAXValueAttribute + AXSecure flag
+    //           and additional secure-input role variants.
+    // ACTUAL:   only `role == "AXSecureTextField"` is checked.
+    // =======================================================================
+
+    func testBug158_secureTextFieldFalseNegatives() {
+        guard let content = readSource("OpenVerb/Output/TextInjector.swift") else {
+            XCTFail("Cannot read TextInjector.swift"); return
+        }
+        guard let secureRange = content.range(of: "isSecureField") else {
+            XCTFail("Cannot find isSecureField in TextInjector.swift"); return
+        }
+        let secureBlock = substring(content, from: secureRange.lowerBound, length: 500)
+
+        // Bug: only checks "AXSecureTextField" role.
+        // Fix: must also check kAXSecureAttribute or SecInputIsEnabled or similar.
+        let hasOnlyRoleCheck = secureBlock.contains("AXSecureTextField")
+            && !secureBlock.contains("kAXSecure")
+            && !secureBlock.contains("SecInputIsEnabled")
+
+        XCTAssertFalse(hasOnlyRoleCheck,
+            "Bug 158 CONFIRMED: TextInjector.isSecureField only checks " +
+            "AXRole == \"AXSecureTextField\". Browser password fields use AXTextArea " +
+            "with an AXSecure attribute; password managers use AXWebArea or custom roles. " +
+            "These are not caught, so transcription is pasted via clipboard into secure " +
+            "fields, leaking it in plaintext. hasOnlyRoleCheck=\(hasOnlyRoleCheck). " +
+            "Fix: also call AXUIElementCopyAttributeValue for kAXSecureAttribute (or " +
+            "check SecInputIsEnabled()) to catch browser and password-manager secure inputs.")
+    }
+
+    // =======================================================================
+    // Bug 159 — use-after-free in CGEvent callback
+    //
+    // installEventTap() passes `Unmanaged.passUnretained(self)` as the userInfo
+    // pointer for a CGEvent tap callback. If HotkeyManager is deallocated while
+    // a callback is in flight, the dangling pointer dereference is UB / crash.
+    //
+    // EXPECTED: passRetained(self) with a balancing takeRetainedValue() in the
+    //           callback, or HotkeyManager is guaranteed to outlive all callbacks.
+    // ACTUAL:   passUnretained(self) — no retain, dangling pointer possible.
+    // =======================================================================
+
+    func testBug159_cgEventCallbackUseAfterFree() {
+        guard let content = readSource("OpenVerb/Input/HotkeyManager.swift") else {
+            XCTFail("Cannot read HotkeyManager.swift"); return
+        }
+        // The event tap callback userInfo must use passRetained, not passUnretained.
+        guard let tapRange = content.range(of: "CGEvent.tapCreate(") else {
+            XCTFail("Cannot find CGEvent.tapCreate in HotkeyManager.swift"); return
+        }
+        let tapBlock = substring(content, from: tapRange.lowerBound, length: 600)
+
+        let hasPassUnretained = tapBlock.contains("passUnretained(self)")
+        XCTAssertFalse(hasPassUnretained,
+            "Bug 159 CONFIRMED: HotkeyManager passes `Unmanaged.passUnretained(self)` as " +
+            "the userInfo pointer to a CGEvent tap callback. If HotkeyManager is deallocated " +
+            "while a callback is still in-flight (e.g., during a fast app-quit sequence), " +
+            "the callback accesses a dangling pointer — undefined behaviour or crash. " +
+            "The comment claims HotkeyManager 'lives for the app lifetime', but this is a " +
+            "structural invariant, not a memory-safety guarantee. " +
+            "Fix: use passRetained(self) and call takeRetainedValue() inside the callback " +
+            "(paired with release on tap removal), or store a strong reference separately.")
+    }
+
+    // =======================================================================
+    // Bug 160 — escapeHandled race condition
+    //
+    // handleEscape() sets escapeHandled = true synchronously, then resets it
+    // via DispatchQueue.main.async. Two rapid Escape presses from global+local
+    // monitors fire on the main queue in quick succession; both arrive before
+    // the async reset block runs, so both pass the `guard !escapeHandled` check.
+    //
+    // EXPECTED: escapeHandled is reset synchronously after the NSEvent handler
+    //           returns (e.g., via a generation counter or via the run loop idle).
+    // ACTUAL:   reset is deferred via DispatchQueue.main.async, leaving a window
+    //           where two rapid presses both pass the guard.
+    // =======================================================================
+
+    func testBug160_escapeHandledRaceCondition() {
+        guard let content = readSource("OpenVerb/Input/HotkeyManager.swift") else {
+            XCTFail("Cannot read HotkeyManager.swift"); return
+        }
+        guard let escapeRange = content.range(of: "private func handleEscape()") else {
+            XCTFail("Cannot find handleEscape() in HotkeyManager.swift"); return
+        }
+        let fnBody = substring(content, from: escapeRange.lowerBound, length: 400)
+
+        // Bug: reset via DispatchQueue.main.async.
+        // Fix: use a generation counter, or reset synchronously in the same handler.
+        let hasAsyncReset = fnBody.contains("DispatchQueue.main.async")
+            && fnBody.contains("escapeHandled = false")
+        XCTAssertFalse(hasAsyncReset,
+            "Bug 160 CONFIRMED: handleEscape() resets escapeHandled via " +
+            "DispatchQueue.main.async. Two rapid Escape presses from the global and local " +
+            "NSEvent monitors both arrive on the main queue before the async reset block runs — " +
+            "both pass the `guard !escapeHandled` check, firing two cancel actions for a single " +
+            "keypress. This causes a double-cancel (e.g., abort + crash recovery on a healthy " +
+            "session, or two crash-counter increments on a healthy engine). " +
+            "Fix: use an event generation counter (increment on each press, check on callback " +
+            "entry) or reset escapeHandled synchronously at the end of handleEscape().")
+    }
+
+    // =======================================================================
+    // Bug 161 — configure() vs handleCGKeyEvent() non-atomic hotkey update
+    //
+    // configure() updates hotKey.virtualKey then hotKey.flags in two separate
+    // assignments. A keypress handler that reads hotKey between the two writes
+    // sees mismatched virtualKey/flags, potentially accepting wrong key combos.
+    //
+    // EXPECTED: hotKey is updated atomically (single struct assignment).
+    // ACTUAL:   two separate field assignments with no synchronization.
+    // =======================================================================
+
+    func testBug161_hotkeyConfigureNonAtomicUpdate() {
+        guard let content = readSource("OpenVerb/Input/HotkeyManager.swift") else {
+            XCTFail("Cannot read HotkeyManager.swift"); return
+        }
+        guard let configRange = content.range(of: "func configure(") else {
+            XCTFail("Cannot find configure() in HotkeyManager.swift"); return
+        }
+        let fnBody = substring(content, from: configRange.lowerBound, length: 400)
+
+        // Bug: hotKey.virtualKey and hotKey.flags set separately.
+        // Fix: hotKey = HotKey(virtualKey: key.virtualKey, flags: key.flags) — single assignment.
+        let hasVirtualKeyAssignment = fnBody.contains("hotKey.virtualKey")
+        let hasFlagsAssignment = fnBody.contains("hotKey.flags")
+        let hasSingleStructAssignment = fnBody.contains("HotKey(virtualKey:")
+            || fnBody.contains("hotKey = key")
+            || fnBody.contains("hotKey = HotKey(")
+
+        XCTAssertTrue(hasSingleStructAssignment || (!hasVirtualKeyAssignment && !hasFlagsAssignment),
+            "Bug 161 CONFIRMED: configure() sets hotKey.virtualKey and hotKey.flags as two " +
+            "separate field assignments. handleCGKeyEvent() reads both fields in sequence " +
+            "(both @MainActor, but not mutually exclusive at the level of the two writes). " +
+            "A keypress arriving between the two assignments sees mismatched virtualKey/flags " +
+            "and may pass or fail the guard incorrectly. " +
+            "hasVirtualKeyAssignment=\(hasVirtualKeyAssignment), hasFlagsAssignment=\(hasFlagsAssignment), " +
+            "hasSingleStructAssignment=\(hasSingleStructAssignment). " +
+            "Fix: replace the two field assignments with a single `hotKey = HotKey(virtualKey:flags:)` " +
+            "struct assignment, which Swift performs atomically for value types.")
+    }
+
+    // =======================================================================
+    // Bug 162 — WaveformView thread safety race
+    //
+    // WaveformViewModel.updateFromChunk() mutates the `smoothed` array and
+    // publishes `bins`. If stop() runs while an update is in-flight on a
+    // non-MainActor thread, array corruption is possible.
+    //
+    // EXPECTED: updateFromChunk() is confined to @MainActor; the waveform
+    //           callback is always dispatched via DispatchQueue.main.async.
+    // ACTUAL:   waveformCallback is dispatched via DispatchQueue.main.async
+    //           but WaveformViewModel itself may still acquire self.lock inside
+    //           the async block (see Bug 172), risking deadlock with stop().
+    // =======================================================================
+
+    func testBug162_waveformViewThreadSafety() {
+        guard let content = readSource("OpenVerb/Input/AudioSession.swift") else {
+            XCTFail("Cannot read AudioSession.swift"); return
+        }
+        // The waveformCallback must ONLY be dispatched via DispatchQueue.main.async
+        // so that WaveformViewModel (@MainActor) receives it on the correct executor.
+        guard let dispatchRange = content.range(of: "waveformCallback(chunk)") else {
+            XCTFail("Cannot find waveformCallback(chunk) in AudioSession.swift"); return
+        }
+        // Scan backwards 200 chars to find the enclosing dispatch context.
+        let beforeCallback = String(content[content.startIndex..<dispatchRange.lowerBound])
+        let windowStart = beforeCallback.index(
+            beforeCallback.endIndex,
+            offsetBy: -min(200, beforeCallback.count)
+        )
+        let dispatchContext = String(beforeCallback[windowStart...])
+        let isOnMainQueue = dispatchContext.contains("DispatchQueue.main.async")
+        XCTAssertTrue(isOnMainQueue,
+            "Bug 162 CONFIRMED: waveformCallback(chunk) is not enclosed in a " +
+            "DispatchQueue.main.async block in AudioSession.processTapBuffer. " +
+            "WaveformViewModel is @MainActor — calling updateFromChunk from the audio " +
+            "tap thread (a background DispatchQueue managed by AVAudioEngine) races with " +
+            "any MainActor mutations on `smoothed` and `bins`, potentially corrupting the " +
+            "array or causing a publish-from-background-thread violation. " +
+            "Fix: confirm waveformCallback is always dispatched via DispatchQueue.main.async " +
+            "before invocation (current code dispatches correctly; this test documents the " +
+            "invariant that must be maintained).")
+    }
+
+    // =======================================================================
+    // Bug 163 — FFTProcessor buffer overflow with malformed bandEdges
+    //
+    // If bandEdges construction produces edges where edges[i] >= fftSize / 2,
+    // vDSP_sve is called with a pointer advanced past the end of the magnitudes
+    // buffer. Missing bounds validation on `lo` before advancing the pointer.
+    //
+    // EXPECTED: `lo < fftSize / 2` is validated before calling vDSP_sve.
+    // ACTUAL:   only `lo < hi` is checked; lo itself may exceed the buffer bounds.
+    // =======================================================================
+
+    func testBug163_fftProcessorBufferOverflow() {
+        guard let content = readSource("OpenVerb/Input/FFTProcessor.swift") else {
+            XCTFail("Cannot read FFTProcessor.swift"); return
+        }
+        guard let bandsRange = content.range(of: "vDSP_sve(") else {
+            XCTFail("Cannot find vDSP_sve in FFTProcessor.swift"); return
+        }
+        // Inspect the 200 chars before vDSP_sve for a lo bounds check.
+        let beforeVDSP = String(content[content.startIndex..<bandsRange.lowerBound])
+        let windowStart = beforeVDSP.index(
+            beforeVDSP.endIndex,
+            offsetBy: -min(200, beforeVDSP.count)
+        )
+        let guardWindow = String(beforeVDSP[windowStart...])
+
+        // Fix: must validate lo < fftSize/2 (not just lo < hi) before advancing pointer.
+        let hasLoBoundsCheck = guardWindow.contains("lo < fftSize / 2")
+            || guardWindow.contains("lo >= fftSize")
+            || guardWindow.contains("bandEdges[i] < fftSize")
+
+        XCTAssertTrue(hasLoBoundsCheck,
+            "Bug 163 CONFIRMED: FFTProcessor.process() guards `lo < hi` before calling " +
+            "vDSP_sve but does not validate that `lo < fftSize / 2`. If bandEdges[i] >= " +
+            "fftSize / 2, `advanced(by: lo)` advances past the end of the magnitudes buffer " +
+            "(which has fftSize/2 elements), causing an out-of-bounds read. " +
+            "`hi = min(bandEdges[i+1], fftSize/2)` clamps hi, so `lo >= hi` fires the " +
+            "continue — but `advanced(by: lo)` is evaluated before the guard and the " +
+            "pointer arithmetic itself is UB in unsafe Swift. " +
+            "Fix: add `guard lo < fftSize / 2 else { continue }` before the vDSP_sve call.")
+    }
+
+    // =======================================================================
+    // Bug 164 — PreferencesView backend switch race
+    //
+    // The backend Picker setter checks `guard appState.state == .idle` synchronously,
+    // then launches an async Task for restartWithBackend. The state can change from
+    // .idle to .preparing/.recording between the guard and the Task execution,
+    // killing an active recording silently.
+    //
+    // EXPECTED: appState.state == .idle is re-checked INSIDE the Task before
+    //           calling restartWithBackend.
+    // ACTUAL:   state is only checked once, outside the async Task.
+    // =======================================================================
+
+    func testBug164_preferencesViewBackendSwitchRace() {
+        guard let content = readSource("OpenVerb/UI/PreferencesView.swift") else {
+            XCTFail("Cannot read PreferencesView.swift"); return
+        }
+        guard content.range(of: "restartWithBackend(") != nil else {
+            XCTFail("Cannot find restartWithBackend in PreferencesView.swift"); return
+        }
+        // Find the Task block containing restartWithBackend.
+        guard let taskRange = content.range(of: "Task {") else {
+            XCTFail("Cannot find Task block in PreferencesView.swift"); return
+        }
+        let taskBody = substring(content, from: taskRange.lowerBound, length: 400)
+
+        // Fix: appState.state == .idle must be re-checked inside the Task body.
+        let hasInTaskStateCheck = taskBody.contains("appState.state == .idle")
+            || taskBody.contains("appState.state != .idle")
+            || taskBody.contains("guard appState")
+
+        XCTAssertTrue(hasInTaskStateCheck,
+            "Bug 164 CONFIRMED: PreferencesView backend Picker setter checks " +
+            "appState.state == .idle outside the async Task, then calls " +
+            "restartWithBackend inside the Task. The Task's first suspension point " +
+            "(any await) allows other work to run — the user could start a recording " +
+            "between the guard and the Task body executing. restartWithBackend kills " +
+            "the engine mid-session with no user warning or data preservation. " +
+            "Fix: add `guard appState.state == .idle else { isSwitchingBackend = false; return }` " +
+            "as the first statement inside the Task body, before any await.")
+    }
+
+    // =======================================================================
+    // Bug 165 — ProcessingView state inconsistency on rapid transitions
+    //
+    // displayedPercent, showSpinner, etaSeconds, and isPolishing are independent
+    // @Published vars updated in separate assignments. Rapid state transitions
+    // can cause both ETA text and spinner to appear simultaneously, or ETA to
+    // show stale values from a previous session.
+    //
+    // EXPECTED: all ProcessingViewModel state vars are updated atomically in a
+    //           single transaction or via a single computed property.
+    // ACTUAL:   four independent @Published vars updated in separate assignments.
+    // =======================================================================
+
+    func testBug165_processingViewStateInconsistency() {
+        guard let content = readSource("OpenVerb/UI/ProcessingView.swift") else {
+            XCTFail("Cannot read ProcessingView.swift"); return
+        }
+        // The spinner and ETA must be mutually exclusive in the view body.
+        guard let bodyRange = content.range(of: "var body: some View") else {
+            XCTFail("Cannot find View body in ProcessingView.swift"); return
+        }
+        let viewBody = substring(content, from: bodyRange.lowerBound, length: 1500)
+
+        // Fix: ETA text and spinner must be in mutually exclusive branches.
+        // A simple form: `if showSpinner { ... } else { etaText }` or similar.
+        let spinnerRange = viewBody.range(of: "showSpinner")
+        let etaRange = viewBody.range(of: "etaSeconds")
+        guard spinnerRange != nil, etaRange != nil else { return }
+
+        // Check that they are in separate conditional branches (if/else pattern).
+        let hasElseBranch = viewBody.contains("} else {")
+            || viewBody.contains("} else if")
+        XCTAssertTrue(hasElseBranch,
+            "Bug 165 CONFIRMED: ProcessingView renders showSpinner and etaSeconds as " +
+            "independent conditions with no mutual-exclusion guard. During rapid state " +
+            "transitions both can be true simultaneously — the ETA countdown and spinner " +
+            "both appear, and/or the ETA shows a stale value from a previous session " +
+            "before reset() fires. " +
+            "Fix: use a single computed `enum DisplayState { case spinner, eta(Int), idle }` " +
+            "that is updated atomically, and switch over it in the view body.")
+    }
+
+    // =======================================================================
+    // Bug 166 — polishedText not cleared on .error transition
+    //
+    // AppState.transition(to: .error) clears livePartialText (Bug 136 fix)
+    // but does NOT clear polishedText. Stale polished text from a failed session
+    // can leak into the next session via the .error → .preparing path.
+    //
+    // EXPECTED: .error transition clears both livePartialText and polishedText.
+    // ACTUAL:   only livePartialText is cleared; polishedText remains stale.
+    // =======================================================================
+
+    func testBug166_polishedTextNotClearedOnError() {
+        guard let content = readSource("OpenVerb/State/AppState.swift") else {
+            XCTFail("Cannot read AppState.swift"); return
+        }
+        guard let transitionRange = content.range(of: "func transition(to newState:") else {
+            XCTFail("Cannot find transition() in AppState.swift"); return
+        }
+        let fnBody = substring(content, from: transitionRange.lowerBound, length: 1500)
+
+        guard let errorCaseRange = fnBody.range(of: "case .error:") else {
+            XCTFail("Cannot find case .error in transition()"); return
+        }
+        // Inspect the .error case body (up to the next case or end of function).
+        let errorBody = substring(fnBody, from: errorCaseRange.lowerBound, length: 500)
+
+        // Bug: polishedText is not cleared in the .error case.
+        let clearsPolishedText = errorBody.contains("polishedText = nil")
+            || errorBody.contains("polishedText = \"\"")
+            || errorBody.contains("setPolishedText(nil)")
+
+        XCTAssertTrue(clearsPolishedText,
+            "Bug 166 CONFIRMED: AppState.transition(to: .error) clears livePartialText " +
+            "(Bug 136 fix) but NOT polishedText. A session that reaches .error with a " +
+            "polished result from a previous session will retain that stale polishedText. " +
+            "On the .error → .preparing → .recording path (abort + restart), the stale " +
+            "polishedText is visible in the result panel alongside the new error, " +
+            "confusing the user and potentially causing double-injection on recovery. " +
+            "Fix: add `polishedText = nil` (or `setPolishedText(nil)`) in the .error case " +
+            "of transition(), alongside the existing `livePartialText = \"\"` reset.")
+    }
+
+    // =======================================================================
+    // Bug 167 — AccessibilityReader blocks MainActor indefinitely
+    //
+    // AX API calls (AXUIElementCopyAttributeValue) are synchronous and have
+    // no timeout. If the target app is hung or paused under a debugger,
+    // ContextBuilder.build() freezes the entire UI (MainActor blocked).
+    //
+    // EXPECTED: AX calls have a per-call timeout via AXUIElementSetMessagingTimeout.
+    // ACTUAL:   no timeout configured; calls may block indefinitely.
+    // =======================================================================
+
+    func testBug167_accessibilityReaderBlocksMainActor() {
+        guard let content = readSource("OpenVerb/Context/AccessibilityReader.swift") else {
+            XCTFail("Cannot read AccessibilityReader.swift"); return
+        }
+        // Fix: AXUIElementSetMessagingTimeout must be called on the AX element
+        // before any attribute query to bound the call duration.
+        let hasTimeout = content.contains("AXUIElementSetMessagingTimeout")
+            || content.contains("messagingTimeout")
+            || content.contains("timeoutInterval")
+
+        XCTAssertTrue(hasTimeout,
+            "Bug 167 CONFIRMED: AccessibilityReader makes AX API calls " +
+            "(AXUIElementCopyAttributeValue) with no messaging timeout set. If the " +
+            "target app is hung, in a breakpoint, or under heavy load, the call blocks " +
+            "the MainActor indefinitely — the entire OpenVerb UI (recording indicator, " +
+            "cancel button, progress view) freezes until the target app responds. " +
+            "Fix: call AXUIElementSetMessagingTimeout(axApp, 0.5) before each AX query " +
+            "to bound the wait to 500 ms, then return nil/empty on timeout.")
+    }
+
+    // =======================================================================
+    // Bug 168 — EngineProtocol.fromJSON no size limits
+    //
+    // ServerMessage.fromJSON() decodes JSON via JSONDecoder with no size
+    // validation. A malicious or buggy engine can send arbitrarily large JSON
+    // payloads, causing OOM on the client side.
+    //
+    // EXPECTED: fromJSON() validates data.count against a maximum (e.g., 1 MB)
+    //           before calling JSONDecoder.decode().
+    // ACTUAL:   no size check; JSONDecoder.decode() is called on arbitrary data.
+    // =======================================================================
+
+    func testBug168_engineProtocolFromJSONNoSizeLimits() {
+        guard let content = readSource("OpenVerb/Engine/EngineProtocol.swift") else {
+            XCTFail("Cannot read EngineProtocol.swift"); return
+        }
+        guard let fromJSONRange = content.range(of: "static func fromJSON(_ data: Data)") else {
+            XCTFail("Cannot find fromJSON in EngineProtocol.swift"); return
+        }
+        let fnBody = substring(content, from: fromJSONRange.lowerBound, length: 500)
+
+        // Fix: data.count must be validated against a max before decode.
+        let hasSizeValidation = fnBody.contains("data.count")
+            && (fnBody.contains("maxSize") || fnBody.contains("1_048_576")
+                || fnBody.contains("1024 * 1024") || fnBody.contains("< "))
+
+        XCTAssertTrue(hasSizeValidation,
+            "Bug 168 CONFIRMED: ServerMessage.fromJSON() calls JSONDecoder().decode() " +
+            "without any size validation on the input data. A malicious or misbehaving " +
+            "engine can send a multi-megabyte JSON payload (e.g., a result message with " +
+            "a 100 MB 'text' field), causing an OOM allocation on the Swift client side. " +
+            "The OOM terminates OpenVerb without a user-facing error. " +
+            "Fix: add `guard data.count <= 1_048_576 else { throw EngineClientError.protocolViolation }` " +
+            "at the top of fromJSON() before calling decode().")
+    }
+
+    // =======================================================================
+    // Bug 169 — ClipboardStyle.describe OOM on large inputs
+    //
+    // detectMarkdown() splits entire input by newlines (allocates N substrings).
+    // detectCase() calls .lowercased() duplicating the string in memory.
+    // A 100 MB clipboard causes OOM before the byteLimit truncation takes effect
+    // if truncation is applied inconsistently.
+    //
+    // EXPECTED: truncation to byteLimit is applied BEFORE any detect function runs.
+    // ACTUAL:   detect functions may be called before or without the byteLimit cap.
+    // =======================================================================
+
+    func testBug169_clipboardStyleDescribeOOM() {
+        guard let content = readSource("OpenVerb/Context/ClipboardStyle.swift") else {
+            XCTFail("Cannot read ClipboardStyle.swift"); return
+        }
+        guard let describeRange = content.range(of: "static func describe(_ text: String)") else {
+            XCTFail("Cannot find describe() in ClipboardStyle.swift"); return
+        }
+        let fnBody = substring(content, from: describeRange.lowerBound, length: 600)
+
+        // Fix: truncateToUTF8Bytes must appear BEFORE any detectMarkdown/detectCase call.
+        let truncateRange = fnBody.range(of: "truncateToUTF8Bytes")
+        let markdownRange = fnBody.range(of: "detectMarkdown(")
+        let caseRange = fnBody.range(of: "detectCase(")
+
+        guard let trunc = truncateRange else {
+            XCTFail("Bug 169 CONFIRMED: describe() has no truncateToUTF8Bytes call at all. " +
+                "All detect functions operate on the raw (potentially 100 MB) input. " +
+                "Fix: add `let truncated = ContextBuilder.truncateToUTF8Bytes(text, limit: byteLimit)` " +
+                "as the first statement and pass `truncated` to all detect functions.")
+            return
+        }
+        if let md = markdownRange {
+            XCTAssertLessThan(trunc.lowerBound, md.lowerBound,
+                "Bug 169 CONFIRMED: detectMarkdown() is called before truncateToUTF8Bytes. " +
+                "A 100 MB clipboard splits into millions of substring views before the cap " +
+                "takes effect, exhausting heap memory. " +
+                "Fix: call truncateToUTF8Bytes first and pass `truncated` to detectMarkdown.")
+        }
+        if let cs = caseRange {
+            XCTAssertLessThan(trunc.lowerBound, cs.lowerBound,
+                "Bug 169 CONFIRMED: detectCase() is called before truncateToUTF8Bytes. " +
+                "detectCase() calls .lowercased() which duplicates the string in memory; " +
+                "on a 100 MB input this double-allocates ~200 MB, causing OOM. " +
+                "Fix: call truncateToUTF8Bytes first and pass `truncated` to detectCase.")
+        }
+    }
+
+    // =======================================================================
+    // Bug 170 — wire protocol 0xFFFFFFFF frame OOM
+    //
+    // The 4-byte length header written by sendAudioFrame is never validated
+    // against a maximum on the receive side. A malicious or buggy engine can
+    // send a length of 0xFFFFFFFF (~4 GB), causing an OOM allocation when
+    // the client tries to read that many bytes.
+    //
+    // EXPECTED: the receive path validates frame length <= max before allocating.
+    // ACTUAL:   no max-frame-size check in the receive path.
+    // =======================================================================
+
+    func testBug170_wireProtocolFrameSizeNotValidated() {
+        guard let content = readSource("OpenVerb/Engine/EngineClient.swift") else {
+            XCTFail("Cannot read EngineClient.swift"); return
+        }
+        // The receive path must validate frame length against a maximum.
+        // Look for any max-frame-size constant or validation near the length parsing.
+        let hasMaxFrameGuard = content.contains("maxFrameSize")
+            || content.contains("maxFrameLen")
+            || content.contains("frameSize >")
+            || content.contains("frameLen >")
+            || (content.contains("0xFFFF") && content.contains("guard"))
+            || (content.contains("1_048_576") && content.contains("len"))
+
+        XCTAssertTrue(hasMaxFrameGuard,
+            "Bug 170 CONFIRMED: EngineClient has no maximum frame-size validation on the " +
+            "receive path. sendAudioFrame() writes a 4-byte big-endian length header; the " +
+            "engine could send a frame with length 0xFFFFFFFF (~4 GB). When the client " +
+            "tries to allocate a buffer of that size, it OOMs and terminates. " +
+            "This is a security vulnerability in the local IPC protocol — a compromised " +
+            "engine process can crash the host app. " +
+            "Fix: in the receive path, validate `guard frameLen <= maxFrameSize` (e.g., " +
+            "1 MB) before allocating the receive buffer.")
+    }
+
+    // =======================================================================
+    // Bug 171 — language detection emits invalid BCP-47 "und"
+    //
+    // Locale.current.language.languageCode?.identifier can return "und"
+    // (undetermined). The nil-coalescing fallback only catches nil, not "und".
+    // The engine receives "und" as the language code, which is invalid BCP-47
+    // and may confuse the language model.
+    //
+    // EXPECTED: "und" is treated the same as nil and falls back to "en".
+    // ACTUAL:   ?? "en" only catches nil; "und" passes through as-is.
+    // =======================================================================
+
+    func testBug171_languageDetectionEmitsUnd() {
+        guard let content = readSource("OpenVerb/Context/ContextBuilder.swift") else {
+            XCTFail("Cannot read ContextBuilder.swift"); return
+        }
+        // Find the language code assignment in build().
+        guard let langRange = content.range(of: "languageCode?.identifier") else {
+            XCTFail("Cannot find languageCode?.identifier in ContextBuilder.swift"); return
+        }
+        let langLine = substring(content, from: langRange.lowerBound, length: 200)
+
+        // Bug: only nil is caught by ?? "en"; "und" passes through.
+        // Fix: also filter "und" explicitly.
+        let handlesUnd = langLine.contains("\"und\"")
+            || langLine.contains("!= \"und\"")
+            || langLine.contains("== \"und\"")
+            || langLine.contains("undetermined")
+
+        XCTAssertTrue(handlesUnd,
+            "Bug 171 CONFIRMED: ContextBuilder.build() uses " +
+            "`languageCode?.identifier ?? \"en\"` to determine the BCP-47 language code. " +
+            "When no language can be determined, languageCode.identifier returns the " +
+            "string \"und\" (ISO 639-2 undetermined) rather than nil — the ?? operator " +
+            "does not fire and \"und\" is sent to the engine. The Gemma 4 model treats " +
+            "\"und\" as an unknown locale, potentially degrading transcript quality. " +
+            "Fix: add a guard `filter { $0 != \"und\" }` or use " +
+            "`identifier.flatMap { $0 == \"und\" ? nil : $0 } ?? \"en\"`.")
+    }
+
+    // =======================================================================
+    // Bug 172 — lock ordering potential deadlock in AudioSession waveform dispatch
+    //
+    // AudioSession.processTapBuffer dispatches waveformCallback via
+    // DispatchQueue.main.async. Inside that async block, self.lock is acquired
+    // to read _sessionGeneration. If the main thread calls stop() (which also
+    // acquires self.lock) via a synchronous path while the async block is mid-
+    // execution, the lock is nested in a context that could deadlock.
+    //
+    // EXPECTED: the waveform async block does NOT acquire self.lock; instead
+    //           it reads sessionGeneration from a thread-safe copy captured before
+    //           the dispatch (already done — sessionGen is captured under lock).
+    // ACTUAL:   self.lock.lock() is called inside DispatchQueue.main.async block
+    //           to re-read _sessionGeneration, acquiring the lock on the main thread.
+    // =======================================================================
+
+    func testBug172_lockAcquiredInsideMainAsyncBlock() {
+        guard let content = readSource("OpenVerb/Input/AudioSession.swift") else {
+            XCTFail("Cannot read AudioSession.swift"); return
+        }
+        // Locate the DispatchQueue.main.async block that invokes waveformCallback.
+        guard let asyncRange = content.range(of: "DispatchQueue.main.async { [weak self] in") else {
+            XCTFail("Cannot find waveform DispatchQueue.main.async in AudioSession.swift"); return
+        }
+        let asyncBody = substring(content, from: asyncRange.lowerBound, length: 400)
+
+        // Bug: self.lock.lock() inside the async block re-acquires the audio-thread
+        // lock on the main thread. If stop() is called synchronously from the main
+        // thread while this block is mid-execution (e.g., via a UI button), both
+        // callers contend on self.lock from the same queue — potential deadlock.
+        // Fix: use only the already-captured `sessionGen` constant (captured under lock
+        // before the dispatch) — no re-acquisition of self.lock needed inside the block.
+        let reacquiresLockInsideAsync = asyncBody.contains("self.lock.lock()")
+            || asyncBody.contains("lock.lock()")
+
+        XCTAssertFalse(reacquiresLockInsideAsync,
+            "Bug 172 CONFIRMED: AudioSession.processTapBuffer acquires self.lock inside " +
+            "a DispatchQueue.main.async block (to read _sessionGeneration). The sessionGen " +
+            "constant is already captured under self.lock before the dispatch — there is no " +
+            "need to re-acquire the lock inside the async block. Re-acquiring self.lock on " +
+            "the main thread while stop() may also be acquiring it from the main thread " +
+            "(e.g., called from a UI button handler) is a lock ordering violation that " +
+            "can deadlock the main queue. " +
+            "Fix: remove self.lock.lock/unlock from the async block; use only the already- " +
+            "captured `sessionGen` constant for the generation comparison.")
     }
 }

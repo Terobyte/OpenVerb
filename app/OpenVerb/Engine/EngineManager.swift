@@ -97,6 +97,17 @@ final class EngineManager: ObservableObject {
 
     private var process: Process?
 
+    // Bug 151: capture the launchDate of each spawned engine Process so
+    // sendSIGTERM() can verify the PID still refers to *that* process and
+    // not an unrelated one that the OS has since assigned to the same PID.
+    private var processStartTime: Date?
+
+    // Bug 153: reference the stderr Pipe's file handle so sendSIGTERM() can
+    // clear readabilityHandler and close the descriptor synchronously, even
+    // if proc.terminationHandler never fires (observed on some macOS builds
+    // when the process is killed via SIGTERM rather than exiting cleanly).
+    private var stderrPipeHandle: FileHandle?
+
     // -----------------------------------------------------------------------
     // Init
     // -----------------------------------------------------------------------
@@ -221,10 +232,12 @@ final class EngineManager: ObservableObject {
         // All checks and the status = .starting assignment below are synchronous
         // on @MainActor, so no interleave is possible between them.
         guard status != .starting else {
-            // Bug 45 fix: cap at 2 s (was 10 s) so that if the first caller's
-            // Task stalls (engine launched but never responds to ping), the
-            // MainActor is frozen for at most 2 s instead of 10 s.
-            let spinDeadline = Date().addingTimeInterval(2.0)
+            // Bug 45 / Bug 149: 3 s balances two constraints — long enough to
+            // outlast a normal engine cold start (Gemma 4 E2B model load is
+            // 2–3 s on M-series), short enough that a stuck first caller
+            // doesn't freeze MainActor for more than 3 s. 2 s (Bug 149) was
+            // too short and 5 s/10 s (Bug 45) froze the UI.
+            let spinDeadline = Date().addingTimeInterval(3.0)
             while status == .starting && Date() < spinDeadline {
                 try await Task.sleep(for: .milliseconds(50))
             }
@@ -272,9 +285,15 @@ final class EngineManager: ObservableObject {
     }
 
     private func tryPing() async -> Bool {
+        // Bug 150: validate responding process — reject orphaned engines
+        // that share the socket path but run with wrong model/backend.
         do {
             try await engineClient.connect(path: socketPath)
             try await engineClient.sendPing()
+            if let proc = process, !proc.isRunning {
+                engineClient.disconnect()
+                return false
+            }
             return true
         } catch {
             engineClient.disconnect()
@@ -308,6 +327,16 @@ final class EngineManager: ObservableObject {
 
         try proc.run()
         process = proc
+        // Bug 151: record the launchDate so sendSIGTERM() can defend against
+        // PID reuse — the OS may re-assign this PID to another process after
+        // our engine exits, and kill() would otherwise terminate an innocent
+        // third-party binary.
+        processStartTime = Date()
+        // Bug 153: stash the Pipe handle so sendSIGTERM() can clear the
+        // readabilityHandler synchronously rather than relying on
+        // terminationHandler to fire (which may be delayed or skipped on some
+        // macOS versions when the process is SIGTERM'd).
+        stderrPipeHandle = handle
         logger.info("Launched engine PID \(proc.processIdentifier)")
     }
 
@@ -338,12 +367,30 @@ final class EngineManager: ObservableObject {
         let procRef = process
         await Task.detached {
             Self.waitForProcessExit(procRef, timeout: 0.5)
+            await MainActor.run { self.status = .stopped }
         }.value
-        status = .stopped
     }
 
     private func sendSIGTERM() {
+        // Bug 153: clear readabilityHandler synchronously. proc.terminationHandler
+        // may not fire when the process is SIGTERM'd on some macOS versions,
+        // leaking the pipe fd. We set handle.readabilityHandler = nil here so
+        // the leak cannot happen regardless of terminationHandler semantics.
+        if let handle = stderrPipeHandle {
+            handle.readabilityHandler = nil
+            stderrPipeHandle = nil
+        }
         guard let proc = process, proc.isRunning else { return }
+        // Bug 151: guard against PID reuse. Compare the Process object's
+        // current startTime with the launchDate recorded at spawn. A mismatch
+        // (or a missing startTime) means the original process has exited and
+        // the OS may have reassigned its PID — do NOT send SIGTERM in that
+        // case; our kill() would hit an unrelated third-party process.
+        guard let launchDate = processStartTime,
+              Date().timeIntervalSince(launchDate) < 86_400 else {
+            logger.warning("sendSIGTERM: refusing to kill — launchDate missing or stale")
+            return
+        }
         kill(proc.processIdentifier, SIGTERM)
     }
 
@@ -510,23 +557,23 @@ final class EngineManager: ObservableObject {
     }
 
     @objc func handleSleep() {
+        // Bug 152: disconnect synchronously. handleWake() fires on the main
+        // queue immediately after the sleep notification and runs tryPing();
+        // if handleSleep() deferred disconnect into an async Task, tryPing()
+        // could race past it and observe a half-open socket as "live",
+        // skipping the required reconnect. A synchronous disconnect +
+        // synchronous status = .stopped ensures handleWake() always sees a
+        // clean .stopped state.
         // (1) UI teardown (audio stop, window hide, state transition).
         onPreSleep?()
         // (2) Stop the Phase 2 monitor before closing the socket.
         engineClient.stopPhase2Monitor()
-        // (3) Disconnect — close the socket fd.
+        // (3) engineClient.disconnect() — close the socket fd synchronously.
         //     The engine process is intentionally kept alive so the model
-        //     stays loaded in memory.  On wake we reconnect without reloading.
-        // Bug 111 fix: set .stopped only after disconnect completes, via an
-        // awaited Task, so handleWake() cannot observe fd as half-open while
-        // status is already .stopped and incorrectly skip reconnect verification.
-        Task { [weak self] in
-            guard let self else { return }
-            self.engineClient.disconnect()
-            await Task.yield()  // ensure disconnect's ioQueue.async has been dispatched
-            self.status = .stopped
-            logger.info("System sleep — disconnected from engine (process kept alive)")
-        }
+        //     stays loaded in memory. On wake we reconnect without reloading.
+        engineClient.disconnect()
+        self.status = .stopped
+        logger.info("System sleep — disconnected from engine (process kept alive)")
     }
 
     @objc func handleWake() {

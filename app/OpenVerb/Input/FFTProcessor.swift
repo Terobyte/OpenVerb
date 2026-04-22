@@ -93,6 +93,14 @@ final class FFTProcessor {
             for i in 0..<Self.bandCount {
                 let lo = bandEdges[i]
                 let hi = min(bandEdges[i + 1], fftSize / 2)
+                // Bug 163: validate lo against the magnitudes buffer bound
+                // (fftSize/2) in addition to lo < hi. A malformed bandEdges
+                // table (future config change, initializer regression) could
+                // otherwise produce lo >= fftSize/2, and advanced(by: lo)
+                // would step past the buffer end — unsafe Swift pointer
+                // arithmetic on an out-of-bounds offset is UB even before
+                // vDSP_sve reads.
+                guard lo < fftSize / 2 else { continue }
                 guard lo < hi else { continue }
                 var sum: Float = 0
                 vDSP_sve(magPtr.baseAddress!.advanced(by: lo), 1, &sum, vDSP_Length(hi - lo))

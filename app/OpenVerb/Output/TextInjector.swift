@@ -44,92 +44,80 @@ struct TextInjector {
         targetApp: NSRunningApplication,
         window: RecordingWindow
     ) async {
-
-        // (0) guard: skip injection if target app was quit
-        guard !targetApp.isTerminated else {
-            logger.warning("TextInjector: target app terminated before injection — aborting")
-            window.orderOut(nil)
-            return
-        }
+        guard !targetApp.isTerminated else { window.orderOut(nil); return }
 
         let pasteboard = NSPasteboard.general
 
-        // (0b) Bug 90: refuse to use pasteboard path for secure/password fields.
-        // Check the focused element's AXRole for password markers; also check
-        // isSecure via SecInputIsEnabled() equivalent on the focused element.
-        let isSecureField: Bool = {
-            guard let focusedApp = NSWorkspace.shared.frontmostApplication else { return false }
-            let axApp = AXUIElementCreateApplication(focusedApp.processIdentifier)
-            var focusedElement: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(axApp, kAXFocusedUIElementAttribute as CFString, &focusedElement) == .success,
-                  let element = focusedElement else { return false }
-            var roleValue: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(element as! AXUIElement, kAXRoleAttribute as CFString, &roleValue) == .success,
-                  let role = roleValue as? String else { return false }
-            return role == "AXSecureTextField"
-        }()
+        if isSecureField() { window.orderOut(nil); return }
 
-        if isSecureField {
-            logger.warning("TextInjector: secure input field detected — skipping pasteboard injection")
-            window.orderOut(nil)
-            return
-        }
-
-        // (1) save full pasteboardItems BEFORE our write (Bug 88: preserve all types)
         let savedItems = pasteboard.pasteboardItems?.compactMap { item -> NSPasteboardItem? in
             let copy = NSPasteboardItem()
             for type in item.types {
-                if let data = item.data(forType: type) {
-                    copy.setData(data, forType: type)
-                }
+                if let data = item.data(forType: type) { copy.setData(data, forType: type) }
             }
             return copy
         }
 
-        // (2) write text to clipboard
+        // Bug 156: session-unique token instead of changeCount (wraps).
+        let restoreTokenType = NSPasteboard.PasteboardType("io.openverb.restore-token")
+        let restoreToken = UUID().uuidString
+
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
-        // Capture changeCount AFTER our own write so the restore guard at step (8)
-        // only fires when another process modifies the clipboard during the paste
-        // window — not because of our own clearContents() / setString() calls.
-        let savedChangeCount = pasteboard.changeCount
-        logger.debug("TextInjector: clipboard loaded with \(text.count) chars")
+        pasteboard.setString(restoreToken, forType: restoreTokenType)
 
-        // (3) hide panel — releases key-window status so target app can refocus
         window.orderOut(nil)
 
-        // (4) activate target app
-        if !targetApp.activate(options: .activateIgnoringOtherApps) {
-            logger.warning("TextInjector: activate() failed for \(targetApp.bundleIdentifier ?? targetApp.localizedName ?? "unknown")")
+        // Bug 154: guard targetApp.activate — abort on focus-transfer fail.
+        guard targetApp.activate(options: .activateIgnoringOtherApps) else {
+            // !targetApp.activate branch: restore clipboard and bail before ⌘V.
+            pasteboard.clearContents()
+            if let items = savedItems, !items.isEmpty { pasteboard.writeObjects(items) }
+            return
         }
 
-        // (5) 50 ms focus-transfer delay
-        // 0 ms works in microbenchmarks but fails intermittently under
-        // system load; 50 ms is the empirical minimum for reliable delivery.
         try? await Task.sleep(for: .milliseconds(50))
 
-        // (6) simulate ⌘V via CGEvent posted to the HID event stream
-        //     virtualKey 0x09 = V key (ANSI scan code, not ASCII 0x56)
+        // Bug 157: re-check isTerminated before posting ⌘V.
+        guard !targetApp.isTerminated else {
+            pasteboard.clearContents()
+            if let items = savedItems, !items.isEmpty { pasteboard.writeObjects(items) }
+            return
+        }
+
         postPasteEvent()
 
-        // (7) 300 ms clipboard-read delay
-        // Slow apps (Electron, Word) may take longer; 300 ms is best-effort.
-        // If the clipboard is restored before the app reads it the paste is
-        // lost — a known limitation of clipboard simulation (MVP3).
-        try? await Task.sleep(for: .milliseconds(300))
+        // Bug 155: 600 ms delay for Electron apps (≥500 ms needed).
+        try? await Task.sleep(for: .milliseconds(600))
 
-        // (8) restore original clipboard ONLY IF changeCount unchanged
-        // If another process wrote to the clipboard during the window skip
-        // the restore to avoid overwriting their data.
-        if pasteboard.changeCount == savedChangeCount {
+        if pasteboard.string(forType: restoreTokenType) == restoreToken {
             pasteboard.clearContents()
-            if let items = savedItems, !items.isEmpty {
-                pasteboard.writeObjects(items)
-            }
-            logger.debug("TextInjector: clipboard restored")
-        } else {
-            logger.debug("TextInjector: clipboard changed by another process — skipping restore")
+            if let items = savedItems, !items.isEmpty { pasteboard.writeObjects(items) }
         }
+    }
+
+    // Extracted secure-field probe (Bug 158): checks AXRole and kAXSecure.
+    @MainActor
+    private static func isSecureField() -> Bool {
+        guard let focusedApp = NSWorkspace.shared.frontmostApplication else { return false }
+        let axApp = AXUIElementCreateApplication(focusedApp.processIdentifier)
+        var focusedElement: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axApp, kAXFocusedUIElementAttribute as CFString, &focusedElement) == .success,
+              let element = focusedElement else { return false }
+        let axElement = element as! AXUIElement
+        var roleValue: CFTypeRef?
+        let roleOk = AXUIElementCopyAttributeValue(axElement, kAXRoleAttribute as CFString, &roleValue) == .success
+        let role = (roleOk ? (roleValue as? String) : nil) ?? ""
+        if role == "AXSecureTextField" { return true }
+        // Bug 158: kAXSecure attribute catches browser password fields that
+        // use AXTextArea + a secure flag instead of the AXSecureTextField role.
+        let kAXSecure = "AXSecure" as CFString
+        var secureValue: CFTypeRef?
+        if AXUIElementCopyAttributeValue(axElement, kAXSecure, &secureValue) == .success,
+           let flag = secureValue as? Bool, flag {
+            return true
+        }
+        return false
     }
 
     // -----------------------------------------------------------------------

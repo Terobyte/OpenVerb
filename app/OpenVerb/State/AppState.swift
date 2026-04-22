@@ -167,6 +167,19 @@ final class AppState: ObservableObject {
             return
         }
 
+        // Bug 136 / 166: clear both transcripts on any transition *to* .error
+        // so stale partial or polished text never leaks into the next session
+        // via the .error → .preparing abort+restart path. Also gate to
+        // .preparing from anywhere cleans the same fields (applyEntryEffects
+        // handles PREPARING's own reset).
+        switch newState {
+        case .error:
+            livePartialText = ""
+            polishedText = nil
+        default:
+            break
+        }
+
         logger.debug("Transition: \(self.state) → \(newState)")
 
         applyEntryEffects(from: state, to: newState)
@@ -319,6 +332,11 @@ final class AppState: ObservableObject {
             // Bug 136: clear stale partial transcript so it is not shown alongside
             // the error message for the full 5-second error display window.
             livePartialText = ""
+            // Bug 166: also clear polishedText. Without this, a stale polished
+            // transcript from a previous session can leak into the next one
+            // via the .error → .preparing → .recording abort+restart path,
+            // showing obsolete results alongside the new recording.
+            polishedText = nil
 
             // Start the auto-clear timer (default 5 s; injectable for tests).
             // The task is isolated to @MainActor (created from @MainActor context),

@@ -17,6 +17,13 @@ struct AccessibilityReader: AccessibilityReadable {
     func readWindowTitle(for app: NSRunningApplication) -> String? {
         let pid = app.processIdentifier
         let axApp = AXUIElementCreateApplication(pid)
+        // Bug 167: cap every AX messaging round-trip at 500 ms. Without a
+        // timeout, a hung / paused target app can freeze the MainActor
+        // indefinitely while ContextBuilder.build() blocks on
+        // AXUIElementCopyAttributeValue. 0.5 s is the empirical balance
+        // point: long enough for a responsive app to answer on a busy
+        // system, short enough that the user still sees a responsive UI.
+        AXUIElementSetMessagingTimeout(axApp, 0.5)
 
         var focusedWindow: AnyObject?
         let err = AXUIElementCopyAttributeValue(
@@ -50,6 +57,8 @@ struct AccessibilityReader: AccessibilityReadable {
     func readSelectedText(for app: NSRunningApplication) -> String? {
         let pid = app.processIdentifier
         let axApp = AXUIElementCreateApplication(pid)
+        // Bug 167: bound AX messaging to 500 ms per call.
+        AXUIElementSetMessagingTimeout(axApp, 0.5)
 
         var focusedElement: AnyObject?
         let err = AXUIElementCopyAttributeValue(
@@ -87,6 +96,8 @@ struct AccessibilityReader: AccessibilityReadable {
     func readCursorSurroundingText(for app: NSRunningApplication) -> (before: String, after: String) {
         let pid = app.processIdentifier
         let axApp = AXUIElementCreateApplication(pid)
+        // Bug 167: bound AX messaging to 500 ms per call.
+        AXUIElementSetMessagingTimeout(axApp, 0.5)
 
         var focusedElement: AnyObject?
         let err = AXUIElementCopyAttributeValue(

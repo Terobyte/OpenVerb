@@ -435,78 +435,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // -----------------------------------------------------------------------
 
     private func startRecording() {
-        // Defense-in-depth: clear any stale isDraining flag from a prior session.
-        // The Bug 81 re-entrancy guard depends on drainResult's defer to reset
-        // isDraining, but several paths (handleCancel, onError mid-inferring,
-        // engine timeouts) can leave isDraining true if the drain task is still
-        // suspended at await when state moves on. Without this reset, the next
-        // stopRecording call would silently no-op and the user would see
-        // "recording starts but won't stop" — no UI transition at all.
-        // Bump drainGeneration too so any in-flight stale drain returns without
-        // touching state when its receiveMessage finally resolves.
         if isDraining {
             logger.warning("startRecording: isDraining was true (stale) — resetting")
         }
         isDraining = false
         drainGeneration &+= 1
-
-        // Bug 54: capture clipboard at ⌥Space press time so TextInjector's
-        // 300 ms paste window never contaminates the session context.
         let clipboardSnapshot = appSettings.includeClipboard
             ? NSPasteboard.general.string(forType: .string)
             : nil
-
-        // ---- Step 29: Microphone permission check ----
         let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
         switch micStatus {
         case .denied, .restricted:
             showMicPermissionDeniedAlert()
             return
-
         case .notDetermined:
-            // Request permission; the closure fires on a background thread.
-            // The user will need to press ⌥Space again after granting.
             AVCaptureDevice.requestAccess(for: .audio) { _ in }
             return
-
         case .authorized:
-            break  // Proceed.
-
+            break
         @unknown default:
             break
         }
-
-        // ---- Step 30: IDLE / ERROR → PREPARING; reset processing VM ----
         appState.transition(to: .preparing)
         processingVM.reset()
-        waveformVM.reset()  // #42: reset waveform bars between recording sessions
-
-        // ---- Step 31: Start audio session (pre-buffering begins now) ----
-        do {
-            try audioSession.start(waveformCallback: { [weak self] chunk in
-                self?.waveformVM.updateFromChunk(chunk)
-            })
-        } catch AudioSessionError.permissionDenied {
-            logger.error("AudioSession: microphone permission denied")
-            appState.transition(to: .error("Microphone access denied — check System Settings"))
-            return
-        } catch {
-            logger.error("AudioSession start failed: \(error)")
-            appState.transition(to: .error("Microphone unavailable"))
-            return
-        }
-
-        // ---- Step 32: Recording start sound ----
+        waveformVM.reset()
+        // Bug 141: do NOT start audioSession here — engine may need 5–10 s to
+        // cold-start, and a pre-buffer accumulated before ensureRunning()
+        // returns would burst-send 40+ stale chunks. Audio capture is deferred
+        // to connectAndRecord() where it runs AFTER ensureRunning() confirms
+        // the engine is ready.
         playSound("Tink")
-
-        // ---- Step 33: Show recording window ----
         recordingWindow.show()
-
-        // Register Escape monitors so the user can cancel during the
-        // cold-start window (PREPARING state).
         hotkeyManager.registerEscapeMonitors()
-
-        // ---- Step 35: Engine connect + session start ----
         Task { [weak self] in
             guard let self else { return }
             await connectAndRecord(clipboardSnapshot: clipboardSnapshot)
@@ -711,11 +671,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             try await engineManager.ensureRunning()
 
-            // #32: user may have pressed Escape during ensureRunning() (up to 5 s).
-            // handleCancel() transitions to .idle; proceeding would call startSession()
-            // on a dead/disconnected socket and trigger spurious crash recovery.
+            // #32: Escape during ensureRunning → avoid startSession on dead fd.
             guard appState.state == .preparing else {
                 engineManager.disconnect()
+                return
+            }
+
+            // Bug 141: start audio capture now that engine is ready (was before ensureRunning).
+            do {
+                try audioSession.start(waveformCallback: { [weak self] chunk in
+                    self?.waveformVM.updateFromChunk(chunk)
+                })
+            } catch AudioSessionError.permissionDenied {
+                logger.error("AudioSession: microphone permission denied")
+                appState.transition(to: .error("Microphone access denied — check System Settings"))
+                return
+            } catch {
+                logger.error("AudioSession start failed: \(error)")
+                appState.transition(to: .error("Microphone unavailable"))
                 return
             }
 
@@ -735,33 +708,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 throw EngineClientError.unexpectedMessage(readyMsg)
             }
 
-            // Guard: user may have pressed Escape while waiting for session.ready.
-            // handleCancel() transitions to .idle; IDLE→RECORDING is an invalid
-            // transition that crashes via assertionFailure in DEBUG builds.
+            // Escape during session.ready wait → avoid invalid IDLE→RECORDING.
             guard appState.state == .preparing else {
                 engineManager.disconnect()
                 return
             }
 
-            // Bug 32 fix: flush pre-buffer BEFORE activating the live callback
-            // so all buffered frames reach ioQueue before any live frame can be
-            // dispatched by the audio thread (sendAudioFrame → ioQueue.async).
-            let buffered = audioSession.flushPreBuffer()
+            // Bug 32/146: flush pre-buffer; if empty on cold start poll up to 500 ms
+            // so we never transition to .recording with a silent mic.
+            engineManager.engineClient.syncOnIOQueue()
+            var buffered = audioSession.flushPreBuffer()
+            if buffered.isEmpty {
+                let waitDeadline = Date().addingTimeInterval(0.5)
+                while buffered.isEmpty && Date() < waitDeadline {
+                    try? await Task.sleep(for: .milliseconds(25))
+                    buffered = audioSession.flushPreBuffer()
+                }
+                if buffered.isEmpty {
+                    logger.warning("connectAndRecord: no audio chunks within 500 ms of engine ready")
+                }
+            }
             for chunk in buffered {
                 engineManager.engineClient.sendAudioFrame(chunk)
             }
-            // Bug 129: call syncOnIOQueue() BEFORE commitSendCallback so that
-            // the audio thread cannot race interim frames to ioQueue. Once the
-            // live callback is installed, the audio thread dispatches frames via
-            // ioQueue.async immediately. Without the sync fence here, a live frame
-            // can land in ioQueue before an older interim frame dispatched by the
-            // main thread's for-loop below.
-            engineManager.engineClient.syncOnIOQueue()
-            // Atomically activate live streaming and drain any frames that
-            // arrived in the nanosecond gap since flushPreBuffer() returned.
             let liveCallback: (Data) -> Void = { [weak self] chunk in
                 self?.engineManager.engineClient.sendAudioFrame(chunk)
             }
+            // Bug 129: syncOnIOQueue() immediately before commitSendCallback so
+            // the audio thread cannot interleave a live frame before interim drain.
+            engineManager.engineClient.syncOnIOQueue()
             let interim = audioSession.commitSendCallback(liveCallback)
             for chunk in interim {
                 engineManager.engineClient.sendAudioFrame(chunk)
@@ -840,15 +815,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func drainResult(generation: UInt64) async {
         defer {
-            // Reset re-entrancy guard only for the active drain.
-            // Stale drains (generation mismatch) must not reset it — the
-            // current drain is still in progress and owns the flag.
             if generation == drainGeneration { isDraining = false }
         }
-        // Bug 93: track whether a polishedResult arrived without a subsequent
-        // result message. After polishedResult, use a much shorter timeout so
-        // the session does not block for the full 3-minute window if the engine
-        // crashes mid-delivery and never sends the final result message.
         var polishedResultReceived = false
         while appState.state == .inferring && generation == drainGeneration {
             let timeoutMs: Int = polishedResultReceived ? 10_000 : 180_000
@@ -857,22 +825,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 msg = try await engineManager.engineClient.receiveMessage(timeoutMs: timeoutMs)
             } catch {
                 logger.error("drainResult: receive error: \(error)")
-                // Bug 16: stale drain from a previous session — return without touching UI.
                 guard generation == drainGeneration else { return }
-                // Only tear down if still .inferring — abort+restart moves to .preparing.
                 if appState.state == .inferring {
+                    maxDurationTimer?.cancel()
+                    maxDurationTimer = nil
                     etaTickTimer?.invalidate()
                     etaTickTimer = nil
                     processingVM.resetEta()
                     recordingWindow.hide()
                     audioSession.stop()
-                    // #33: remove Escape monitors on error path — monitors were left
-                    // registered, staying active indefinitely after the session failed.
                     hotkeyManager.removeEscapeMonitors()
                     appState.transition(to: .error("Connection lost"))
                     playSound("Basso")
-                    // Invoke crash recovery (exponential backoff) so the engine is
-                    // ready for the next session without a manual restart.
                     Task { [weak self] in
                         guard let self else { return }
                         do {
@@ -884,42 +848,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 return
             }
-
-            // Bug 113: check generation immediately after await receiveMessage() returns,
-            // before processing the message. The while-condition alone is insufficient —
-            // one stale message slips through between the await resumption and the next
-            // while-condition check. This guard prevents that.
             guard generation == drainGeneration else { return }
             switch msg {
             case .progress(let percent):
                 processingVM.updateProgress(percent)
-
             case .partialResult(let text, let chunkId, let isFinal):
-                // Forward to the registered callback (live text / livePartialText).
                 engineManager.engineClient.onPartialResult?(text, chunkId, isFinal)
-
             case .queueStatus(let pending, let inFlight, let etaMs):
-                // Forward to the ETA callback (sets remainingInferenceMs on AppState).
                 engineManager.engineClient.onQueueStatus?(pending, inFlight > 0, etaMs)
-
             case .polishStarted:
                 processingVM.enterPolishing()
-
             case .polishedResult(let text):
                 processingVM.exitPolishing()
                 engineManager.engineClient.onPolishedResult?(text)
-                // Bug 93: flag that polishedResult has arrived so the next
-                // receiveMessage uses the shorter 10_000 ms timeout instead of
-                // 180_000 ms. If the engine never sends the final result message
-                // (crash after polish), the session resolves in 10 s rather than 3 min.
                 polishedResultReceived = true
-
             case .result(let text, let command):
-                // Bug 78: stale-drain guard — abortAndRestart() bumps drainGeneration.
                 guard generation == drainGeneration else { return }
-                // Disconnect so the engine detects EOF and returns to IDLE,
-                // freeing the socket slot before any async injection work begins.
                 engineManager.disconnect()
+                maxDurationTimer?.cancel()
+                maxDurationTimer = nil
                 maxDurationTimer?.cancel()
                 maxDurationTimer = nil
                 etaTickTimer?.invalidate()
@@ -941,34 +888,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         recordingWindow.hide()
                     }
                 } else {
-                    // Empty result — VAD-filtered or ultra-short audio.
                     recordingWindow.hide()
                 }
                 hotkeyManager.removeEscapeMonitors()
                 appState.transition(to: .idle)
                 return
-
             case .warning(let code, let message):
-                // Warnings do not end the session; log and continue.
                 logger.warning("Engine warning \(code): \(message)")
-
             case .error(let code, let message):
-                // Bug 79: stale-drain guard — same drainGeneration check as .result.
                 guard generation == drainGeneration else { return }
                 Task { [weak self] in try? await self?.engineManager.handleCrash() }
-                // Error ends the session.
+                maxDurationTimer?.cancel()
+                maxDurationTimer = nil
                 recordingWindow.hide()
                 engineManager.disconnect()
                 audioSession.stop()
                 hotkeyManager.removeEscapeMonitors()
-                maxDurationTimer?.cancel()
-                maxDurationTimer = nil
                 etaTickTimer?.invalidate()
                 etaTickTimer = nil
                 processingVM.resetEta()
                 handleEngineError(.error(code: code, message: message))
                 return
-
             default:
                 logger.warning("Unexpected message during result drain — ignoring")
             }

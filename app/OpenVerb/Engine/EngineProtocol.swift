@@ -89,7 +89,17 @@ private struct TypeProbe: Decodable {
 // ---------------------------------------------------------------------------
 
 extension ServerMessage {
+    // Bug 168: maximum accepted JSON payload size for a ServerMessage. 1 MiB
+    // comfortably covers any legitimate engine response (result text,
+    // queue_status, progress, polished_result) while preventing a malicious
+    // or buggy engine from OOMing the client with a multi-megabyte payload.
+    static let maxSize: Int = 1_048_576  // 1 MiB
+
     static func fromJSON(_ data: Data) throws -> ServerMessage {
+        // Bug 168: reject oversized payloads before decode to prevent OOM.
+        guard data.count <= maxSize else {
+            throw EngineProtocolError.unknownType("payload exceeds \(maxSize) bytes")
+        }
         let decoder = JSONDecoder()
         let probe = try decoder.decode(TypeProbe.self, from: data)
 

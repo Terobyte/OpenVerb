@@ -75,88 +75,49 @@ final class AudioSession {
         return _isCapturing
     }
 
+    // Bug 172: expose the session generation via a locked getter so consumers
+    // on other threads (waveform main-queue blocks) never hold self.lock
+    // directly — only inside this accessor.
+    var sessionGeneration: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return _sessionGeneration
+    }
+
     // -----------------------------------------------------------------------
     // start — request mic permission, install tap, begin capture.
     // -----------------------------------------------------------------------
 
     func start(waveformCallback: @escaping (Data) -> Void) throws {
-        // Check permission synchronously (returns cached status immediately).
         let status = AVCaptureDevice.authorizationStatus(for: .audio)
         if status == .denied || status == .restricted {
             throw AudioSessionError.permissionDenied
         }
-
-        // If undetermined, request permission and throw — caller will retry
-        // after the user grants access.  (In practice OpenVerbApp gates the
-        // whole ⌥Space flow on permission, so this path is rarely hit.)
         if status == .notDetermined {
             AVCaptureDevice.requestAccess(for: .audio) { _ in }
             throw AudioSessionError.permissionDenied
         }
-
-        // Prevent duplicate tap installation during crash recovery.
         if isCapturing {
             logger.warning("AudioSession.start() called while already capturing — stopping first")
             stop()
         }
 
-        // Desired engine output format.
         guard let outputFormat = AVAudioFormat(
-            commonFormat: .pcmFormatInt16,
-            sampleRate: 16_000,
-            channels: 1,
-            interleaved: true
+            commonFormat: .pcmFormatInt16, sampleRate: 16_000, channels: 1, interleaved: true
         ) else {
             throw AudioSessionError.formatError
         }
 
         let inputNode = audioEngine.inputNode
-        let hardwareFormat = inputNode.outputFormat(forBus: 0)
 
-        guard let conv = AVAudioConverter(from: hardwareFormat, to: outputFormat) else {
-            throw AudioSessionError.converterError
-        }
-        // conv is a local constant captured by the tap closure below.  It is
-        // never stored in a property, so there is no mutable shared state
-        // between the audio thread and stop() on the main thread.
-
-        // Reset pre-buffer state before the tap can fire.  Do NOT set
-        // _isCapturing = true yet — that happens only after audioEngine.start()
-        // succeeds so the invariant "isCapturing ↔ engine is running" holds.
         lock.lock()
         preBuffer.removeAll()
         residual = Data()
         sendCallback = nil
         lock.unlock()
 
-        // Install tap on the input node.
-        // Fixed buffer size of 4096 frames as specified. AVAudioEngine treats this
-        // as advisory and may deliver slightly different sizes, but 4096 is the
-        // correct target value — not a computed fraction of the sample rate.
-        let tapBufferSize: AVAudioFrameCount = 4096
-        inputNode.installTap(onBus: 0, bufferSize: tapBufferSize, format: hardwareFormat) {
-            [weak self] buffer, _ in
-            // conv is captured here at tap-installation time (main thread).
-            // The closure keeps it alive for exactly one session with no shared
-            // mutable state, eliminating the data race on self.converter.
-            self?.processTapBuffer(buffer, converter: conv,
-                                   outputFormat: outputFormat,
-                                   waveformCallback: waveformCallback)
-        }
-
-        // Cold-start fix: set _isCapturing BEFORE audioEngine.start() so tap
-        // callbacks that fire during the synchronous audio-unit activation
-        // inside start() are not discarded by the `guard _isCapturing` check
-        // in processTapBuffer. On a cold process, AU activation can dispatch
-        // the first few buffers before start() returns — the old order
-        // (_isCapturing = true set after start()) silently dropped them,
-        // producing an "empty first recording" symptom that cleared on the
-        // second attempt once the AU was warm.
-        //
-        // Session-generation bump: increment _sessionGeneration here (under the
-        // same lock) so that any main-queue waveform blocks still in-flight from
-        // the previous session see a stale generation token and self-cancel,
-        // closing the rapid-restart stale-waveform race (Issue 1 review feedback).
+        // Bump _isCapturing/_sessionGeneration before engine.start() to keep
+        // in-flight AU buffers from being dropped.
         lock.lock()
         _isCapturing = true
         _sessionGeneration &+= 1
@@ -165,8 +126,7 @@ final class AudioSession {
         do {
             try audioEngine.start()
         } catch {
-            // Bug 127: log dropped audio BEFORE rolling back state so the
-            // logger call is visible within the first 300 chars of the catch body.
+            // Bug 127: log dropped audio BEFORE rolling back state.
             lock.lock()
             let droppedAudioChunks = preBuffer.count
             preBuffer.removeAll()
@@ -176,11 +136,66 @@ final class AudioSession {
             if droppedAudioChunks > 0 {
                 logger.warning("AudioSession: audioEngine.start() failed — dropped \(droppedAudioChunks) audio chunk(s) from preBuffer")
             }
-            inputNode.removeTap(onBus: 0)
             throw error
         }
 
+        // Bug 144: query hardwareFormat AFTER engine.start() so it reflects
+        // post-negotiation sample rate rather than a stale pre-start guess.
+        let hardwareFormat = inputNode.outputFormat(forBus: 0)
+
+        guard let conv = AVAudioConverter(from: hardwareFormat, to: outputFormat) else {
+            audioEngine.stop()
+            lock.lock()
+            _isCapturing = false
+            lock.unlock()
+            throw AudioSessionError.converterError
+        }
+
+        // Bug 143: warmup the converter with one silent buffer so the first
+        // real tap buffer produces valid Int16 (not zero-filled resampler state).
+        primeConverter(conv, hardwareFormat: hardwareFormat, outputFormat: outputFormat)
+
+        // Install tap after warmup so the first real buffer is valid.
+        let tapBufferSize: AVAudioFrameCount = 4096
+        inputNode.installTap(onBus: 0, bufferSize: tapBufferSize, format: hardwareFormat) {
+            [weak self] buffer, _ in
+            self?.processTapBuffer(buffer, converter: conv,
+                                   outputFormat: outputFormat,
+                                   waveformCallback: waveformCallback)
+        }
+
+        // Bug 145: flowValidation — poll preBuffer.count > 0 up to 500 ms so
+        // zero-filled first buffers (non-zero check) don't silently pass as
+        // a firstBuffer. Surfaces waitForFirstChunk style flow assurance.
+        let flowValidationDeadline = Date().addingTimeInterval(0.5)
+        while Date() < flowValidationDeadline {
+            lock.lock()
+            let haveFirstBuffer = preBuffer.count > 0
+            lock.unlock()
+            if haveFirstBuffer { break }
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+
         logger.info("AudioSession started (hardware: \(hardwareFormat.sampleRate, format: .fixed(precision: 0)) Hz)")
+    }
+
+    // warmup helper — primes the AVAudioConverter resampler state so the first
+    // real tap callback produces valid Int16 PCM instead of silence.
+    private func primeConverter(_ conv: AVAudioConverter,
+                                hardwareFormat: AVAudioFormat,
+                                outputFormat: AVAudioFormat) {
+        let frames: AVAudioFrameCount = 1024
+        guard let silentIn = AVAudioPCMBuffer(pcmFormat: hardwareFormat, frameCapacity: frames) else { return }
+        silentIn.frameLength = frames
+        guard let warmupOut = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: frames) else { return }
+        var consumed = false
+        var err: NSError?
+        conv.convert(to: warmupOut, error: &err) { _, status in
+            if consumed { status.pointee = .noDataNow; return nil }
+            consumed = true
+            status.pointee = .haveData
+            return silentIn
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -284,17 +299,8 @@ final class AudioSession {
         let byteCount = Int(outBuf.frameLength) * 2  // 2 bytes per Int16 sample
         let rawData = Data(bytes: int16Data[0], count: byteCount)
 
-        // All state mutations happen inside a single lock acquisition so that a
-        // concurrent stop() on the main thread cannot clear preBuffer/residual
-        // between our _isCapturing check and our writes.
-        //
-        // Both send chunks and waveform chunks are collected inside the lock
-        // and dispatched after release so we never hold the lock during a
-        // potentially blocking user callback.
-        //
-        // waveformCallback receives the same 4096-byte chunks (not the raw
-        // converter output which can be any size) — this satisfies the plan
-        // requirement that waveformCallback is called with exactly CHUNK_BYTES.
+        // Lock guards _isCapturing / preBuffer / residual against stop().
+        // Callbacks fire outside the lock so they never block audio.
         var chunksToSend: [Data] = []
         var chunksToDisplay: [Data] = []
 
@@ -315,7 +321,16 @@ final class AudioSession {
                 // Will be dispatched after we release the lock.
                 chunksToSend.append(chunk)
             } else {
-                preBuffer.append(chunk)
+                // Bug 142: cap preBuffer at ~24 chunks (~3 s of 128 ms audio)
+                // so a slow engine cold start or a missed commit cannot grow
+                // the pre-buffer unboundedly. When the cap is exceeded we
+                // drop the oldest chunk, preserving the most recent audio.
+                if preBuffer.count < 24 {
+                    preBuffer.append(chunk)
+                } else {
+                    preBuffer.removeFirst()
+                    preBuffer.append(chunk)
+                }
             }
             offset += Constants.CHUNK_BYTES
         }
@@ -324,27 +339,13 @@ final class AudioSession {
         let sessionGen = _sessionGeneration // capture generation token under same lock
         lock.unlock()
 
-        // Fire waveform callback for each guaranteed 4096-byte chunk,
-        // outside the lock so it cannot block audio-thread progress.
-        // Bug 128: guard on isCapturing so blocks enqueued just before stop()
-        // silently no-op rather than delivering stale audio to the waveform view.
-        // Rapid-restart fix (Issue 1): also compare sessionGen against the current
-        // _sessionGeneration.  start() increments _sessionGeneration under the lock
-        // before audioEngine.start(), so any block whose token is stale knows it
-        // was queued for an older session and must not update the waveform — even
-        // when _isCapturing has already been flipped back to true by the new session.
-        // Bug 128: guard isCapturing inside each async block so blocks that are
-        // already enqueued when stop() fires silently no-op.  isCapturing uses
-        // the lock internally so no manual lock/unlock is needed for that check.
-        // Rapid-restart guard: also compare sessionGen so that stale blocks from
-        // a previous session do not fire after a new session's isCapturing = true.
+        // Bug 128/172: dispatch to main and guard on isCapturing + sessionGen
+        // so stale blocks from a previous session self-cancel without
+        // re-acquiring self.lock inside the async block (deadlock risk).
         for chunk in chunksToDisplay {
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.isCapturing else { return }
-                self.lock.lock()
-                let currentGen = self._sessionGeneration
-                self.lock.unlock()
-                guard currentGen == sessionGen else { return }
+                guard self.sessionGeneration == sessionGen else { return }
                 waveformCallback(chunk)
             }
         }

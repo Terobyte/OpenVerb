@@ -70,6 +70,11 @@ final class HotkeyManager {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var watchdogTimer: DispatchSourceTimer?
+    // Bug 159: the opaque pointer passed to CGEventTap as userInfo is a
+    // *retained* reference to self — releasing it on tap teardown pairs the
+    // Unmanaged.passRetained in installEventTap so the callback is never left
+    // with a dangling pointer during deallocation.
+    private var retainedSelfPtr: UnsafeMutableRawPointer?
 
     // -----------------------------------------------------------------------
     // Private — Escape monitors
@@ -131,10 +136,13 @@ final class HotkeyManager {
 
         let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
 
-        // C function pointers cannot capture context.  Pass self as an
-        // unretained raw pointer via userInfo; HotkeyManager lives for
-        // the app's lifetime so the pointer is always valid.
-        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+        // Bug 159: pass self as a *retained* opaque pointer so the callback
+        // cannot dereference a dangling HotkeyManager if the manager is torn
+        // down while a CGEvent is still in flight. The matching release
+        // happens in removeEventTap() via takeRetainedValue() on the stored
+        // pointer, so the retain is balanced across the tap's lifetime.
+        let selfPtr = Unmanaged.passRetained(self).toOpaque()
+        retainedSelfPtr = selfPtr
 
         let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
@@ -143,6 +151,9 @@ final class HotkeyManager {
             eventsOfInterest: mask,
             callback: { _, _, event, userInfo -> Unmanaged<CGEvent>? in
                 if let userInfo = userInfo {
+                    // Keep this read *unretained* — the retain held by
+                    // retainedSelfPtr above is what guarantees the pointer
+                    // validity; no extra retain/release per event is needed.
                     let manager = Unmanaged<HotkeyManager>
                         .fromOpaque(userInfo).takeUnretainedValue()
                     guard let copy = event.copy() else {
@@ -183,6 +194,14 @@ final class HotkeyManager {
             // causing CGEvent.tapCreate to return nil and the hotkey to die silently.
             CFMachPortInvalidate(tap)
         }
+        // Bug 159: release the retain we took in installEventTap. Any CGEvent
+        // callback already scheduled on the main queue will have captured a
+        // strong reference via takeUnretainedValue; this release only
+        // balances the passRetained, not the per-event hand-offs.
+        if let ptr = retainedSelfPtr {
+            Unmanaged<HotkeyManager>.fromOpaque(ptr).release()
+            retainedSelfPtr = nil
+        }
         eventTap = nil
         runLoopSource = nil
     }
@@ -195,10 +214,16 @@ final class HotkeyManager {
         guard globalEscapeMonitor == nil else { return }
 
         globalEscapeMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            if event.keyCode == 53 { self?.handleEscape() }
+            if event.keyCode == 53 {
+                self?.pendingEscapeTimestamp = event.timestamp
+                self?.handleEscape()
+            }
         }
         localEscapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            if event.keyCode == 53 { self?.handleEscape() }
+            if event.keyCode == 53 {
+                self?.pendingEscapeTimestamp = event.timestamp
+                self?.handleEscape()
+            }
             return event
         }
     }
@@ -242,18 +267,17 @@ final class HotkeyManager {
     // Escape handler (main thread via NSEvent monitor dispatch)
     // -----------------------------------------------------------------------
 
-    private var escapeHandled = false   // per-event dedup flag
+    // Bug 160: dedup on NSEvent.timestamp instead of a boolean flag with an
+    // async reset. Global + local monitors receive the same timestamp for
+    // one physical press; two rapid user presses carry distinct timestamps.
+    // Fully synchronous on @MainActor — no reset window remains.
+    private var lastEscapeTimestamp: TimeInterval = 0
+    private var pendingEscapeTimestamp: TimeInterval = 0
 
     private func handleEscape() {
-        // Both global and local monitors may fire for the same keypress.
-        // The escapeHandled flag is reset synchronously between events on the
-        // main thread, so a simple boolean is sufficient (no lock needed on
-        // @MainActor).
-        guard !escapeHandled else { return }
-        escapeHandled = true
-        // Reset on next run loop turn so future events work correctly.
-        DispatchQueue.main.async { [weak self] in self?.escapeHandled = false }
-
+        let ts = pendingEscapeTimestamp
+        guard ts != lastEscapeTimestamp else { return }
+        lastEscapeTimestamp = ts
         logger.debug("Escape fired")
         onCancelRecording?()
     }

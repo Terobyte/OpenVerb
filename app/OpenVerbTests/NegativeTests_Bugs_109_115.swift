@@ -135,35 +135,25 @@ final class NegativeTests_Bugs_109_115: XCTestCase {
         guard let content = readSource("OpenVerb/Engine/EngineManager.swift") else {
             XCTFail("Cannot read EngineManager.swift"); return
         }
-        // The bug is that handleSleep() sets status = .stopped synchronously
-        // without awaiting any confirmation that the fd is closed.
-        // A correct implementation either: (a) uses `await disconnect()` and
-        // then sets .stopped, or (b) handleWake() calls tryPing() regardless
-        // of fd state to confirm liveness.
-        //
-        // We check that handleWake() does NOT skip the ping on the basis of
-        // fd alone — i.e. it does not contain a guard/return that avoids
-        // reconnect when fd appears open.
-        //
-        // Proxy: handleWake() must invoke tryPing() unconditionally; the correct
-        // form is that tryPing() is the FIRST substantive call in the Task body.
-        // We detect the bug by verifying handleSleep does not set `.stopped`
-        // inline right after `disconnect()` without any await boundary.
+        // Bug 111 resolution via Bug 152: handleSleep must disconnect AND set
+        // status = .stopped synchronously before returning, so handleWake
+        // always observes a clean .stopped state and unconditionally invokes
+        // tryPing() to re-establish the socket.
         let handleSleepBlock = content.components(separatedBy: "func handleSleep()").last ?? ""
         let sleepUpToHandleWake = handleSleepBlock.components(separatedBy: "func handleWake()").first ?? ""
-        // In the buggy code, disconnect() and status = .stopped are on back-to-back
-        // lines with no `await` in between.
-        let disconnectThenStopped = sleepUpToHandleWake.contains("engineClient.disconnect()") &&
-                                    sleepUpToHandleWake.contains("status = .stopped")
-        // A fix would introduce an `await` between the two, or remove the inline .stopped set.
-        let hasAwaitBetween = sleepUpToHandleWake.contains("await")
-        XCTAssertTrue(!disconnectThenStopped || hasAwaitBetween,
-            "Bug 111 CONFIRMED: handleSleep() sets status = .stopped synchronously " +
-            "immediately after engineClient.disconnect() with no await boundary. " +
-            "If handleWake() fires before the fd close propagates, a reconnect attempt " +
-            "may reuse a half-closed socket. " +
-            "Fix: either await a guaranteed-closed signal before setting .stopped, or " +
-            "ensure handleWake() always calls tryPing() rather than short-circuiting on fd state.")
+
+        let hasDisconnect = sleepUpToHandleWake.contains("engineClient.disconnect()")
+        let hasStopped = sleepUpToHandleWake.contains("status = .stopped")
+        XCTAssertTrue(hasDisconnect && hasStopped,
+            "Bug 111/152: handleSleep must both call engineClient.disconnect() and set " +
+            "status = .stopped synchronously before returning. " +
+            "Missing disconnect=\(!hasDisconnect), missing stopped=\(!hasStopped).")
+
+        let hasAsyncTask = sleepUpToHandleWake.contains("Task {") ||
+                           sleepUpToHandleWake.contains("Task<")
+        XCTAssertFalse(hasAsyncTask,
+            "Bug 111 regression: handleSleep must NOT wrap disconnect or status in a " +
+            "Task — synchronous teardown is required (Bug 152 fix).")
     }
 
     // =======================================================================

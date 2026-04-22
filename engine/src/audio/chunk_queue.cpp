@@ -41,13 +41,9 @@ void ChunkQueue::shutdown() {
 
 void ChunkQueue::reset() {
     std::lock_guard<std::mutex> lock(mu_);
-    std::queue<Chunk> empty;
-    queue_.swap(empty);
+    std::queue<Chunk>().swap(queue_);
     audio_ms_ = 0;
     shut_ = false;
-    // Bug H4 fix: advance the generation counter so any push() that was blocked
-    // on not_full_.wait() and wakes up here will see the generation mismatch and
-    // discard its stale chunk instead of inserting it into the new session.
     ++generation_;
     not_empty_.notify_all();
     not_full_.notify_all();

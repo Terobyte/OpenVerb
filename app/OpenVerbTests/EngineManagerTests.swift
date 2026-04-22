@@ -272,6 +272,70 @@ final class EngineManagerTests: XCTestCase {
         XCTAssertFalse(mgr.ggufModelExists(),
                        "Listing with no .gguf files must return false")
     }
+
+    // -----------------------------------------------------------------------
+    // MARK: Bug 176 — sleep/wake recovery coverage
+    //
+    // Bug 152/153 fix: handleSleep disconnects synchronously so handleWake
+    // cannot race past it and observe a half-open socket. These tests verify
+    // the sleep/wake hooks fire, the status flips to .stopped synchronously on
+    // sleep, and the wake path completes even when engine restart fails.
+    // -----------------------------------------------------------------------
+
+    func testBug176_handleSleepFiresOnPreSleepHook() {
+        var fired = false
+        sut.onPreSleep = { fired = true }
+        sut.handleSleep()
+        XCTAssertTrue(fired,
+            "handleSleep must invoke onPreSleep hook for UI teardown")
+    }
+
+    func testBug176_handleSleepSetsStatusToStoppedSynchronously() {
+        sut.handleSleep()
+        XCTAssertEqual(sut.status, EngineManager.EngineStatus.stopped,
+            "handleSleep must set status = .stopped synchronously before returning (Bug 152 fix)")
+    }
+
+    func testBug176_handleSleepIsIdempotent() {
+        sut.handleSleep()
+        sut.handleSleep()
+        sut.handleSleep()
+        XCTAssertEqual(sut.status, EngineManager.EngineStatus.stopped)
+    }
+
+    func testBug176_handleWakeFiresOnWakeStartedHook() {
+        var started = false
+        sut.onWakeStarted = { started = true }
+        sut.handleWake()
+        XCTAssertTrue(started,
+            "handleWake must invoke onWakeStarted hook for UI reconnection indicator")
+    }
+
+    func testBug176_handleWakeCompletesEvenWhenEngineFailsToRestart() async {
+        // sut uses /usr/bin/false as engine — ensureRunning() will fail, which
+        // is exactly what we want to simulate "engine died during sleep".
+        // onWakeCompleted MUST still fire so the UI does not hang on a
+        // "Reconnecting..." spinner forever.
+        let completion = expectation(description: "onWakeCompleted fires")
+        sut.onWakeCompleted = { completion.fulfill() }
+        sut.handleSleep()  // set clean state first
+        sut.handleWake()
+        await fulfillment(of: [completion], timeout: 10.0)
+    }
+
+    func testBug176_sleepThenWakeSurfacesErrorStatusOnRestartFailure() async {
+        let completion = expectation(description: "wake cycle done")
+        sut.onWakeCompleted = { completion.fulfill() }
+        sut.handleSleep()
+        sut.handleWake()
+        await fulfillment(of: [completion], timeout: 10.0)
+        // /usr/bin/false can never act as an engine — must surface an error.
+        if case .error = sut.status {
+            // expected
+        } else {
+            XCTFail("Failed engine restart after wake must surface .error status, got \(sut.status)")
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

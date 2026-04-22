@@ -450,4 +450,72 @@ final class AppStateTests: XCTestCase {
                        "State must auto-clear to .idle after errorClearDelay elapses")
         XCTAssertNil(sut.targetApp)
     }
+
+    // -----------------------------------------------------------------------
+    // MARK: Bug 175 — abort+restart integration
+    //
+    // Exercises the complete INFERRING → PREPARING → RECORDING restart cycle
+    // end-to-end, across multiple iterations, verifying that targetApp, live
+    // text, and polished text invariants hold across arbitrarily many cycles.
+    // -----------------------------------------------------------------------
+
+    func testBug175_fullAbortRestartCycleReturnsToIdle() {
+        sut.transition(to: .preparing)
+        sut.transition(to: .recording)
+        sut.transition(to: .inferring)
+        sut.transition(to: .preparing)
+        sut.transition(to: .recording)
+        sut.transition(to: .inferring)
+        sut.transition(to: .idle)
+        XCTAssertEqual(sut.state, .idle)
+        XCTAssertNil(sut.targetApp,
+            "Full abort+restart cycle must leave targetApp nil on .idle")
+    }
+
+    func testBug175_threeConsecutiveAbortRestartsPreserveTargetApp() {
+        var providerCalls = 0
+        sut.frontmostApplicationProvider = { [weak self] in
+            providerCalls += 1
+            return self?.mockTarget
+        }
+        sut.transition(to: .preparing)
+        let captured = sut.targetApp
+        for _ in 0..<3 {
+            sut.transition(to: .recording)
+            sut.transition(to: .inferring)
+            sut.transition(to: .preparing)  // abort+restart
+        }
+        XCTAssertEqual(providerCalls, 1,
+            "3 abort+restart cycles must not re-capture targetApp — it is preserved")
+        XCTAssertTrue(sut.targetApp === captured,
+            "targetApp identity must survive 3 consecutive abort+restart cycles")
+    }
+
+    func testBug175_abortRestartClearsInFlightLiveAndPolishedText() {
+        sut.transition(to: .preparing)
+        sut.transition(to: .recording)
+        sut.livePartialText = "hello partial"
+        sut.transition(to: .inferring)
+        sut.transition(to: .preparing)  // abort+restart
+        XCTAssertEqual(sut.livePartialText, "",
+            "livePartialText must be cleared on abort+restart (Bug 136 fix)")
+        XCTAssertNil(sut.polishedText,
+            "polishedText must be nil on abort+restart (Bug 166 fix)")
+    }
+
+    func testBug175_errorToPreparingIsAbortRestartPath() {
+        // .error → .preparing is also an abort+restart entry point.
+        sut.errorClearDelay = .milliseconds(100)
+        sut.transition(to: .preparing)
+        let captured = sut.targetApp
+        sut.transition(to: .recording)
+        sut.livePartialText = "text before error"
+        sut.transition(to: .error("engine died"))
+        sut.transition(to: .preparing)  // ⌥Space retry
+        XCTAssertEqual(sut.state, .preparing)
+        XCTAssertTrue(sut.targetApp === captured,
+            ".error → .preparing must preserve the prior targetApp")
+        XCTAssertEqual(sut.livePartialText, "",
+            ".error → .preparing must clear livePartialText")
+    }
 }
