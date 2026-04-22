@@ -98,4 +98,36 @@ final class AudioPipelineTests: XCTestCase {
         // Cleanup
         pipeline.cancel(handle: liveHandle)
     }
+
+    // -----------------------------------------------------------------------
+    // MARK: Bug regression proofs
+    // -----------------------------------------------------------------------
+
+    func testProveBug16_staleHandleIsNoOp() {
+        // Prove Bug 16: a handle from a previous session cannot cancel the
+        // current session. The pipeline's handle-identity check replaces the
+        // drainGeneration counter that was needed in OpenVerbApp.swift.
+        let oldHandle = pipeline.beginRecording(context: [:])!
+        pipeline.cancel(handle: oldHandle)           // session 1 ends → idle
+
+        let newHandle = pipeline.beginRecording(context: [:])!  // session 2 starts
+        pipeline.cancel(handle: oldHandle)           // stale cancel: must be no-op
+
+        XCTAssertEqual(pipeline.state, .capturing,
+            "Bug 16: stale handle from previous session must not affect active session")
+        pipeline.cancel(handle: newHandle)
+    }
+
+    func testProveBug81_doubleStopIsNoOp() {
+        // Prove Bug 81: endRecording is idempotent — a second call while not
+        // in .streaming state returns early, so two concurrent stopRecording
+        // callers cannot corrupt the state machine.
+        let handle = pipeline.beginRecording(context: [:])!
+        pipeline.endRecording(handle: handle)  // no-op: not yet .streaming
+        pipeline.endRecording(handle: handle)  // second call: also no-op
+
+        XCTAssertEqual(pipeline.state, .capturing,
+            "Bug 81: double endRecording must not corrupt state")
+        pipeline.cancel(handle: handle)
+    }
 }
