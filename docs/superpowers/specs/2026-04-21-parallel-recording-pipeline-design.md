@@ -18,7 +18,7 @@ OpenVerb currently exhibits two user-visible recording failures:
 
 ### Root Causes
 
-1. **--listen mode does not call `engine.ensure_loaded()` at engine startup.** `main.cpp:148-150` only constructs the `Engine` and starts the IPC server — model loads lazily on the first `session.start`. Swift's `tryPing()` succeeds as soon as the socket binds, which happens before the model is loaded. Result: the Swift side reports `status = .running` while the engine still takes 5–10 s before it can respond to the first real session.
+1. **Engine preload runs AFTER socket binding.** `IpcServer::start()` (engine/src/ipc/server.cpp:97-110) launches a detached `preload_thread_` that calls `engine_.ensure_loaded()`, but only *after* `listen()` has bound the socket and `running_` is set to `true`. Swift's `tryPing()` succeeds as soon as the socket accepts, which happens before preload completes. Result: the Swift side reports `status = .running` while the model is still loading in the background. The first `session.start` then blocks on `engine_mutex_` inside `ensure_loaded()` until the background thread releases it, adding 5–10 s of apparent dead air during the user's utterance.
 
 2. **Tight coupling of audio capture to engine state.** `AudioSession` holds a capped `preBuffer` (24 chunks) that accumulates audio before `session.ready`. The cap was added as Bug 142 to prevent unbounded growth during slow cold starts — it inadvertently created a "silent audio loss" failure mode.
 
@@ -38,15 +38,16 @@ OpenVerb currently exhibits two user-visible recording failures:
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Model pre-warm strategy | Add `engine.ensure_loaded()` in `main.cpp:--listen` before `server.start()` | One-line C++ change. Inverts the lazy-load invariant: socket binding implies "model ready". No Swift dummy-session plumbing needed. |
+| Model pre-warm strategy | (a) Add `engine.ensure_loaded()` in `main.cpp` `--listen` block before `IpcServer` construction. (b) Remove the existing detached `preload_thread_` from `IpcServer::start()` (server.cpp:97-110) and from `server.h` (declaration). | Synchronous preload before socket binding inverts the invariant: socket accepting ⇔ model hot. Removing the background preload thread eliminates the redundant load attempt and the race that caused symptom #1. |
 | Swift `ensureRunning` poll timeout | 5 s → 30 s | Engine now blocks on `ensure_loaded()` (5–10 s) before accepting connections. Poll must outlast the load. |
-| Audio buffer | New `AudioRingBuffer` (RAM, 60 s, ~2 MB) | Producer/Consumer decoupling. `AudioSession` writes; `AudioPipeline` reads from timestamp. No cap-induced audio loss. |
+| Audio buffer | New `AudioRingBuffer` (RAM, default 300 s / 5 min, ~10 MB) | Producer/Consumer decoupling. `AudioSession` writes; `AudioPipeline` reads from timestamp. Capacity set to match engine's `duration_exceeded` ceiling (5 min) so that buffer overflow never discards audio the engine would have accepted. |
 | Buffer persistence | In-memory only | Disk-backed persistence (option C in brainstorm) deferred as overkill. 99.99 % capture guarantee acceptable; 100 % requires disk which adds privacy concerns and complexity. |
 | Consumer model | Tail-follow reader, live streaming | Replaces `preBuffer` + `flushPreBuffer` + `commitSendCallback` + `sendCallback`. Chunks flow to engine as soon as they arrive in buffer. Live `partial_result` behavior preserved. |
 | Error detection | `AudioPipeline` message-receive loop | Replaces `EngineClient.Phase 2 monitor` (detached Task + shared mutable flags). Single-threaded state machine, easier to reason about. |
 | Live subtitle | New `SubtitlePanel` NSPanel below `RecordingWindow` | User reports existing live subtitle never worked. New dedicated panel with 16 pt text, no truncation. Diagnose existing path in parallel. |
 | Session isolation | `AudioPipeline` handle per session | Session N receives a unique handle; reads/writes gated on handle. Prevents cross-session state reads. Replaces `drainGeneration` / `isDraining` guards. |
-| Migration | 9 phased PRs, feature flag on Phase 5 | Each phase leaves app in working state. Feature flag on the risky `AudioSession` migration allows kill-switch rollback. |
+| Migration | 9 phased PRs, feature flag on Phase 5 (removed in Phase 7) | Each phase leaves app in working state. Feature flag on the risky `AudioSession` migration allows kill-switch rollback. |
+| Memory-pressure unload response | Lazy reload on next `session.start` | Simplest correct behavior. Memory pressure is rare on 16 GB+ Macs (target hardware). `RingBuffer` preserves audio during the +5-10 s reload window. |
 
 ---
 
@@ -60,7 +61,7 @@ OpenVerb currently exhibits two user-visible recording failures:
 │  AVAudioEngine.tap           │      │  AudioPipeline.streamLive()  │
 │        │                     │      │    (tail-follow reader)      │
 │        ▼                     │      │         │                    │
-│  AudioRingBuffer (60s, RAM)  │◄─────┤  reads from t_start           │
+│  AudioRingBuffer (300s, RAM) │◄─────┤  reads from t_start           │
 │        ▲                     │      │         │                    │
 │        │ timestamped chunks  │      │         ▼                    │
 │  AudioSession.start()        │      │  EngineClient.sendAudioFrame │
@@ -85,9 +86,9 @@ OpenVerb currently exhibits two user-visible recording failures:
 
 | Component | Status | Responsibility |
 |-----------|--------|----------------|
-| `AudioRingBuffer` | new | Thread-safe ring buffer of PCM chunks with timestamps. Write-only for audio thread; timestamp-indexed read for consumer. Overflow drops oldest with log. |
+| `AudioRingBuffer` | new | Thread-safe ring buffer of PCM chunks with per-handle timestamps. Producer API: `write(chunk, ts, handle)` from audio thread. Consumer API: async `readNext(handle, afterTs, maxWait)` returns next chunk or nil when handle invalidated. Capacity 300 s (5 min, ~10 MB at 16 kHz Int16 mono). Overflow drops oldest chunk with WARN log; `Metrics` exposes overflowCount/peakDepth per handle. See Interfaces section for full API. |
 | `AudioSession` | modified | Pure producer. Keeps `AVAudioEngine` + `AVAudioConverter`. Writes chunks to `AudioRingBuffer` and invokes waveform callback. No more `preBuffer`, `sendCallback`, `flushPreBuffer`, `commitSendCallback`, `syncOnIOQueue`. |
-| `AudioPipeline` | new | Orchestrator. Owns state machine (idle / capturing / streaming / finalizing / error). Beginning a recording allocates a unique handle; all reads/writes gated on handle. Runs tail-follow consumer that streams chunks to `EngineClient`. Handles engine errors and user cancels without losing buffered audio. |
+| `AudioPipeline` | new | Orchestrator. Owns state machine (idle / capturing / streaming / finalizing / error). `beginRecording(context)` allocates a unique `Handle`; `endRecording(handle)`, `cancel(handle)` drive transitions. Runs tail-follow consumer that streams chunks to `EngineClient` via `streamLive`. On engine errors, transitions to `error`; internal `retry()` resumes from `lastSentTimestamp` after `handleCrash` completes. See Interfaces section for full API. |
 | `SubtitlePanel` | new | Separate `NSPanel` positioned directly below `RecordingWindow`. Renders `AppState.livePartialText` at 16 pt, no truncation, auto-scroll on overflow. Visible during `.recording` and `.inferring`. Toggleable via `AppSettings.showSubtitlePanel` (default true). |
 | `EngineClient` | simplified | Remove Phase 2 monitor entirely (~120 lines deleted: `startPhase2Monitor`, `stopPhase2Monitor`, `runPhase2Monitor`, `callOnErrorIfLive`, `phase2Error`, `phase2Lock`, `phase2MonitorStopped`, `phase2MonitorTask`, `wakeRead`, `wakeWrite`). Error detection moves to `AudioPipeline`'s receive loop. |
 | `EngineManager` | small change | `ensureRunning` poll timeout 5 s → 30 s. |
@@ -95,6 +96,75 @@ OpenVerb currently exhibits two user-visible recording failures:
 | `RecordingWindow` (`UI/RecordingWindow.swift`) | small change | Creates and positions `SubtitlePanel` on initialization. Shows/hides panel in sync with recording state. |
 | `AppSettings` | +1 flag | `showSubtitlePanel: Bool = true`. |
 | `main.cpp` (engine) | +1 line | `engine.ensure_loaded();` before `server.start(cfg.socket_path);` in the `--listen` block. |
+
+### Interfaces
+
+Pseudo-Swift signatures — final names and access levels may shift during implementation.
+
+```swift
+// AudioRingBuffer — thread-safe ring buffer of timestamped PCM chunks.
+final class AudioRingBuffer {
+    init(capacitySeconds: Int = 300, chunkBytes: Int = 4096, sampleRate: Int = 16_000)
+
+    // Producer API (called from audio thread under os_unfair_lock).
+    func write(_ chunk: Data, timestamp: TimeInterval, handle: Handle)
+
+    // Consumer API (called from AudioPipeline's consumer Task).
+    // Returns nil if handle is invalidated. Blocks up to `maxWait` for the
+    // next chunk written after `afterTimestamp`.
+    func readNext(handle: Handle, afterTimestamp: TimeInterval,
+                  maxWait: Duration) async -> (Data, TimeInterval)?
+
+    // Lifecycle.
+    func markStart(handle: Handle, timestamp: TimeInterval)
+    func markEnd(handle: Handle, timestamp: TimeInterval)
+    func clear(handle: Handle)
+    func metrics(handle: Handle) -> Metrics   // overflow count, peak depth, etc.
+
+    struct Handle: Hashable { let id: UUID }
+    struct Metrics { let overflowCount: Int; let peakDepthChunks: Int }
+}
+
+// AudioPipeline — orchestrator that runs a producer/consumer session.
+@MainActor
+final class AudioPipeline {
+    init(audioSession: AudioSession,
+         engineClient: EngineClient,
+         engineManager: EngineManager,
+         ringBuffer: AudioRingBuffer)
+
+    enum State: Equatable { case idle, capturing, streaming, finalizing, error(String) }
+    var state: State { get }
+
+    // Called from AppDelegate on hotkey press. Allocates a fresh handle,
+    // starts AudioSession capture, schedules the consumer Task.
+    func beginRecording(context: [String: String]) -> AudioRingBuffer.Handle
+
+    // Called on user stop. Transitions streaming → finalizing; consumer drains
+    // and sends sentinel. drainResult completes via `onResult` callback.
+    func endRecording(handle: AudioRingBuffer.Handle)
+
+    // Called on Escape. Any state → idle. Buffer cleared.
+    func cancel(handle: AudioRingBuffer.Handle)
+
+    // Called automatically by the consumer Task on engine errors.
+    // Internally: trigger handleCrash; on recovery, resume streaming from
+    // lastSentTimestamp. Buffer retained across the retry window.
+    private func retry(handle: AudioRingBuffer.Handle)
+
+    // Callbacks (wired by AppDelegate).
+    var onResult: ((_ text: String, _ command: Command?) -> Void)?
+    var onError: ((_ message: String) -> Void)?
+    // Partial results continue to flow via EngineClient.onPartialResult,
+    // which AppDelegate wires independently to AppState.livePartialText.
+}
+```
+
+**Handle lifecycle:**
+- Issued by `beginRecording`. Invariant: exactly one live handle per `AudioPipeline` at a time.
+- Invalidated on transition to `idle` (result received / cancel / explicit clear).
+- Survives `error → streaming` retry cycles: the same handle is used when reconnecting after an engine crash; the `lastSentTimestamp` stored per-handle lets the consumer resume without re-sending frames the engine already acknowledged.
+- A stale handle passed to any method is a no-op (logged at debug level). This replaces the `drainGeneration` / `isDraining` guards in `AppDelegate`.
 
 ### AudioPipeline state machine
 
@@ -181,12 +251,12 @@ t=0.000 s  User presses ⌥Space.
            ├─ AudioPipeline.beginRecording() → handle H2
            │   └─ state: idle → capturing, markStart(H2, t=0)
            ├─ AppState: .preparing → .recording         // immediate!
-           └─ Task { await streamPipeline(H2) }
+           └─ Task { await streamLive(H2) }
 
 t=0.100 s  AVAudio tap: first 4096-byte chunk
            └─ AudioRingBuffer.write(chunk, ts=0.1, handle=H2)
 
-t=0.120 s  streamPipeline(H2):
+t=0.120 s  streamLive(H2):
            ├─ engineClient.connect(socket)             // fast (engine alive)
            ├─ engineClient.startSession(realContext)
            ├─ receiveMessage(.ready)                   // ~50 ms (model hot)
@@ -253,6 +323,8 @@ t=5.5 s   SubtitlePanel shows first partial_result
 
 No audio is lost. User sees slightly delayed partial text but the full utterance is transcribed.
 
+**`preparingSubtitle` behavior during this window:** unchanged from current logic. `AppState.preparingSubtitle` is set to "Preparing…" after 500 ms in `.preparing` and cleared on `.preparing → .recording`. Because the new design transitions to `.recording` immediately on `beginRecording()`, the "Preparing…" text rarely appears after this refactor. The main `RecordingWindow` continues to render `preparingSubtitle` as it does today; `SubtitlePanel` is orthogonal and only renders `livePartialText`.
+
 ### Error path — engine crash mid-recording
 
 ```
@@ -290,7 +362,7 @@ User notices a brief pause in live subtitle but the utterance completes.
 | Engine crash mid-recording | keeps writing buffer | detects connection_closed → state: streaming → error; triggers handleCrash | subtitle: "Engine restarting…" |
 | After crash recovery completes | still writing | retry() → reconnect → resend buffer from last-sent-ts | subtitle: resumes with partials |
 | User presses Escape | audioSession.stop() | cancel(H) → disconnect → idle; RingBuffer cleared for H | window hides |
-| RingBuffer overflow (speech > 60 s) | drop oldest chunk + log WARN | unaffected | optional "max duration reached" toast |
+| RingBuffer overflow (speech > 300 s / 5 min) | drop oldest chunk + log WARN; increment `Metrics.overflowCount` | unaffected | optional "max duration reached" toast. Engine's `duration_exceeded` error (5 min limit) fires first under normal conditions. |
 | User ⌥Space during cold-start | starts as usual | waits for engineStatus == .running; buffer accumulates | normal recording UI; slight result delay |
 | Memory pressure unloads model | keeps writing | next session.start triggers lazy reload; +5-10 s on that session only | unchanged |
 | Microphone permission denied | start() throws | state → error; cancel(H) | NSAlert + link to Settings |
@@ -337,13 +409,13 @@ Each phase leaves the app in a working state. PRs can be merged independently.
 
 | # | Phase | Files touched | Mergeable independently |
 |---|-------|---------------|-------------------------|
-| 1 | Engine pre-warm | `engine/src/main.cpp` (+1 line), rebuild binary | Yes — immediate relief for symptom 1 |
+| 1 | Engine pre-warm | `engine/src/main.cpp` (+1 line: `engine.ensure_loaded()` before `IpcServer` construction), `engine/src/ipc/server.cpp` (remove preload_thread_ block, lines 97-110 and join in destructor), `engine/src/ipc/server.h` (remove `preload_thread_` declaration, line 38), rebuild bundled engine binary | Yes — immediate relief for symptom 1 |
 | 2 | Swift timeout bump | `EngineManager.swift` (5s → 30s) | Yes — pairs with Phase 1 |
 | 3 | AudioRingBuffer | new file + unit tests | Yes — TDD, pure data structure |
 | 4 | AudioPipeline skeleton | new file + state machine + unit tests with mocks | Yes — no integration yet |
 | 5 | AudioSession migration | `AudioSession.swift` refactor | Yes, behind `USE_RING_BUFFER_PIPELINE` feature flag in `Constants.swift` for rollback safety |
 | 6 | AudioPipeline integration | `AppDelegate.connectAndRecord` uses AudioPipeline | Yes — Phase 2 monitor still coexists |
-| 7 | Remove Phase 2 monitor | `EngineClient.swift` cleanup | Yes — after Phase 6 proven stable |
+| 7 | Remove Phase 2 monitor + feature flag | `EngineClient.swift` cleanup; delete `USE_RING_BUFFER_PIPELINE` flag from `Constants.swift` and all callsites | Yes — after Phase 6 proven stable for ≥1 week |
 | 8 | SubtitlePanel | new file + `RecordingWindow.swift` wiring | Yes — independent of phases 3-7 |
 | 9 | Live-subtitle diagnosis | instrumentation + root-cause fix if needed | Yes — independent |
 
@@ -396,15 +468,22 @@ Each phase is a single commit. `git revert <commit>` restores the previous phase
 
 ---
 
+## Protocol Changes
+
+**None.** The engine IPC protocol (session.start, session.ready, partial_result, queue_status, polished_result, result, error, warning, ping/pong, sentinel) is unchanged. All existing engine-side code continues to work with the refactored Swift side. The engine-side change is purely internal (where `ensure_loaded()` is called). `startSession(realContext)` in the Swift Data Flow sends the same JSON context object as today (app bundle ID, clipboard, locale language — see `ContextBuilder.build` and the reference architecture spec MVP3).
+
+## Bug-fix Audit Scope
+
+The audit in Phase 6 covers **Swift-side** "Bug N:" comments only, in the files modified by this refactor: `AudioSession.swift`, `EngineClient.swift`, `EngineManager.swift`, `OpenVerbApp.swift`, `AppState.swift` (if touched), `RecordingWindow.swift`. Engine-side bug comments (`engine/src/ipc/session.cpp`, etc.) are out of scope — they live on the engine side and are tracked in `bugs.md` independently per `CLAUDE.md`.
+
 ## Open Questions
 
 Items deferred to implementation; tracked in the plan:
 
-1. Bug-fix audit outcome for the ~40 "Bug N:" comments in affected files.
-2. Root cause of current live-subtitle failure (instrument and discover in Phase 9).
-3. Ring-buffer default capacity — is 60 s sufficient? Make configurable via `AppSettings.maxRingBufferSeconds`?
-4. SubtitlePanel typography details — exact font size, weight, color; confirmed iteratively via user feedback.
-5. Proactive memory-pressure recovery — add explicit ensure-loaded-on-pressure-signal, or lazy-reload on next session? Default: lazy reload.
+1. Bug-fix audit outcome for the ~40 "Bug N:" comments in affected Swift files (Phase 6 pre-work).
+2. Root cause of current live-subtitle failure — instrument `onPartialResult` → `livePartialText` → `SubtitlePanel` path and discover in Phase 9.
+3. Ring-buffer default capacity confirmed at 5 min (300 s, ~10 MB); should it be user-configurable via `AppSettings.maxRingBufferSeconds`? Default is hardcoded for MVP; add setting only if users request.
+4. SubtitlePanel typography details — starting point 16 pt, confirmed iteratively via user feedback.
 
 ---
 
@@ -412,12 +491,15 @@ Items deferred to implementation; tracked in the plan:
 
 The refactor is considered complete when:
 
+- [ ] **Phase 1 verify**: rebuilt engine binary; `time openverb-engine --listen` shows model load completes before socket is accepting (can be verified via `lsof` + log timing).
+- [ ] **Phase 2 verify**: `EngineManager.ensureRunning()` poll deadline is 30 s; unit test enforces.
 - [ ] `IntegrationTwoBackToBackSessions` passes. Two consecutive recordings return non-empty transcripts.
 - [ ] `IntegrationFirstRecordingFullAudio` passes. First recording after launch contains the beginning of the utterance.
 - [ ] `IntegrationLivePartialsFlow` passes. `partial_result` messages reach `livePartialText` during speech.
 - [ ] Manual test: launch app → wait ~10 s → ⌥Space → speak 5 s → ⌥Space → result is complete (no warm-up loss).
 - [ ] Manual test: 5 consecutive recordings without pauses → all 5 produce non-empty results.
 - [ ] `SubtitlePanel` shows live text during recording.
+- [ ] **Instrumentation**: `AudioRingBuffer.Metrics.overflowCount == 0` in logs for recordings ≤5 min. Non-zero on overflow → logged WARN at session end.
 - [ ] `bugs.md` updated: any "Bug N:" comment not migrated is re-opened with explanation.
 - [ ] All existing integration and unit tests pass (no regressions).
 - [ ] Code review + spec review loop passed.
