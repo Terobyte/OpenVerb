@@ -28,6 +28,10 @@ private:
     Callback cb_;
     Vad vad_;
     std::vector<int16_t> buffer_;
+    // Pending holds input samples that have not yet formed a full 30 ms VAD
+    // sub-frame. push_frame accumulates into pending_ and drains as many
+    // 30 ms slices as fit; the remainder carries to the next call.
+    std::vector<int16_t> pending_;
     int chunk_id_ = 0;
     int buffer_ms_ = 0;
     int silence_ms_ = 0;

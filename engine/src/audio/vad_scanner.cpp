@@ -11,32 +11,67 @@ void VadScanner::push_frame(const int16_t* samples, int num_samples) {
     // may block on not_full_.wait(); holding mu_ while blocking can deadlock
     // if the consumer thread also needs mu_ (e.g. for reset()).
     std::unique_lock<std::mutex> lk(mu_);
-    bool speech = vad_.is_speech(samples, num_samples);
-    int frame_ms = num_samples * 1000 / SAMPLE_RATE;
 
-    buffer_.insert(buffer_.end(), samples, samples + num_samples);
-    buffer_ms_ += frame_ms;
+    // WebRTC VAD only accepts 10 / 20 / 30 ms frames at the configured rate
+    // (at 16 kHz: 160, 320, or 480 samples). Any other length makes
+    // WebRtcVad_Process return -1, which is_speech() reads as "not speech" —
+    // so callers that feed us 128 ms AVAudioEngine buffers (2048 samples) or
+    // 500 ms bench frames would silently bypass VAD and the session would
+    // return an empty transcript. We normalise internally by iterating in
+    // kVadFrameSamples (30 ms) slices and buffering the remainder in
+    // pending_ across calls.
+    constexpr int kVadFrameMs      = 30;
+    constexpr int kVadFrameSamples = SAMPLE_RATE * kVadFrameMs / 1000;
 
-    if (speech) {
-        in_speech_ = true;
-        silence_ms_ = 0;
-    } else if (in_speech_) {
-        silence_ms_ += frame_ms;
+    pending_.insert(pending_.end(), samples, samples + num_samples);
+
+    size_t offset = 0;
+    while (pending_.size() - offset >= static_cast<size_t>(kVadFrameSamples)) {
+        const int16_t* frame_ptr = pending_.data() + offset;
+        bool speech = vad_.is_speech(frame_ptr, kVadFrameSamples);
+
+        buffer_.insert(buffer_.end(), frame_ptr, frame_ptr + kVadFrameSamples);
+        buffer_ms_ += kVadFrameMs;
+
+        if (speech) {
+            in_speech_ = true;
+            silence_ms_ = 0;
+        } else if (in_speech_) {
+            silence_ms_ += kVadFrameMs;
+        }
+
+        offset += static_cast<size_t>(kVadFrameSamples);
+
+        if (in_speech_ && buffer_ms_ >= MAX_CHUNK_MS) {
+            maybe_emit_chunk(false, lk);
+            // maybe_emit_chunk unlocks lk before invoking the callback. Re-lock
+            // to continue consuming pending_ safely.
+            if (!lk.owns_lock()) lk.lock();
+        } else if (in_speech_ && silence_ms_ >= SILENCE_BOUNDARY_MS) {
+            if (buffer_ms_ - silence_ms_ >= MIN_CHUNK_MS) {
+                maybe_emit_chunk(false, lk);
+                if (!lk.owns_lock()) lk.lock();
+                in_speech_ = false;  // utterance ended at silence boundary; don't accumulate trailing silence
+            }
+        }
     }
 
-    if (in_speech_ && buffer_ms_ >= MAX_CHUNK_MS) {
-        maybe_emit_chunk(false, lk);
-    } else if (in_speech_ && silence_ms_ >= SILENCE_BOUNDARY_MS) {
-        if (buffer_ms_ - silence_ms_ >= MIN_CHUNK_MS) {
-            maybe_emit_chunk(false, lk);
-            in_speech_ = false;  // utterance ended at silence boundary; don't accumulate trailing silence
-        }
+    // Retain the leftover tail (< 30 ms) for the next push_frame.
+    if (offset > 0) {
+        pending_.erase(pending_.begin(), pending_.begin() + offset);
     }
 }
 
 void VadScanner::flush() {
     std::unique_lock<std::mutex> lk(mu_);
-    if (!buffer_.empty() && in_speech_ && (buffer_ms_ - silence_ms_ >= MIN_CHUNK_MS)) {
+    // Flush represents end-of-audio: emit any buffered speech even if it is
+    // shorter than MIN_CHUNK_MS. The MIN_CHUNK_MS guard only applies to
+    // mid-stream silence-boundary emits (see push_frame), where it prevents
+    // spurious tiny chunks during a pause. At stream end we must transcribe
+    // whatever we have, otherwise short utterances ("hi", "save file") return
+    // an empty result — which was the regression tracked by the
+    // VadScannerTest.FinalFlushEmitsIsFinalChunkEvenIfBelowMinChunkMs test.
+    if (!buffer_.empty() && in_speech_) {
         maybe_emit_chunk(true, lk);
     }
     // Only touch state if we still hold the lock (maybe_emit_chunk may have released it)
@@ -49,6 +84,7 @@ void VadScanner::flush() {
 void VadScanner::reset() {
     std::lock_guard<std::mutex> lk(mu_);
     buffer_.clear();
+    pending_.clear();
     buffer_ms_ = 0;
     silence_ms_ = 0;
     in_speech_ = false;
