@@ -64,17 +64,35 @@ void VadScanner::push_frame(const int16_t* samples, int num_samples) {
 
 void VadScanner::flush() {
     std::unique_lock<std::mutex> lk(mu_);
-    // Flush represents end-of-audio: emit any buffered speech even if it is
-    // shorter than MIN_CHUNK_MS. The MIN_CHUNK_MS guard only applies to
-    // mid-stream silence-boundary emits (see push_frame), where it prevents
-    // spurious tiny chunks during a pause. At stream end we must transcribe
-    // whatever we have, otherwise short utterances ("hi", "save file") return
-    // an empty result — which was the regression tracked by the
-    // VadScannerTest.FinalFlushEmitsIsFinalChunkEvenIfBelowMinChunkMs test.
-    if (!buffer_.empty() && in_speech_) {
+    // Flush gating strategy:
+    //
+    // - If WebRTC VAD fired at any point (in_speech_), trust it and emit.
+    // - Otherwise, fall back to a simple peak-amplitude check on the
+    //   buffered audio. If peak > kEmitPeakThreshold, emit anyway — the
+    //   signal is clearly above mic noise floor and VAD just under-rated
+    //   it (WebRTC VAD has a hard energy floor that rejects normal indoor
+    //   conversational speech captured at peaks 3000-9000 / 32767).
+    // - If both gates fail (in_speech_ false AND peak <= threshold), the
+    //   session was genuine silence — drop it so Gemma isn't handed a
+    //   silent buffer, on which it hallucinates arbitrary text.
+    //
+    // The threshold (500 ≈ 1.5% of Int16 max) is above typical mic noise
+    // floor (peaks 150-200 observed in logs on an idle mic) but well
+    // below any intentional human utterance (peaks > 2000 even in quiet
+    // whispers).
+    constexpr int16_t kEmitPeakThreshold = 500;
+    bool shouldEmit = !buffer_.empty() && in_speech_;
+    if (!buffer_.empty() && !in_speech_) {
+        int peak = 0;
+        for (auto s : buffer_) {
+            int a = s < 0 ? -int(s) : int(s);
+            if (a > peak) peak = a;
+        }
+        shouldEmit = peak > kEmitPeakThreshold;
+    }
+    if (shouldEmit) {
         maybe_emit_chunk(true, lk);
     }
-    // Only touch state if we still hold the lock (maybe_emit_chunk may have released it)
     if (lk.owns_lock()) {
         in_speech_ = false;
         silence_ms_ = 0;

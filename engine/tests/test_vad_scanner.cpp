@@ -75,31 +75,54 @@ TEST(VadScannerTest, SilenceBoundarySplitsIntoTwoChunks) {
     ASSERT_GE(capture.chunks.size(), 2u);
 }
 
-// Regression: after a silence-boundary emit, trailing silence must not become
-// a second (silence-only) final chunk when flush() is called.
+// After a silence-boundary emit, trailing silence must not become a second
+// (silence-only) final chunk — flush's peak gate drops all-zero buffers.
+// Regression protection: Gemma hallucinates arbitrary text when handed a
+// silent buffer, so the gate is also a UX safeguard.
 TEST(VadScannerTest, SpeechThenLongSilenceThenFlushProducesExactlyOneChunk) {
     VadScannerCallbackCapture capture;
     VadScanner scanner([&](Chunk c) { capture(c); }, 0);
 
-    // Enough speech to satisfy MIN_CHUNK_MS threshold
     auto speech = speech_samples(MIN_CHUNK_MS + 1000);
     feed_frames(scanner, speech);
 
-    // Silence long enough to trigger a boundary emit
     auto silence = silence_samples(SILENCE_BOUNDARY_MS + 500);
     feed_frames(scanner, silence);
 
-    // At this point one chunk should already have been emitted.
     ASSERT_EQ(capture.chunks.size(), 1u);
     EXPECT_FALSE(capture.chunks[0].is_final);
 
-    // More trailing silence followed by flush must NOT emit a second chunk.
     auto trailing_silence = silence_samples(1000);
     feed_frames(scanner, trailing_silence);
 
     scanner.flush();
 
-    EXPECT_EQ(capture.chunks.size(), 1u) << "flush() must not emit a silence-only final chunk";
+    EXPECT_EQ(capture.chunks.size(), 1u)
+        << "flush() must not emit a silence-only final chunk (Gemma hallucinates on silence)";
+}
+
+// When VAD never fires in_speech_ but the buffered audio has real signal
+// (peak > threshold), flush emits anyway. This is the backstop for the
+// WebRTC-VAD-underestimates-conversational-speech case: users with normal
+// mic gain (peaks 3-9 k / 32767) would otherwise get silent drops every
+// time VAD disagreed with reality about whether they were speaking.
+TEST(VadScannerTest, FlushEmitsNonZeroBufferEvenIfVadNeverFired) {
+    VadScannerCallbackCapture capture;
+    // Use mode 3 (very aggressive) so VAD is likely to reject the input.
+    VadScanner scanner([&](Chunk c) { capture(c); }, 3);
+
+    // Low-amplitude periodic signal — ~1 k peak, below what mode-3 VAD
+    // typically accepts but well above the flush peak threshold (500).
+    std::vector<int16_t> audio(16000);  // 1 second
+    for (size_t i = 0; i < audio.size(); ++i) {
+        audio[i] = static_cast<int16_t>(1500.0 * sin(2.0 * M_PI * 220.0 * i / 16000.0));
+    }
+    feed_frames(scanner, audio);
+    scanner.flush();
+
+    ASSERT_FALSE(capture.chunks.empty())
+        << "flush must emit when buffered audio has real signal, even if VAD rejected every frame";
+    EXPECT_TRUE(capture.chunks.back().is_final);
 }
 
 TEST(VadScannerTest, FinalFlushEmitsIsFinalChunkEvenIfBelowMinChunkMs) {

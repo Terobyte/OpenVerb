@@ -22,7 +22,7 @@ public:
     // = indoor conversational speech) reported having to shout for VAD to fire.
     // 1 accepts that range while still rejecting typing / ambient room tone in
     // measured session logs.
-    explicit VadScanner(Callback cb, int vad_mode = 1);
+    explicit VadScanner(Callback cb, int vad_mode = 0);
     void push_frame(const int16_t* samples, int num_samples);
     void flush();
     void reset();
