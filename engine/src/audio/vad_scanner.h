@@ -13,7 +13,16 @@ class VadScanner {
 public:
     using Callback = std::function<void(Chunk)>;
 
-    explicit VadScanner(Callback cb, int vad_mode = 3);
+    // vad_mode selects WebRTC VAD sensitivity:
+    //   0 = Quality (least aggressive — catches quietest speech, more false positives)
+    //   1 = Low bitrate
+    //   2 = Aggressive
+    //   3 = Very aggressive (strictest, hardest to trigger)
+    // Default was 3. Users with normal-volume mic input (peaks 5000-9000 / 32767
+    // = indoor conversational speech) reported having to shout for VAD to fire.
+    // 1 accepts that range while still rejecting typing / ambient room tone in
+    // measured session logs.
+    explicit VadScanner(Callback cb, int vad_mode = 1);
     void push_frame(const int16_t* samples, int num_samples);
     void flush();
     void reset();
