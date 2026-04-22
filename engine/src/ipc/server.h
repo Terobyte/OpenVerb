@@ -35,7 +35,6 @@ private:
     std::string          socket_path_;
     std::string          pid_path_;
 
-    std::thread          preload_thread_;   // background model preload at startup
     std::thread          session_thread_;
     std::atomic<bool>    session_active_{false};
 

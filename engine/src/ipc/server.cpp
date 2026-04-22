@@ -94,21 +94,6 @@ void IpcServer::start(const std::string& socket_path) {
 
     LOG_INFO("ipc: listening on %s", expanded.c_str());
 
-    // Preload the model in a background thread so the first session doesn't
-    // pay the load cost.  The socket is already listening when this starts, so
-    // ensureRunning() pings succeed immediately while the model loads.
-    // If a session arrives before preload finishes, ensure_loaded() blocks on
-    // engine_mutex_ until the background thread releases it — correct behaviour.
-    preload_thread_ = std::thread([this]() {
-        try {
-            LOG_INFO("ipc: preloading model...");
-            engine_.ensure_loaded();
-            LOG_INFO("ipc: model preloaded");
-        } catch (const std::exception& e) {
-            LOG_WARN("ipc: preload failed (will retry on first session): %s", e.what());
-        }
-    });
-
 #if defined(__APPLE__)
     // Register a GCD memory pressure source.  On WARN we schedule a lazy
     // idle unload (checked in the poll timeout branch).  On CRITICAL we
@@ -272,10 +257,6 @@ void IpcServer::stop() {
     if (!running_.load(std::memory_order_relaxed)) return;
     running_.store(false, std::memory_order_release);
     g_interrupted.store(true, std::memory_order_relaxed);
-
-    if (preload_thread_.joinable()) {
-        preload_thread_.join();
-    }
 
     if (session_thread_.joinable()) {
         session_thread_.join();

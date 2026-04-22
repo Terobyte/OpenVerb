@@ -146,6 +146,14 @@ int main(int argc, char** argv) {
 
         try {
             openverb::Engine engine(cfg);
+            // Synchronous model preload: blocks until the model is fully loaded
+            // into RAM before the socket is bound.  Invariant: socket accepting
+            // ⟺ model hot.  Swift's ensureRunning() will not see the socket until
+            // this completes, so tryPing() success ⟺ engine ready.
+            LOG_INFO("main: preloading model before socket bind...");
+            engine.ensure_loaded();
+            LOG_INFO("main: model loaded, binding socket");
+            if (g_interrupted.load(std::memory_order_relaxed)) return 130;
             openverb::IpcServer server(engine, cfg.model_idle_timeout_secs);
             server.start(cfg.socket_path);
         } catch (const std::exception& e) {
