@@ -86,7 +86,7 @@ OpenVerb currently exhibits two user-visible recording failures:
 
 | Component | Status | Responsibility |
 |-----------|--------|----------------|
-| `AudioRingBuffer` | new | Thread-safe ring buffer of PCM chunks with per-handle timestamps. Producer API: `write(chunk, ts, handle)` from audio thread. Consumer API: async `readNext(handle, afterTs, maxWait)` returns next chunk or nil when handle invalidated. Capacity 300 s (5 min, ~10 MB at 16 kHz Int16 mono). Overflow drops oldest chunk with WARN log; `Metrics` exposes overflowCount/peakDepth per handle. See Interfaces section for full API. |
+| `AudioRingBuffer` | new | Thread-safe ring buffer of PCM chunks with per-handle timestamps. NOT actor-isolated; all methods safe from any thread including the audio realtime thread (guarded by `os_unfair_lock`). Producer API: `write(chunk, ts, handle)` from audio thread. Consumer API: async `readNext(handle, afterTs, maxWait)` runs in a detached Task; returns next chunk or nil on timeout/invalidation. Capacity 300 s (5 min, ~10 MB at 16 kHz Int16 mono). Overflow drops oldest chunk; WARN log deferred off realtime thread. `Metrics` exposes overflowCount/peakDepth per handle. See Interfaces section for full API. |
 | `AudioSession` | modified | Pure producer. Keeps `AVAudioEngine` + `AVAudioConverter`. Writes chunks to `AudioRingBuffer` and invokes waveform callback. No more `preBuffer`, `sendCallback`, `flushPreBuffer`, `commitSendCallback`, `syncOnIOQueue`. |
 | `AudioPipeline` | new | Orchestrator. Owns state machine (idle / capturing / streaming / finalizing / error). `beginRecording(context)` allocates a unique `Handle`; `endRecording(handle)`, `cancel(handle)` drive transitions. Runs tail-follow consumer that streams chunks to `EngineClient` via `streamLive`. On engine errors, transitions to `error`; internal `retry()` resumes from `lastSentTimestamp` after `handleCrash` completes. See Interfaces section for full API. |
 | `SubtitlePanel` | new | Separate `NSPanel` positioned directly below `RecordingWindow`. Renders `AppState.livePartialText` at 16 pt, no truncation, auto-scroll on overflow. Visible during `.recording` and `.inferring`. Toggleable via `AppSettings.showSubtitlePanel` (default true). |
@@ -103,19 +103,44 @@ Pseudo-Swift signatures — final names and access levels may shift during imple
 
 ```swift
 // AudioRingBuffer — thread-safe ring buffer of timestamped PCM chunks.
+//
+// Concurrency: NOT actor-isolated. All methods are safe to call from any
+// thread, including the AVAudioEngine realtime audio thread. Internal state
+// is protected by a single os_unfair_lock; no Swift actor isolation.
+//
+// Capacity arithmetic (Int16 mono, 16 kHz default):
+//   bytes  = capacitySeconds * sampleRate * 2       // 300 * 16_000 * 2 = 9.6 MB
+//   maxChunks = bytes / chunkBytes                  // 9_600_000 / 4096 = 2343 chunks
+// Capacity is denominated in seconds at the API level; the implementation
+// converts to a maxChunks ceiling at init time.
 final class AudioRingBuffer {
     init(capacitySeconds: Int = 300, chunkBytes: Int = 4096, sampleRate: Int = 16_000)
 
-    // Producer API (called from audio thread under os_unfair_lock).
+    // Producer API — called from the AVAudioEngine realtime tap (audio thread).
+    // Acquires os_unfair_lock, appends chunk, signals any waiting consumer.
+    // On overflow: evicts oldest chunk and increments Metrics.overflowCount.
+    // WARN log is deferred to DispatchQueue.global(qos: .background) to avoid
+    // priority inversion on the realtime audio thread.
     func write(_ chunk: Data, timestamp: TimeInterval, handle: Handle)
 
-    // Consumer API (called from AudioPipeline's consumer Task).
-    // Returns nil if handle is invalidated. Blocks up to `maxWait` for the
-    // next chunk written after `afterTimestamp`.
+    // Consumer API — called from AudioPipeline's detached consumer Task.
+    // Returns (chunk, timestamp) for the next chunk whose timestamp >
+    // afterTimestamp for this handle.
+    // Returns nil when:
+    //   (a) handle is invalidated (cancel/clear called), or
+    //   (b) maxWait elapses with no new chunk arriving.
+    // Never blocks indefinitely. If afterTimestamp lies beyond all buffered
+    // data (including future timestamps), waits up to maxWait for new writes
+    // before returning nil. On overflow the consumer receives the next
+    // surviving chunk (no stall).
     func readNext(handle: Handle, afterTimestamp: TimeInterval,
                   maxWait: Duration) async -> (Data, TimeInterval)?
 
     // Lifecycle.
+    // markStart is called immediately after AVAudioEngine.start() returns and
+    // the tap is installed — not at hotkey press time — so the timestamp
+    // reflects the actual first-sample capture moment, not the ~100 ms
+    // hardware startup window.
     func markStart(handle: Handle, timestamp: TimeInterval)
     func markEnd(handle: Handle, timestamp: TimeInterval)
     func clear(handle: Handle)
@@ -167,6 +192,19 @@ final class AudioPipeline {
 - A stale handle passed to any method is a no-op (logged at debug level). This replaces the `drainGeneration` / `isDraining` guards in `AppDelegate`.
 - `beginRecording()` called while state ≠ `.idle` is a no-op (logged at debug level). Double-tap protection is handled at the `AppDelegate.handleHotkeyToggle()` level via state inspection, as today.
 - `streamLive(handle)` is a private consumer coroutine started implicitly by `beginRecording`; not a public API surface. It is the tail-follow reader that pulls from `AudioRingBuffer` and sends each chunk via `EngineClient.sendAudioFrame` (unchanged signature — reused as-is).
+
+### Concurrency Model
+
+| Layer | Thread / Isolation | Notes |
+|-------|--------------------|-------|
+| `AudioRingBuffer.write` | AVAudioEngine realtime audio thread | Protected by `os_unfair_lock`. WARN on overflow deferred to `.background` queue to avoid priority inversion. |
+| `AudioRingBuffer.readNext` | `Task.detached` — never MainActor | Waits on continuation; returns nil on timeout or handle invalidation. Never parks the main thread. |
+| `AudioPipeline` public methods | `@MainActor` | `beginRecording`, `endRecording`, `cancel`. State transitions (idle → capturing → streaming → finalizing → error) all execute on the main actor. |
+| `AudioPipeline.streamLive` | `Task.detached(priority: .userInitiated)` | Launched inside `beginRecording`. Explicitly **not** inherited from MainActor. Communicates results back via `await MainActor.run { … }`. |
+| Handle allocation atomicity | `@MainActor` | State-check and handle allocation in `beginRecording` are atomic — both happen on the main actor; no TOCTOU window. |
+| Handle invalidation | `@MainActor` | `cancel()` and the `finalizing → idle` transition invalidate the handle on the main actor. An in-flight `readNext` for that handle returns nil within `maxWait`. |
+| `lastSentTimestamp` | Owned by `streamLive` Task | Timestamp of the last chunk for which `sendAudioFrame` returned without error. On retry after engine crash, consumer resumes with `readNext(afterTimestamp: lastSentTimestamp)`. |
+| Burst-send flow control | `EngineClient.sendAudioFrame` | On cold-start recovery, the consumer sends accumulated chunks at socket rate. `sendAudioFrame` uses the existing write-or-drop backpressure: if the socket buffer is full, the frame is dropped and logged rather than blocking the consumer Task. |
 
 ### AudioPipeline state machine
 
@@ -364,7 +402,7 @@ User notices a brief pause in live subtitle but the utterance completes.
 | Engine crash mid-recording | keeps writing buffer | detects connection_closed → state: streaming → error; triggers handleCrash | subtitle: "Engine restarting…" |
 | After crash recovery completes | still writing | retry() → reconnect → resend buffer from last-sent-ts | subtitle: resumes with partials |
 | User presses Escape | audioSession.stop() | cancel(H) → disconnect → idle; RingBuffer cleared for H | window hides |
-| RingBuffer overflow (speech > 300 s / 5 min) | drop oldest chunk + log WARN; increment `Metrics.overflowCount` | unaffected | optional "max duration reached" toast. Engine's `duration_exceeded` error (5 min limit) fires first under normal conditions. |
+| RingBuffer overflow (speech > 300 s / 5 min) | drop oldest chunk; increment `Metrics.overflowCount`; WARN log deferred to `.background` queue (not realtime thread) | consumer receives next surviving chunk without stalling | optional "max duration reached" toast. Engine's `duration_exceeded` error (5 min limit) fires first under normal conditions. |
 | User ⌥Space during cold-start | starts as usual | waits for engineStatus == .running; buffer accumulates | normal recording UI; slight result delay |
 | Memory pressure unloads model | keeps writing | next session.start triggers lazy reload; +5-10 s on that session only | unchanged |
 | Microphone permission denied | start() throws | state → error; cancel(H) | NSAlert + link to Settings |
