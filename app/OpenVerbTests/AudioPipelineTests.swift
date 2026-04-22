@@ -22,7 +22,22 @@ final class AudioPipelineTests: XCTestCase {
 
     override func setUp() async throws {
         ringBuffer = AudioRingBuffer(capacitySeconds: 300, chunkBytes: 4096, sampleRate: 16_000)
-        pipeline = AudioPipeline(ringBuffer: ringBuffer)
+        // Phase 6 (step 30): AudioPipeline owns engineClient/engineManager to
+        // drive streamLive. We wire a non-routable socketPath so the detached
+        // consumer Task fails connect() immediately — the state-machine
+        // assertions only inspect synchronous MainActor transitions, so the
+        // Task's cleanup (if any) runs after the assertion point.
+        let client = EngineClient()
+        let manager = EngineManager(
+            socketPath: "/tmp/openverb-audiopipelinetests-nonexistent.sock",
+            enginePath: "/usr/bin/false",
+            client: client
+        )
+        pipeline = AudioPipeline(
+            engineClient: client,
+            engineManager: manager,
+            ringBuffer: ringBuffer
+        )
     }
 
     // -----------------------------------------------------------------------
