@@ -100,10 +100,11 @@
   ```cpp
           openverb::Engine engine(cfg);
           engine.ensure_loaded();               // blocks 5-10 s; socket binds AFTER model is in RAM
+          if (g_interrupted) { return 0; }      // Ctrl+C during load must not be swallowed
           openverb::IpcServer server(engine, cfg.model_idle_timeout_secs);
           server.start(cfg.socket_path);
   ```
-  **Important:** `engine.ensure_loaded()` must be placed INSIDE the existing `try { ... }` block (line 147), not before it. The surrounding `try` catches `std::exception` and handles `g_interrupted` — placing `ensure_loaded()` outside would leave a 5–10 s blocking call unguarded by the signal handler check.
+  **Important:** `engine.ensure_loaded()` and the `g_interrupted` check must be INSIDE the existing `try { ... }` block (line 147), not before it. The surrounding `try` catches `std::exception` — placing them outside would leave a 5–10 s blocking call unguarded.
 
 - [ ] **Step 1.5: Build the engine with CMake to verify no compilation errors**
 
@@ -169,7 +170,7 @@
           contentsOfFile: Bundle(for: EngineManager.self).bundlePath
               + "/../../../OpenVerb/Engine/EngineManager.swift",
           encoding: .utf8)
-      XCTAssertTrue(src.contains("addingTimeInterval(30.0)"),
+      XCTAssertTrue(src.contains("addingTimeInterval(30"),    // matches "30.0", "30)", "30 " etc.
                     "ensureRunning poll deadline must be 30 s (not 5 s) to outlast synchronous model load")
       XCTAssertFalse(src.contains("addingTimeInterval(5.0)"),
                      "Old 5-second deadline must be removed")
@@ -312,6 +313,19 @@
   // AudioRingBuffer — thread-safe ring buffer of timestamped PCM chunks.
   // NOT actor-isolated. All methods safe from any thread (guarded by os_unfair_lock).
   // Capacity: capacitySeconds * sampleRate * 2 bytes, rounded to maxChunks * chunkBytes.
+  //
+  // Thread safety:
+  //   write()    — safe from AVAudioEngine realtime audio thread. os_unfair_lock does
+  //                not heap-allocate on lock/unlock. Logger.warning is os_log backed —
+  //                async-safe and realtime-safe. continuation.resume() enqueues work on
+  //                the cooperative pool (does not run inline) — safe from audio thread.
+  //   readNext() — must only be called from a Task (not @MainActor). Blocks via
+  //                CheckedContinuation until data arrives or maxWait elapses. Single-fire
+  //                guarantee: both write() and the timeout Task operate under the same
+  //                lock and nil state.waiter before firing — only one path sees a non-nil
+  //                continuation.
+  //   clear()    — safe from any thread. Removes the handle entry entirely to prevent
+  //                unbounded growth (thousands of sessions → thousands of dead UUIDs).
   final class AudioRingBuffer {
 
       struct Handle: Hashable { let id: UUID }
@@ -367,6 +381,8 @@
           var continuationToFire: CheckedContinuation<(Data, TimeInterval)?, Never>? = nil
           var continuationValue: (Data, TimeInterval)? = nil
           if let waiter = state.waiter, timestamp > state.waiterAfterTs {
+              // Single-fire guarantee: nil state.waiter under lock before firing.
+              // Timeout Task reads nil and becomes a no-op.
               continuationToFire = waiter
               continuationValue = (chunk, timestamp)
               state.waiter = nil
@@ -374,11 +390,10 @@
           states[handle.id] = state
           lock.unlock()
           if overflowCount > 0 {
-              let n = overflowCount
-              DispatchQueue.global(qos: .background).async {
-                  logger.warning("AudioRingBuffer: overflow #\(n) — dropped oldest chunk")
-              }
+              // Logger (os_log) is async-signal-safe and realtime-safe — no DispatchQueue needed.
+              logger.warning("AudioRingBuffer: overflow #\(overflowCount) — dropped oldest chunk")
           }
+          // continuation.resume enqueues on cooperative pool; does NOT run inline.
           continuationToFire?.resume(returning: continuationValue)
       }
 
@@ -386,6 +401,8 @@
 
       // Returns (chunk, timestamp) for the next chunk with timestamp > afterTimestamp.
       // Returns nil if handle is invalidated or maxWait elapses.
+      // Single-fire: write() and the timeout Task both nil state.waiter under lock before
+      // calling resume(). Exactly one of them sees a non-nil continuation.
       func readNext(handle: Handle, afterTimestamp: TimeInterval,
                     maxWait: Duration) async -> (Data, TimeInterval)? {
           // Fast path: already buffered data
@@ -397,47 +414,41 @@
           }
           lock.unlock()
 
-          // Slow path: wait for write() or timeout
-          return await withTaskGroup(of: (Data, TimeInterval)?.self) { group in
-              group.addTask {
-                  await withCheckedContinuation { cont in
-                      var immediateResult: (Data, TimeInterval)? = nil
-                      self.lock.lock()
-                      guard var state = self.states[handle.id], state.isValid else {
-                          self.lock.unlock()
-                          cont.resume(returning: nil)
-                          return
-                      }
-                      // Check again inside lock (eliminates write→readNext TOCTOU window)
-                      if let entry = state.entries.first(where: { $0.timestamp > afterTimestamp }) {
-                          self.lock.unlock()
-                          cont.resume(returning: (entry.data, entry.timestamp))
-                          return
-                      }
-                      state.waiter = cont
-                      state.waiterAfterTs = afterTimestamp
-                      self.states[handle.id] = state
-                      self.lock.unlock()
-                      _ = immediateResult  // suppress warning
-                  }
+          // Slow path: park the caller in a CheckedContinuation until write() or timeout.
+          // Uses Task.detached for the timer instead of withTaskGroup to avoid the
+          // cancelled-sleep-resumes-continuation structural risk.
+          return await withCheckedContinuation { (cont: CheckedContinuation<(Data, TimeInterval)?, Never>) in
+              self.lock.lock()
+              guard var state = self.states[handle.id], state.isValid else {
+                  self.lock.unlock()
+                  cont.resume(returning: nil)
+                  return
               }
-              group.addTask {
+              // TOCTOU window closed: re-check inside lock before parking.
+              if let entry = state.entries.first(where: { $0.timestamp > afterTimestamp }) {
+                  self.lock.unlock()
+                  cont.resume(returning: (entry.data, entry.timestamp))
+                  return
+              }
+              state.waiter = cont
+              state.waiterAfterTs = afterTimestamp
+              self.states[handle.id] = state
+              self.lock.unlock()
+
+              // Timeout: fire nil after maxWait if write()/clear() haven't already fired.
+              Task.detached { [weak self] in
                   try? await Task.sleep(for: maxWait)
-                  // Expire the waiter
+                  guard let self else { return }
                   var expired: CheckedContinuation<(Data, TimeInterval)?, Never>? = nil
                   self.lock.lock()
-                  if var state = self.states[handle.id] {
-                      expired = state.waiter
-                      state.waiter = nil
-                      self.states[handle.id] = state
+                  if var s = self.states[handle.id] {
+                      expired = s.waiter   // nil if write() already fired (single-fire)
+                      s.waiter = nil
+                      self.states[handle.id] = s
                   }
                   self.lock.unlock()
                   expired?.resume(returning: nil)
-                  return nil
               }
-              let result = await group.next()!
-              group.cancelAll()
-              return result
           }
       }
 
@@ -459,15 +470,12 @@
       func clear(handle: Handle) {
           var waiterToFire: CheckedContinuation<(Data, TimeInterval)?, Never>? = nil
           lock.lock()
-          guard var state = states[handle.id] else {
+          guard let state = states[handle.id] else {
               lock.unlock()
               return
           }
-          state.isValid = false
-          state.entries.removeAll()
           waiterToFire = state.waiter
-          state.waiter = nil
-          states[handle.id] = state
+          states.removeValue(forKey: handle.id)   // remove entirely — prevents unbounded growth
           lock.unlock()
           waiterToFire?.resume(returning: nil)
       }
@@ -546,8 +554,9 @@
           let h = AudioRingBuffer.Handle(id: UUID())
           buf.markStart(handle: h, timestamp: 0)
           async let reader = buf.readNext(handle: h, afterTimestamp: 0.0, maxWait: .seconds(10))
-          // Give reader time to park in continuation
-          try? await Task.sleep(for: .milliseconds(20))
+          // Give reader ample time to park in continuation (20ms is too tight on a busy CI
+          // host — 200ms is still fast and much more reliable).
+          try? await Task.sleep(for: .milliseconds(200))
           buf.clear(handle: h)
           let r = await reader
           XCTAssertNil(r, "clear() must wake blocked readNext with nil (not hang)")
@@ -568,12 +577,14 @@
                   try? await Task.sleep(for: .microseconds(100))
               }
           }
-          // Reader Task: reads 200 chunks sequentially
+          // Reader Task: reads 200 chunks sequentially.
+          // maxWait: .seconds(1) — each write takes ~100 µs, 1 s is ample.
+          // Do NOT use .seconds(5) — 200 chunks × 5 s = 16 min worst-case test time.
           var lastTs: TimeInterval = 0
           var readCount = 0
           for _ in 0..<total {
               guard let r = await buf.readNext(handle: h, afterTimestamp: lastTs,
-                                               maxWait: .seconds(5)) else {
+                                               maxWait: .seconds(1)) else {
                   XCTFail("readNext timed out at chunk \(readCount)")
                   break
               }
@@ -822,19 +833,25 @@ The `streamLive` consumer is a private `Task.detached` coroutine. In this task, 
 **Files:**
 - Modify: `app/OpenVerb/Pipeline/AudioPipeline.swift`
 
-- [ ] **Step 7.1: Extend AudioPipeline with engine references and streamLive**
+- [ ] **Step 7.0: Expose socketPath in EngineManager (access fix)**
 
-  Modify `app/OpenVerb/Pipeline/AudioPipeline.swift`. Add `engineManager` and `engineClient` references to `init`, and add the `streamLive` coroutine:
-
+  In `app/OpenVerb/Engine/EngineManager.swift`, line 62:
   ```swift
-  // Add to init parameters:
-  //   engineManager: EngineManager
-  //   engineClient: EngineClient
-  // Store them as private lets.
-  // streamLive(handle:) is launched by beginRecording() as Task.detached.
-
-  // Full updated AudioPipeline.swift — replace entire file:
+  // Before:
+  private let socketPath: String
+  // After (remove `private` — it's internal to the same module):
+  let socketPath: String
   ```
+  AudioPipeline.streamLive reads `engineManager.socketPath`; the current `private` access blocks compilation.
+
+  Build to confirm:
+  ```bash
+  cd app && swift build 2>&1 | grep -E "error:|Build complete"
+  ```
+
+- [ ] **Step 7.1: Replace AudioPipeline.swift with full implementation (engine + streamLive)**
+
+  This replaces the Task 6 state-machine-only scaffold entirely. If you skipped Task 6, create the file fresh. **Replacing the scaffold is intentional** — Task 6 existed only to make the state machine tests compile. Task 7 supersedes it. All Task 6 tests must still pass after this replacement.
 
   Replace the entire `AudioPipeline.swift` with:
   ```swift
@@ -865,8 +882,10 @@ The `streamLive` consumer is a private `Task.detached` coroutine. In this task, 
       var onResult: ((_ text: String, _ command: Command?) -> Void)?
       var onError: ((_ message: String) -> Void)?
 
-      // Injected context builder callback (set by AppDelegate)
-      var contextProvider: (() -> [String: String])?
+      // Injected context builder callback (set by AppDelegate).
+      // Declared `async` because ContextBuilder.build is async — called from
+      // inside the Task.detached consumer, not from @MainActor directly.
+      var contextProvider: (() async -> [String: String])?
 
       init(ringBuffer: AudioRingBuffer,
            engineManager: EngineManager? = nil,
@@ -888,8 +907,9 @@ The `streamLive` consumer is a private `Task.detached` coroutine. In this task, 
           activeHandle = handle
           state = .capturing
           ringBuffer.markStart(handle: handle, timestamp: Date().timeIntervalSince1970)
-          let context = contextProvider?() ?? [:]
+          // contextProvider is async — capture it inside the Task so await works.
           Task.detached(priority: .userInitiated) { [weak self] in
+              let context = await self?.contextProvider?() ?? [:]
               await self?.streamLive(handle: handle, context: context)
           }
           logger.info("beginRecording: handle \(handle.id)")
@@ -971,9 +991,13 @@ The `streamLive` consumer is a private `Task.detached` coroutine. In this task, 
               }
           }
 
+          // engineManager.socketPath must be `internal` (not `private`). See note in
+          // Task 7: add `internal(set)` or remove `private` from EngineManager.socketPath.
+          let socketPath = await MainActor.run(body: { engineManager.socketPath })
+
           // Connect and start session
           do {
-              try await client.connect(path: engineManager.socketPath)
+              try await client.connect(path: socketPath)
               try await client.startSession(context: context)
               let readyMsg = try await client.receiveMessage(timeoutMs: 10_000)
               guard case .ready = readyMsg else {
@@ -1073,6 +1097,15 @@ The `streamLive` consumer is a private `Task.detached` coroutine. In this task, 
   - `.partialResult(text: String, chunkId: Int, isFinal: Bool)` — labeled enum case; match as `.partialResult(let text, _, _)`
   - `EngineClientError.engineError` — positional `(String, String)`, **no labels**
 
+  **Crash recovery note (issue #12 — Phase 2 monitor replacement):**
+  The Phase 2 monitor previously detected engine crashes between sessions via POLLHUP. In AudioPipeline:
+  - Mid-session crash: `receiveMessage(timeoutMs:)` throws → `transitionToError` + `onError` surfaces to user
+  - Between-session crash: the next `client.connect(path:)` in the next `streamLive` call fails → same error path
+  The user sees an error notification either way and can retry. EngineManager relaunches the engine on the next `ensureRunning()` call. No silent swallowing.
+
+  **handleResult sync requirement (issue #7):**
+  `onResult` is declared as `(String, Command?) -> Void` — a **synchronous** closure. `handleResult(text:command:)` extracted in Step 9.2 **must NOT be declared `async`**. If any of its sub-calls are async (e.g., if `engineManager.disconnect()` is async), wrap them in `Task { }` inside the sync method. The closure is called from `await MainActor.run { self?.onResult?(text, command) }` — the body of that closure is sync.
+
 - [ ] **Step 7.2: Build to check for compile errors**
 
   ```bash
@@ -1149,14 +1182,37 @@ The `streamLive` consumer is a private `Task.detached` coroutine. In this task, 
   - `private var sendCallback: ((Data) -> Void)?`
   - `flushPreBuffer()` method
   - `commitSendCallback()` method
-  - `syncOnIOQueue()` method (if present)
   - The `preBuffer` append/cap logic in `processTapBuffer`
   - The `sendCallback` dispatch in `processTapBuffer`
 
+  **Note:** `syncOnIOQueue()` is on `EngineClient`, NOT on `AudioSession` — do not look for it in AudioSession.
+
   **What to add**:
-  - `var ringBuffer: AudioRingBuffer?` — injected by AppDelegate after creation
-  - `var ringBufferHandle: AudioRingBuffer.Handle?` — set by AppDelegate before `start()`
-  - In `processTapBuffer`, after forming `chunk`: `ringBuffer?.write(chunk, timestamp: Date().timeIntervalSince1970, handle: ringBufferHandle ?? AudioRingBuffer.Handle(id: UUID()))`
+
+  `ringBuffer` and `ringBufferHandle` must be protected against the data race between the
+  `@MainActor` writer (AppDelegate) and the realtime audio tap reader. Use `OSAllocatedUnfairLock`:
+  ```swift
+  var ringBuffer: AudioRingBuffer?   // written before tap installed — no race
+
+  private let _handleLock = OSAllocatedUnfairLock()
+  private var _ringBufferHandle: AudioRingBuffer.Handle?
+  var ringBufferHandle: AudioRingBuffer.Handle? {
+      get { _handleLock.withLock { _ringBufferHandle } }
+      set { _handleLock.withLock { _ringBufferHandle = newValue } }
+  }
+  ```
+
+  In `processTapBuffer`, after forming `chunk`:
+  ```swift
+  // Guard against nil handle — drop chunk rather than create a phantom UUID.
+  guard let handle = ringBufferHandle else {
+      logger.error("AudioSession: ringBufferHandle nil — dropping audio chunk")
+      return
+  }
+  ringBuffer?.write(chunk, timestamp: Date().timeIntervalSince1970, handle: handle)
+  ```
+
+  `OSAllocatedUnfairLock` (macOS 13+) does not heap-allocate on lock/unlock — safe from the realtime audio thread.
 
   The `start()` signature stays the same (still has `waveformCallback`). The waveform callback still fires for each chunk. Only the send path changes.
 
@@ -1223,12 +1279,15 @@ This is the largest change. It replaces `flushPreBuffer`, `commitSendCallback`, 
   audioSession.ringBuffer = ringBuffer
   // ringBufferHandle is assigned in startRecording() just before audioSession.start()
 
-  // ContextBuilder.build requires 5 args — match the existing call site in connectAndRecord
+  // ContextBuilder.build is `async` — contextProvider must be async.
+  // Actual signature: build(targetApp:accessibilityApp:pasteboard:accessibilityReader:
+  //                        clipboardSnapshot:includeClipboard:languageOverride:) async
+  // pasteboard and accessibilityReader have defaults, so only 5 args are required.
   audioPipeline.contextProvider = { [weak self] in
       guard let self else { return [:] }
-      return ContextBuilder.build(
+      return await ContextBuilder.build(
           targetApp:         self.appState.targetApp,
-          accessibilityApp:  self.appState.targetApp,
+          accessibilityApp:  self.appState.targetApp as? NSRunningApplication,
           clipboardSnapshot: self.appSettings.includeClipboard
                                ? NSPasteboard.general.string(forType: .string)
                                : nil,
@@ -1248,7 +1307,7 @@ This is the largest change. It replaces `flushPreBuffer`, `commitSendCallback`, 
 
 - [ ] **Step 9.4: Extract `scheduleMaxDurationTimer()` from connectAndRecord**
 
-  The current `connectAndRecord()` contains inline timer scheduling (around lines 756-769 in `OpenVerbApp.swift`). Extract it into a private method before rewriting `startRecording()`:
+  The current `connectAndRecord()` contains inline timer scheduling (around lines 756-770 in `OpenVerbApp.swift` — run `grep -n "maxDurationTimer" app/OpenVerb/App/OpenVerbApp.swift` to find exact lines). Extract it into a private method before rewriting `startRecording()`:
   ```swift
   private func scheduleMaxDurationTimer() {
       // Move the existing maxDurationTimer = Task { ... } block here verbatim.
@@ -1277,7 +1336,24 @@ This is the largest change. It replaces `flushPreBuffer`, `commitSendCallback`, 
       scheduleMaxDurationTimer()
   }
   ```
-  Remove `isDraining`, `drainGeneration`, and related declarations from AppDelegate.
+
+  **Comprehensive removal of `isDraining` / `drainGeneration` / `drainResult` (all 8+ sites):**
+
+  These appear at the following approximate lines in `OpenVerbApp.swift` (run `grep -n "isDraining\|drainGeneration\|drainResult"` to get exact numbers):
+  - Property declarations (~lines 85-93): `drainGeneration: UInt64`, `isDraining: Bool`
+  - `startRecording` body (~lines 438-442): `isDraining = false`, `drainGeneration &+= 1`
+  - `stopRecording` body (~line 484): `guard !isDraining`, `isDraining = true`
+  - `stopRecording` body (~line 492): `engineManager.engineClient.stopPhase2Monitor()` — remove
+  - `abortAndRestart` body (~lines 527-528): `drainGeneration &+= 1`, `let gen = drainGeneration`
+  - `abortAndRestart` body (~line 545): `isDraining = false`
+  - `abortAndRestart` body (~line 555): `engineManager.engineClient.stopPhase2Monitor()` — remove
+  - `handleCancel` (~line 559): `drainGeneration &+= 1`
+  - Other cancel paths (~line 625): `engineManager.engineClient.stopPhase2Monitor()` — remove
+  - The **entire `drainResult()` function** (~lines 718-900): delete it entirely
+
+  Also remove `syncOnIOQueue` call sites in `OpenVerbApp.swift` (they call `engineManager.engineClient.syncOnIOQueue()` — not relevant after AudioPipeline takes over the send path).
+
+  Run `grep -n "syncOnIOQueue\|stopPhase2Monitor\|startPhase2Monitor\|isDraining\|drainGeneration\|drainResult"` before and after to confirm all are gone.
 
 - [ ] **Step 9.6: Replace stopRecording() body**
 
@@ -1366,12 +1442,12 @@ Before removing the Phase 2 monitor, audit all "Bug N:" comments in the files mo
   func prove_bug16_staleHandleIsNoOp() {
       // AudioPipeline.cancel(handle:) with a stale handle must not affect state.
       // Replaces the drainGeneration guard removed from AppDelegate.
+      // Uses a random Handle (never registered) to avoid launching streamLive,
+      // which would complicate the test with an async side-effect.
       let pipeline = AudioPipeline(ringBuffer: AudioRingBuffer())
-      let h1 = pipeline.beginRecording()!
-      pipeline.cancel(handle: h1)
-      XCTAssertEqual(pipeline.state, .idle)
-      pipeline.cancel(handle: h1)  // stale — must be no-op
-      XCTAssertEqual(pipeline.state, .idle, "Stale handle must not alter state (Bug 16 invariant)")
+      let staleHandle = AudioRingBuffer.Handle(id: UUID())   // never registered
+      pipeline.cancel(handle: staleHandle)   // stale — must be no-op
+      XCTAssertEqual(pipeline.state, .idle, "Unregistered handle cancel must not alter state (Bug 16 invariant)")
   }
 
   func prove_bug81_doubleStopIsNoOp() {
@@ -1416,7 +1492,7 @@ This task should only be done after Phase 6 has been live in production for ≥1
       app/OpenVerb/Engine/EngineClient.swift | head -40
   ```
 
-- [ ] **Step 11.2: Delete the Phase 2 monitor code**
+- [ ] **Step 11.2: Delete the Phase 2 monitor code from EngineClient.swift**
 
   Remove all of:
   - `private var phase2Error: ServerMessage?`
@@ -1431,7 +1507,39 @@ This task should only be done after Phase 6 has been live in production for ≥1
   - `private func callOnErrorIfLive(_:)`
   - Any references to them
 
-  Also remove from the `connect(path:)` or `disconnect()` any cleanup of the wake pipe.
+  Also remove from `connect(path:)` or `disconnect()` any cleanup of the wake pipe.
+
+- [ ] **Step 11.2b: Remove Phase 2 monitor call sites in OpenVerbApp.swift and EngineManager.swift**
+
+  Five call sites remain outside EngineClient after Step 11.2 (confirmed via grep in Step 9.5):
+  - `OpenVerbApp.swift ~line 492`: `engineManager.engineClient.stopPhase2Monitor()`
+  - `OpenVerbApp.swift ~line 555`: `engineManager.engineClient.stopPhase2Monitor()`
+  - `OpenVerbApp.swift ~line 625`: `engineManager.engineClient.stopPhase2Monitor()`
+  - `OpenVerbApp.swift ~line 744`: `engineManager.engineClient.startPhase2Monitor()` (inside connectAndRecord being deleted)
+  - `EngineManager.swift ~line 570`: `engineClient.stopPhase2Monitor()`
+
+  These are all removed as part of the larger connectAndRecord/drainResult deletion (Step 9.5) and the EngineManager cleanup. Confirm with:
+  ```bash
+  grep -rn "Phase2Monitor" app/OpenVerb/ 2>/dev/null
+  ```
+  Expected: no results.
+
+- [ ] **Step 11.2c: Update negative tests that scan for deleted code (issues #31-33)**
+
+  Negative tests that source-scan for code removed in Phases 6-7 will fail with a false
+  positive "pattern found" (or "pattern absent" if they looked for removed code). Find them:
+  ```bash
+  grep -n "drainGeneration\|isDraining\|phase2\|flushPreBuffer\|commitSendCallback" \
+      app/OpenVerbTests/OpenBugsNegativeTests.swift
+  ```
+  For each match:
+  - If the test scans for code **that was removed**: delete the test (the negative no longer applies — the old mechanism is gone)
+  - If the test verifies an invariant **now covered by AudioPipeline**: replace the source-scan with a state machine assertion (e.g., stale handle is no-op)
+
+  Typical tests to remove or update after Phases 6-7:
+  - Bug 16 (drainGeneration): replaced by `prove_bug16_staleHandleIsNoOp` (added in Task 10)
+  - Bug 81 (isDraining): replaced by `prove_bug81_doubleStopIsNoOp` (added in Task 10)
+  - Bugs 17, 27, 28 (phase2 monitor): no longer applicable — remove the source-scan tests
 
 - [ ] **Step 11.3: Build**
 
@@ -1560,6 +1668,8 @@ This task should only be done after Phase 6 has been live in production for ≥1
       private var hostingView: NSHostingView<SubtitleView>?
       private var cancellables = Set<AnyCancellable>()
 
+      deinit { cancellables.removeAll() }
+
       // Create the panel and position it below `anchor`.
       // Call from RecordingWindow.init after the window is placed.
       func setup(anchorWindow: NSWindow, appState: AppState, settings: AppSettings) {
@@ -1567,6 +1677,10 @@ This task should only be done after Phase 6 has been live in production for ≥1
           let view = SubtitleView(appState: appState)
           let hosting = NSHostingView(rootView: view)
           hosting.setFrameSize(NSSize(width: 480, height: 80))
+          // wantsLayer + clear backgroundColor required for transparency to show through.
+          // Without these the NSHostingView renders with an opaque white backing layer.
+          hosting.wantsLayer = true
+          hosting.layer?.backgroundColor = .clear
           let p = NSPanel(
               contentRect: NSRect(x: 0, y: 0, width: 480, height: 80),
               styleMask: [.nonactivatingPanel, .borderless],
@@ -1580,7 +1694,9 @@ This task should only be done after Phase 6 has been live in production for ≥1
           p.ignoresMouseEvents = true
           p.collectionBehavior = [.canJoinAllSpaces, .stationary]
           reposition(panel: p, below: anchorWindow)
-          anchorWindow.addChildWindow(p, ordered: .below)
+          // ordered: .above gives the SubtitlePanel a higher z-order than the parent,
+          // so it stays visible. `.below` would place it behind the parent window.
+          anchorWindow.addChildWindow(p, ordered: .above)
           panel = p
           hostingView = hosting
 
@@ -1596,7 +1712,7 @@ This task should only be done after Phase 6 has been live in production for ≥1
       }
 
       private func reposition(panel: NSPanel, below anchor: NSWindow) {
-          var anchorFrame = anchor.frame
+          let anchorFrame = anchor.frame
           let panelFrame = NSRect(
               x: anchorFrame.minX,
               y: anchorFrame.minY - panel.frame.height - 8,
@@ -1627,9 +1743,12 @@ This task should only be done after Phase 6 has been live in production for ≥1
                       .padding(.horizontal, 12)
                       .padding(.vertical, 8)
                       .id("bottom")
+                      // animation modifier instead of withAnimation inside onChange —
+                      // avoids stacking animations on rapid partial result updates.
+                      .animation(.easeOut(duration: 0.15), value: appState.livePartialText)
               }
               .onChange(of: appState.livePartialText) { _ in
-                  withAnimation { proxy.scrollTo("bottom", anchor: .bottom) }
+                  proxy.scrollTo("bottom", anchor: .bottom)
               }
           }
           .background(Color.black.opacity(0.55))
