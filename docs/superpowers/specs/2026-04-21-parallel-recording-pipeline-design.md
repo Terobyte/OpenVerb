@@ -165,6 +165,8 @@ final class AudioPipeline {
 - Invalidated on transition to `idle` (result received / cancel / explicit clear).
 - Survives `error → streaming` retry cycles: the same handle is used when reconnecting after an engine crash; the `lastSentTimestamp` stored per-handle lets the consumer resume without re-sending frames the engine already acknowledged.
 - A stale handle passed to any method is a no-op (logged at debug level). This replaces the `drainGeneration` / `isDraining` guards in `AppDelegate`.
+- `beginRecording()` called while state ≠ `.idle` is a no-op (logged at debug level). Double-tap protection is handled at the `AppDelegate.handleHotkeyToggle()` level via state inspection, as today.
+- `streamLive(handle)` is a private consumer coroutine started implicitly by `beginRecording`; not a public API surface. It is the tail-follow reader that pulls from `AudioRingBuffer` and sends each chunk via `EngineClient.sendAudioFrame` (unchanged signature — reused as-is).
 
 ### AudioPipeline state machine
 
