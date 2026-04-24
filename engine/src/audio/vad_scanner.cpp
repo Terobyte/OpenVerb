@@ -1,5 +1,7 @@
 #include "audio/vad_scanner.h"
 
+#include "config/log.h"
+
 static constexpr int kFrameMs = 30;
 
 VadScanner::VadScanner(Callback cb, int vad_mode)
@@ -54,6 +56,15 @@ void VadScanner::push_frame(const int16_t* samples, int num_samples) {
                 in_speech_ = false;  // utterance ended at silence boundary; don't accumulate trailing silence
             }
         }
+        // NOTE: force-emit at LIVE_EMIT_MS was tried and reverted. Each chunk
+        // emitted here goes through its own independent Gemma inference and
+        // the outputs are concatenated into `accumulated` in session.cpp
+        // run_inference_worker_. Mid-utterance cuts produce partial-word
+        // tokens from the audio encoder, which Gemma then hallucinates into
+        // plausible-but-wrong text. The concatenated final transcript is
+        // garbage. Real streaming transcription requires sliding-window
+        // inference or full-buffer re-inference at end-of-audio; until that
+        // architectural change lands, transcription is single-shot at flush().
     }
 
     // Retain the leftover tail (< 30 ms) for the next push_frame.

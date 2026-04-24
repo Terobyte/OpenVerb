@@ -326,12 +326,31 @@ final class EngineManager: ObservableObject {
         }
         proc.arguments = args
 
-        // Drain stderr asynchronously to prevent pipe-buffer deadlock.
+        // Drain stderr asynchronously to prevent pipe-buffer deadlock, and
+        // also mirror the stream to ~/.openverb/logs/engine-subprocess.log
+        // so live diagnostics (partial_result emits, VAD force-emit ticks,
+        // etc.) are observable via `tail -f` during reproduction.
         let pipe = Pipe()
         proc.standardError = pipe
         let handle = pipe.fileHandleForReading
-        handle.readabilityHandler = { h in _ = h.availableData }
-        proc.terminationHandler = { _ in handle.readabilityHandler = nil }
+        let logPath = (NSHomeDirectory() as NSString).appendingPathComponent(".openverb/logs/engine-subprocess.log")
+        try? FileManager.default.createDirectory(
+            atPath: (logPath as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true)
+        if !FileManager.default.fileExists(atPath: logPath) {
+            FileManager.default.createFile(atPath: logPath, contents: nil)
+        }
+        let logFH = FileHandle(forWritingAtPath: logPath)
+        logFH?.seekToEndOfFile()
+        handle.readabilityHandler = { h in
+            let data = h.availableData
+            guard !data.isEmpty else { return }
+            logFH?.write(data)
+        }
+        proc.terminationHandler = { _ in
+            handle.readabilityHandler = nil
+            try? logFH?.close()
+        }
 
         try proc.run()
         process = proc

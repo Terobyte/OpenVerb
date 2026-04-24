@@ -311,6 +311,7 @@ final class AudioPipeline {
                 return .failed
 
             case .partialResult(let text, let chunkId, let isFinal):
+                pipelineLogger.info("AudioPipeline: partial_result chunk=\(chunkId) isFinal=\(isFinal) textLen=\(text.count)")
                 engineClient.onPartialResult?(text, chunkId, isFinal)
                 return .keepGoing
 
@@ -451,7 +452,13 @@ final class AudioPipeline {
             }
 
         } catch {
-            pipelineLogger.error("AudioPipeline streamLive error: \(error)")
+            let detail: String
+            if let ec = error as? EngineClientError {
+                detail = ec.description
+            } else {
+                detail = String(describing: error)
+            }
+            pipelineLogger.error("AudioPipeline streamLive error: \(detail)")
             // Attempt crash recovery and report error to AppDelegate.
             do {
                 try await engineManager.handleCrash()

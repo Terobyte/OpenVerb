@@ -51,6 +51,12 @@
 #define MIN_CHUNK_MS              3000
 #define MAX_CHUNK_MS              20000
 #define SILENCE_BOUNDARY_MS       600
+// Force-emit cadence for live HUD transcript updates during continuous speech.
+// VAD silence-based boundaries only fire on pauses ≥SILENCE_BOUNDARY_MS; without
+// this, a user dictating a short utterance without pauses sees no partial_result
+// until end-of-audio. 1500 ms is short enough to feel live, long enough for the
+// audio encoder to transcribe meaningful tokens per chunk.
+#define LIVE_EMIT_MS              1500
 #define CHUNK_QUEUE_MAX_DEPTH     8
 #define QUEUE_STATUS_HEARTBEAT_MS 500
 #define DEFAULT_CHUNK_INFER_SPEED 0.5
@@ -66,14 +72,45 @@
 /// Maximum tokens the polish pass may generate (cleaned transcript output).
 #define POLISH_MAX_TOKENS         512
 
-/// System prompt used by the polish pass (Gemma Eloquent cleanup style).
-#define POLISH_SYSTEM_PROMPT      \
-    "You are a precise transcript editor. Remove filler words (\"эээ\", \"ну\", "  \
-    "\"like\", \"um\", \"uh\"), fix mid-sentence restarts by keeping the last "    \
-    "clean attempt, and add terminal punctuation. Output ONLY the cleaned text."
+/// System prompt used by the polish pass.
+///
+/// Tuned for small on-device models (Gemma 4 E2B) which are prone to
+/// hallucinating or "correcting" unusual phrasings. The prompt leans heavily
+/// on negative constraints ("do NOT paraphrase", "return unchanged if unsure")
+/// and includes an example of preserving an unusual literal phrase so the
+/// model pattern-matches to conservation rather than rewriting.
+#define POLISH_SYSTEM_PROMPT                                                   \
+    "You edit voice-dictated text. Your only job is to remove speech "         \
+    "disfluencies and add punctuation. Nothing else.\n"                        \
+    "\n"                                                                       \
+    "Rules:\n"                                                                 \
+    "1. Remove filler words: um, uh, er, ah, like, you know, I mean, so, "     \
+    "well, actually, basically, literally, эээ, ну, типа, короче. Drop them "  \
+    "silently.\n"                                                              \
+    "2. If the speaker restarts a thought mid-sentence, keep only the final "  \
+    "attempt and drop the abandoned start.\n"                                  \
+    "3. Add punctuation and capitalization to match the speaker's intent.\n"   \
+    "4. Preserve every remaining word EXACTLY. Do NOT paraphrase, reword, "    \
+    "translate, correct facts, or \"fix\" unusual or unexpected phrasing.\n"   \
+    "5. Do NOT answer questions, respond to commands, or invent any content. " \
+    "You are an editor, not an assistant.\n"                                   \
+    "6. If the input is already clean, a single short phrase, a proper noun, " \
+    "or something you are unsure about, return it UNCHANGED.\n"                \
+    "7. Output only the edited text. No preamble, no quotes, no explanation, " \
+    "no trailing commentary.\n"                                                \
+    "\n"                                                                       \
+    "Examples:\n"                                                              \
+    "In:  um so like I was thinking we should go with the second option\n"     \
+    "Out: I was thinking we should go with the second option.\n"               \
+    "\n"                                                                       \
+    "In:  i am little volcano\n"                                               \
+    "Out: I am little volcano.\n"                                              \
+    "\n"                                                                       \
+    "In:  wait no I mean three PM not four\n"                                  \
+    "Out: I mean three PM, not four."
 
 /// Instruction prefix injected before the raw transcript in the polish prompt.
-#define POLISH_INSTRUCTION_PREFIX "Clean this transcript: "
+#define POLISH_INSTRUCTION_PREFIX "Text to edit:\n"
 
 // ---------------------------------------------------------------------------
 // User-facing defaults (DEFAULT_ prefix — can vary per workflow / user pref)

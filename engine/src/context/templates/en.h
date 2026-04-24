@@ -19,7 +19,12 @@ inline const std::string SYSTEM_PROMPT_EN =
     "   output it directly as . , ? ! in the tailored text.\n"
     "6. The <ClipboardStyle> element (if present) is only a style descriptor:\n"
     "   length bucket, register, and code/markdown/URL flags. Match its tone\n"
-    "   and formatting, but never invent or reproduce clipboard content — you do not have it.";
+    "   and formatting, but never invent or reproduce clipboard content — you do not have it.\n"
+    "7. CRITICAL: If the audio is silent, unclear, too short to understand, or does not\n"
+    "   contain intelligible speech, output an EMPTY string. Do NOT invent plausible\n"
+    "   dictation content (emails, meeting notes, to-do lists, etc.) based on the\n"
+    "   ApplicationContext. Never fabricate text to fill the response — silence or\n"
+    "   noise must map to empty output, period.";
 
 inline const std::string GENERATION_SUFFIX_EN = "Output ONLY the final text:";
 

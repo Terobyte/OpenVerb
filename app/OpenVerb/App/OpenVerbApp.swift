@@ -292,10 +292,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         engineManager.engineClient.onPartialResult = { [weak self] text, chunkId, _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                guard self.appState.state == .inferring || self.appState.state == .recording else { return }
-                guard chunkId != self.lastSeenPartialChunkId else { return }
+                let state = self.appState.state
+                guard state == .inferring || state == .recording else {
+                    logger.info("onPartialResult dropped: state=\(String(describing: state)) chunk=\(chunkId) len=\(text.count)")
+                    return
+                }
+                guard chunkId != self.lastSeenPartialChunkId else {
+                    logger.info("onPartialResult dedup: chunk=\(chunkId)")
+                    return
+                }
                 self.lastSeenPartialChunkId = chunkId
                 self.appState.livePartialText += text
+                logger.info("onPartialResult applied: chunk=\(chunkId) appendLen=\(text.count) totalLen=\(self.appState.livePartialText.count)")
             }
         }
 

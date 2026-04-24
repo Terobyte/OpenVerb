@@ -200,16 +200,25 @@ InferenceResult Engine::process_stream(
 std::string Engine::polish_text(const std::string& raw, const Context& ctx) {
     if (raw.empty()) return raw;
 
-    // Build the polish prompt: system instruction + optional context snippet
-    // + raw transcript.
+    // Build the polish prompt: system instruction + optional surrounding-text
+    // snippets (before / after cursor) + raw transcript.
+    //
+    // The before/after excerpts give the model visibility into the surrounding
+    // document so capitalization, punctuation, and tone match. Each side is
+    // capped at EXCERPT_BYTES to keep the prompt within POLISH_CONTEXT_TOKENS.
     std::string prompt = POLISH_SYSTEM_PROMPT "\n";
+    const std::size_t EXCERPT_BYTES = 200;
     if (!ctx.text_before_cursor.empty()) {
-        // Append a short excerpt of the surrounding text for context.
-        const std::size_t EXCERPT_BYTES = 200;
-        std::string excerpt = ctx.text_before_cursor.size() > EXCERPT_BYTES
+        std::string before = ctx.text_before_cursor.size() > EXCERPT_BYTES
             ? ctx.text_before_cursor.substr(ctx.text_before_cursor.size() - EXCERPT_BYTES)
             : ctx.text_before_cursor;
-        prompt += "Context: \"" + excerpt + "\"\n";
+        prompt += "Text before cursor: \"" + before + "\"\n";
+    }
+    if (!ctx.text_after_cursor.empty()) {
+        std::string after = ctx.text_after_cursor.size() > EXCERPT_BYTES
+            ? ctx.text_after_cursor.substr(0, EXCERPT_BYTES)
+            : ctx.text_after_cursor;
+        prompt += "Text after cursor: \"" + after + "\"\n";
     }
     prompt += POLISH_INSTRUCTION_PREFIX;
     prompt += raw;

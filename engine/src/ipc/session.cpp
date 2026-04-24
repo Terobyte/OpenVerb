@@ -113,6 +113,8 @@ void Session::run_inference_worker_(int fd, Engine& engine) {
 
         // Emit partial result to the client.
         try {
+            LOG_WARN("[diag] session: emit partial_result chunk_id=%d is_final=%d text_len=%zu",
+                     chunk.id, chunk.is_final ? 1 : 0, partial.text.size());
             send_partial_result(fd, chunk.id, partial.text, chunk.is_final);
         } catch (...) {
             // Connection closed mid-stream — exit worker quietly.
