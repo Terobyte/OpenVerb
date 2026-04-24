@@ -486,13 +486,15 @@ static void send_speech_frames(int fd, int count) {
     }
 }
 
-// Skip streaming messages (progress, partial_result, queue_status) until a
-// terminal message (result, error, or unknown type) arrives.
+// Skip streaming messages (progress, partial_result, queue_status,
+// polish_started, polished_result) until a terminal message (result, error,
+// or unknown type) arrives.
 static nlohmann::json drain_to_terminal(int fd, RecvBuffer& buf, int timeout_ms = 30000) {
     while (true) {
         auto msg = recv_json(fd, buf, timeout_ms);
         auto t = msg.value("type", "");
-        if (t == "progress" || t == "partial_result" || t == "queue_status") {
+        if (t == "progress" || t == "partial_result" || t == "queue_status" ||
+            t == "polish_started" || t == "polished_result") {
             continue;
         }
         return msg;
@@ -856,16 +858,20 @@ static void send_silence_frames(int fd, int count) {
 }
 
 // ---------------------------------------------------------------------------
-// Test: streaming pipeline emits ≥2 partial_result messages in monotonic
-//       chunk_id order and the final result text equals their concatenation.
+// Test: streaming pipeline emits partial_result messages in monotonic chunk_id
+//       order, and the last one carries is_final=true.
 //
 // Audio pattern:
-//   100 speech frames (3 000 ms = MIN_CHUNK_MS) + 20 silence frames (600 ms =
-//   SILENCE_BOUNDARY_MS) → VadScanner emits chunk 0 (is_final=false).
-//   100 more speech frames + sentinel → flush() emits chunk 1 (is_final=true).
+//   100 speech frames (3 000 ms ≥ MIN_CHUNK_MS) + 20 silence frames
+//   (600 ms = SILENCE_BOUNDARY_MS) + 100 more speech frames + sentinel.
 //
-// MockBackend returns "hello world" for each process_stream call, so the
-// final result text should be "hello worldhello world" (no separator).
+// The number of chunks actually emitted depends on WebRTC VAD aggressiveness
+// (mode 1 in DEFAULTS); the contract here is ordering + final-flag, not an
+// exact chunk count.
+//
+// NOTE: the final result text is NOT the concatenation of partial texts — that
+// invariant was replaced by the FinalInferenceRunsOnFullBuffer test, which
+// verifies the sentinel handler runs one coherent inference on the full audio.
 // ---------------------------------------------------------------------------
 TEST_F(StreamingSessionTest, StreamingPartialResultsMonotonicChunkIds) {
     openverb::SessionConfig cfg{15, 30, 30, 4096};
@@ -881,8 +887,6 @@ TEST_F(StreamingSessionTest, StreamingPartialResultsMonotonicChunkIds) {
     ASSERT_EQ(ready.value("type", ""), "session.ready")
         << "session did not become ready: " << ready.dump();
 
-    // Pattern: 3 s speech + 600 ms silence → chunk 0 emitted by VadScanner.
-    //          3 s more speech + sentinel → chunk 1 flushed as is_final.
     send_speech_frames(a, 100);   // 100 × 30 ms = 3 000 ms ≥ MIN_CHUNK_MS
     send_silence_frames(a, 20);   // 20  × 30 ms =   600 ms = SILENCE_BOUNDARY_MS
     send_speech_frames(a, 100);   // second utterance
@@ -900,12 +904,11 @@ TEST_F(StreamingSessionTest, StreamingPartialResultsMonotonicChunkIds) {
             terminal = msg;
             break;
         }
-        // skip progress / queue_status
+        // skip progress / queue_status / polish_started / polished_result
     }
 
-    // ≥2 partial_result messages required (one per chunk).
-    ASSERT_GE(partials.size(), 2u)
-        << "Expected ≥2 partial_result messages, got " << partials.size();
+    ASSERT_GE(partials.size(), 1u)
+        << "Expected ≥1 partial_result message, got " << partials.size();
 
     // chunk_id must be strictly monotonically increasing.
     for (size_t i = 1; i < partials.size(); ++i) {
@@ -923,13 +926,121 @@ TEST_F(StreamingSessionTest, StreamingPartialResultsMonotonicChunkIds) {
     // Final terminal message must be a result.
     ASSERT_EQ(terminal.value("type", ""), "result");
 
-    // Final result text = concatenation of all partial texts.
-    std::string expected;
-    for (const auto& p : partials) {
-        expected += p.value("text", "");
+    send_json(a, nlohmann::json{{"type", "session.shutdown"}});
+    session_thread.join();
+}
+
+// ---------------------------------------------------------------------------
+// CountingBackend — like MockBackend but tracks every process_stream() call
+// and returns a distinct text per call (`stream-N`) so callers can tell which
+// call produced the final result.  Used by FinalInferenceRunsOnFullBuffer.
+// ---------------------------------------------------------------------------
+class CountingBackend : public Backend {
+public:
+    std::atomic<int>    call_count{0};
+    std::mutex          log_mu;
+    std::vector<size_t> pcm_sizes;  // guarded by log_mu
+
+    InferenceResult process(
+        const std::vector<int16_t>&, int, const std::string&,
+        std::function<void(float)>) override
+    {
+        return InferenceResult{};
     }
+
+    void unload_model() override {}
+
+    InferenceResult process_stream(
+        const std::vector<int16_t>& pcm, int,
+        const std::string&, const std::atomic<bool>&,
+        ProgressQueue& progress_queue) override
+    {
+        int idx = call_count.fetch_add(1, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> lk(log_mu);
+            pcm_sizes.push_back(pcm.size());
+        }
+        progress_queue.push(1.0f);
+        return InferenceResult{std::string("stream-") + std::to_string(idx), "", 10};
+    }
+
+    std::string name() const override { return "counting"; }
+};
+
+// ---------------------------------------------------------------------------
+// Test: the FINAL result text comes from ONE coherent inference on the full
+//       PCM buffer, not from concatenation of per-chunk worker inferences.
+//
+// Why this matters: per-chunk inference cuts audio at silence boundaries that
+// don't align with word boundaries.  The model hallucinates plausible completions
+// for partial tokens on each edge, and concatenating those outputs produces
+// garbage text.  The correct behaviour is: worker emits partials for the HUD
+// only; the sentinel handler re-infers the full buffer once to produce the
+// final transcript.
+// ---------------------------------------------------------------------------
+TEST_F(StreamingSessionTest, FinalInferenceRunsOnFullBuffer) {
+    auto backend_owner = std::make_unique<CountingBackend>();
+    CountingBackend* backend = backend_owner.get();
+    openverb::Engine counting_engine(Config{}, std::move(backend_owner));
+
+    openverb::SessionConfig cfg{15, 30, 30, 4096};
+
+    std::thread session_thread([this, &cfg, &counting_engine]() {
+        openverb::Session::handle_connection(b, counting_engine, cfg);
+    });
+
+    RecvBuffer buf{};
+    send_json(a, nlohmann::json{{"type", "session.start"}});
+    auto ready = recv_json(a, buf, 3000);
+    ASSERT_EQ(ready.value("type", ""), "session.ready")
+        << "session did not become ready: " << ready.dump();
+
+    // 100 speech frames × 480 samples = 48000 samples total.  Enough to clear
+    // MIN_CHUNK_MS so flush() emits one is_final chunk on the sentinel.
+    send_speech_frames(a, 100);
+    write_sentinel(a);
+
+    // Drain streaming messages (progress, partial_result, queue_status,
+    // polish_started, polished_result) until the terminal `result` arrives.
+    nlohmann::json terminal;
+    while (true) {
+        auto msg = recv_json(a, buf, 30000);
+        auto t = msg.value("type", "");
+        if (t == "result" || t == "error") { terminal = msg; break; }
+    }
+    ASSERT_EQ(terminal.value("type", ""), "result") << terminal.dump();
+
+    // Sanity: ≥2 process_stream calls total — at least one from the worker
+    // (per-chunk) and one from the sentinel handler (full buffer).
+    const int calls = backend->call_count.load(std::memory_order_relaxed);
+    EXPECT_GE(calls, 2)
+        << "expected ≥2 process_stream calls (worker chunk + sentinel full-buffer), "
+        << "got " << calls << " — sentinel is not running a final full-buffer inference";
+
+    // The final full-buffer call must have been the last one, and it must have
+    // received all 48000 samples.  The worker's chunk calls receive fewer
+    // samples per call (bounded by the VAD chunk).
+    size_t last_size = 0;
+    size_t max_size  = 0;
+    {
+        std::lock_guard<std::mutex> lk(backend->log_mu);
+        ASSERT_FALSE(backend->pcm_sizes.empty());
+        last_size = backend->pcm_sizes.back();
+        for (auto s : backend->pcm_sizes) if (s > max_size) max_size = s;
+    }
+    EXPECT_EQ(last_size, 48000u)
+        << "last process_stream call must receive the full 48000-sample buffer "
+           "(got " << last_size << ")";
+    EXPECT_EQ(max_size, 48000u)
+        << "full-buffer call must be the largest (got max=" << max_size << ")";
+
+    // The final text must be whatever the LAST (full-buffer) call returned,
+    // not the worker's accumulated per-chunk text.  CountingBackend returns
+    // "stream-N" where N is the zero-based call index; the last call's index
+    // is (calls - 1).
+    std::string expected = "stream-" + std::to_string(calls - 1);
     EXPECT_EQ(terminal.value("text", ""), expected)
-        << "Final result text must equal concatenation of all partial chunk texts";
+        << "final result must come from the full-buffer inference, not the worker's accumulated chunks";
 
     send_json(a, nlohmann::json{{"type", "session.shutdown"}});
     session_thread.join();

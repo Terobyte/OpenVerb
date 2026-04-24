@@ -50,21 +50,35 @@ void VadScanner::push_frame(const int16_t* samples, int num_samples) {
             // to continue consuming pending_ safely.
             if (!lk.owns_lock()) lk.lock();
         } else if (in_speech_ && silence_ms_ >= SILENCE_BOUNDARY_MS) {
-            if (buffer_ms_ - silence_ms_ >= MIN_CHUNK_MS) {
+            // Close out the utterance at the silence boundary.  The pre-
+            // force-emit code required buffer_ms_-silence_ms_ >= MIN_CHUNK_MS
+            // here to suppress sub-second emissions, but with force-emit
+            // running at LIVE_EMIT_MS the tail segment since the last emit
+            // is always short — emitting it unconditionally at the boundary
+            // is correct, and leaving in_speech_=true would cause the flush
+            // path to emit silence-laden audio on session end.
+            if (buffer_ms_ - silence_ms_ > 0) {
                 maybe_emit_chunk(false, lk);
                 if (!lk.owns_lock()) lk.lock();
-                in_speech_ = false;  // utterance ended at silence boundary; don't accumulate trailing silence
             }
+            in_speech_ = false;  // utterance ended at silence boundary; don't accumulate trailing silence
+        } else if (in_speech_ && silence_ms_ == 0 && buffer_ms_ >= LIVE_EMIT_MS) {
+            // Force-emit a live partial for the HUD every LIVE_EMIT_MS of
+            // continuous speech.  Previously this corrupted the final
+            // transcript because session.cpp concatenated per-chunk
+            // inferences; session.cpp now runs ONE coherent inference on
+            // the full PCM at end-of-audio, so these partials are
+            // HUD-only and safe.
+            //
+            // Guard silence_ms_ == 0 — only emit while VAD is actively
+            // classifying the current frame as speech.  Without this the
+            // check fires mid-pause, trailing silence leaks into the
+            // final force-emit chunk, and Gemma hallucinates on the
+            // silent tail.  in_speech_ stays true — the utterance
+            // continues and later emits cover the tail audio.
+            maybe_emit_chunk(false, lk);
+            if (!lk.owns_lock()) lk.lock();
         }
-        // NOTE: force-emit at LIVE_EMIT_MS was tried and reverted. Each chunk
-        // emitted here goes through its own independent Gemma inference and
-        // the outputs are concatenated into `accumulated` in session.cpp
-        // run_inference_worker_. Mid-utterance cuts produce partial-word
-        // tokens from the audio encoder, which Gemma then hallucinates into
-        // plausible-but-wrong text. The concatenated final transcript is
-        // garbage. Real streaming transcription requires sliding-window
-        // inference or full-buffer re-inference at end-of-audio; until that
-        // architectural change lands, transcription is single-shot at flush().
     }
 
     // Retain the leftover tail (< 30 ms) for the next push_frame.

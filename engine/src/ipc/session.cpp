@@ -278,6 +278,8 @@ void Session::run(int fd, Engine& engine, const SessionConfig& cfg) {
                 stop_requested_.store(false, std::memory_order_relaxed);
                 inference_result_.reset();
                 progress_queue_.drain();
+                // Fresh session: drop any PCM carried over from a previous run.
+                full_pcm_buffer_.clear();
                 // VadScanner with callback that pushes completed chunks to the queue.
                 chunker_.emplace([this](Chunk c) {
                     if (pipeline_active_.load(std::memory_order_acquire)) {
@@ -316,24 +318,52 @@ void Session::run(int fd, Engine& engine, const SessionConfig& cfg) {
                     chunk_queue_.shutdown();
                     if (worker_thread_.joinable()) worker_thread_.join();
 
-                    // Read accumulated result from worker.
-                    std::optional<InferenceResult> result;
+                    // Worker's per-chunk accumulated text is used only as a
+                    // speech-detected gate: if the worker produced nothing,
+                    // VAD saw no speech (or connection dropped) and the
+                    // full-buffer re-inference below is skipped.  The final
+                    // transcript itself comes from that re-inference, not
+                    // from the worker's per-chunk concatenation (which
+                    // hallucinates completions on each mid-word boundary).
+                    std::optional<InferenceResult> worker_result;
                     {
                         std::lock_guard<std::mutex> lk(infer_mutex_);
-                        result = std::move(inference_result_);
+                        worker_result = std::move(inference_result_);
                     }
+                    const bool worker_had_text =
+                        worker_result && !worker_result->text.empty();
                     chunker_.reset();
                     // #27: clear stale binary bytes before returning to JSON mode.
                     buf.accumulated.clear();
 
-                    if (!result || result->text.empty()) {
+                    // Run one coherent inference on the full PCM buffer.  Skip
+                    // when no audio was captured (empty session), when VAD
+                    // didn't detect speech (worker produced no text), or when
+                    // the connection/abort flag tells us to bail.
+                    std::string raw_text;
+                    if (worker_had_text &&
+                        !full_pcm_buffer_.empty() &&
+                        connection_alive &&
+                        !stop_requested_.load(std::memory_order_relaxed)) {
+                        try {
+                            InferenceResult final_result = engine.process_stream(
+                                full_pcm_buffer_, SAMPLE_RATE, context_,
+                                stop_requested_, progress_queue_);
+                            raw_text = std::move(final_result.text);
+                        } catch (const std::exception& e) {
+                            LOG_WARN("session: final full-buffer inference error: %s", e.what());
+                        } catch (...) {
+                            LOG_WARN("session: final full-buffer inference non-std exception");
+                        }
+                    }
+                    full_pcm_buffer_.clear();
+
+                    if (raw_text.empty()) {
                         send_json(fd, nlohmann::json{
                             {"type", "result"}, {"text", ""}, {"command", nullptr}
                         });
                     } else {
-                        // --- Polish pass: LLM cleanup of the accumulated transcript ---
-                        // Parse the session context JSON into a typed Context so
-                        // polish_text() can embed surrounding text in its prompt.
+                        // --- Polish pass: LLM cleanup of the final transcript ---
                         openverb::Context ctx;
                         try {
                             ctx = openverb::Context::from_json(context_);
@@ -341,12 +371,12 @@ void Session::run(int fd, Engine& engine, const SessionConfig& cfg) {
                             // Malformed context — proceed without surrounding text.
                         }
 
-                        std::string final_text = result->text;
+                        std::string final_text = raw_text;
                         if (connection_alive &&
                             !stop_requested_.load(std::memory_order_relaxed)) {
                             try {
                                 send_polish_started(fd);
-                                final_text = engine.polish_text(result->text, ctx);
+                                final_text = engine.polish_text(raw_text, ctx);
                                 send_polished_result(fd, final_text);
                             } catch (...) {
                                 // Polish failure is non-fatal; send the raw transcript.
@@ -381,6 +411,10 @@ void Session::run(int fd, Engine& engine, const SessionConfig& cfg) {
                     std::memcpy(samples_buf.data(), frame.data(), n_bytes);
                     int n_samples = static_cast<int>(samples_buf.size());
                     chunker_->push_frame(samples_buf.data(), n_samples);
+                    // Accumulate full-session PCM for the final coherent inference
+                    // run by the sentinel handler (see end-of-audio branch below).
+                    full_pcm_buffer_.insert(full_pcm_buffer_.end(),
+                                            samples_buf.begin(), samples_buf.end());
                 }
 
             } catch (const ConnectionClosed&) {

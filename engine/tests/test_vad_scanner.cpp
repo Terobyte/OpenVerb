@@ -46,15 +46,29 @@ TEST(VadScannerTest, NoSpeechProducesNoChunks) {
     EXPECT_TRUE(capture.chunks.empty());
 }
 
-TEST(VadScannerTest, ContinuousSpeechProducesSingleChunkAtMaxChunkMs) {
+// With force-emit at LIVE_EMIT_MS (1500 ms), continuous speech splits into many
+// live partial chunks — one every LIVE_EMIT_MS — instead of a single chunk at
+// MAX_CHUNK_MS.  The total duration across all chunks must still cover the
+// entire audio; MAX_CHUNK_MS now only acts as a backstop for pathological
+// never-splits cases (VAD constantly firing without ever triggering a live or
+// silence boundary, which cannot happen while LIVE_EMIT_MS < MAX_CHUNK_MS).
+TEST(VadScannerTest, ContinuousSpeechSplitsIntoLivePartials) {
     VadScannerCallbackCapture capture;
     VadScanner scanner([&](Chunk c) { capture(c); }, 0);
 
     auto speech = speech_samples(MAX_CHUNK_MS + 1000);
     feed_frames(scanner, speech);
 
-    ASSERT_GE(capture.chunks.size(), 1u);
-    EXPECT_GE(capture.chunks[0].duration_ms, MAX_CHUNK_MS);
+    ASSERT_GE(capture.chunks.size(), 5u)
+        << "continuous speech must produce many live partials, not one fat chunk";
+    int total_ms = 0;
+    for (const auto& c : capture.chunks) {
+        total_ms += c.duration_ms;
+        EXPECT_LE(c.duration_ms, LIVE_EMIT_MS + 150)
+            << "each chunk must be bounded by LIVE_EMIT_MS (got " << c.duration_ms << ")";
+    }
+    EXPECT_GE(total_ms, MAX_CHUNK_MS)
+        << "total audio across chunks must cover the input (got " << total_ms << " ms)";
 }
 
 TEST(VadScannerTest, SilenceBoundarySplitsIntoTwoChunks) {
@@ -75,11 +89,16 @@ TEST(VadScannerTest, SilenceBoundarySplitsIntoTwoChunks) {
     ASSERT_GE(capture.chunks.size(), 2u);
 }
 
-// After a silence-boundary emit, trailing silence must not become a second
+// After a silence-boundary emit, trailing silence must not become an extra
 // (silence-only) final chunk — flush's peak gate drops all-zero buffers.
 // Regression protection: Gemma hallucinates arbitrary text when handed a
 // silent buffer, so the gate is also a UX safeguard.
-TEST(VadScannerTest, SpeechThenLongSilenceThenFlushProducesExactlyOneChunk) {
+//
+// Note: the initial speech is MIN_CHUNK_MS+1000 = 4000 ms, which with force-
+// emit at LIVE_EMIT_MS (1500 ms) produces ≥2 live partials before the silence
+// boundary.  What matters here is that after flush() the chunk count does NOT
+// grow — the trailing silence is rejected by the peak gate.
+TEST(VadScannerTest, SpeechThenLongSilenceThenFlushDoesNotEmitExtraSilenceChunk) {
     VadScannerCallbackCapture capture;
     VadScanner scanner([&](Chunk c) { capture(c); }, 0);
 
@@ -89,15 +108,18 @@ TEST(VadScannerTest, SpeechThenLongSilenceThenFlushProducesExactlyOneChunk) {
     auto silence = silence_samples(SILENCE_BOUNDARY_MS + 500);
     feed_frames(scanner, silence);
 
-    ASSERT_EQ(capture.chunks.size(), 1u);
-    EXPECT_FALSE(capture.chunks[0].is_final);
+    const size_t chunks_before_flush = capture.chunks.size();
+    ASSERT_GE(chunks_before_flush, 1u) << "speech must emit at least one chunk";
+    for (const auto& c : capture.chunks) {
+        EXPECT_FALSE(c.is_final) << "pre-flush chunks must be partials";
+    }
 
     auto trailing_silence = silence_samples(1000);
     feed_frames(scanner, trailing_silence);
 
     scanner.flush();
 
-    EXPECT_EQ(capture.chunks.size(), 1u)
+    EXPECT_EQ(capture.chunks.size(), chunks_before_flush)
         << "flush() must not emit a silence-only final chunk (Gemma hallucinates on silence)";
 }
 
@@ -137,4 +159,27 @@ TEST(VadScannerTest, FinalFlushEmitsIsFinalChunkEvenIfBelowMinChunkMs) {
     ASSERT_FALSE(capture.chunks.empty());
     EXPECT_TRUE(capture.chunks.back().is_final);
     EXPECT_LT(capture.chunks.back().duration_ms, MIN_CHUNK_MS);
+}
+
+// Force-emit fires every LIVE_EMIT_MS during continuous speech to keep the
+// live HUD feeling responsive.  These chunks are partials (is_final=false)
+// and are only used for HUD display; session.cpp runs one coherent inference
+// over the full PCM buffer at end-of-audio for the FINAL transcript, so
+// mid-utterance partials no longer corrupt the final text.
+TEST(VadScannerTest, ContinuousSpeechEmitsLiveChunksAtLiveEmitMs) {
+    VadScannerCallbackCapture capture;
+    VadScanner scanner([&](Chunk c) { capture(c); }, 0);
+
+    // 4.5 s of continuous speech — no silence boundary, should see ~3 live
+    // partials at ~1500 ms each.
+    auto speech = speech_samples(LIVE_EMIT_MS * 3);
+    feed_frames(scanner, speech);
+
+    ASSERT_GE(capture.chunks.size(), 2u)
+        << "continuous speech must emit multiple live partials at LIVE_EMIT_MS cadence";
+    for (const auto& c : capture.chunks) {
+        EXPECT_FALSE(c.is_final) << "live partials must have is_final=false";
+        EXPECT_LE(c.duration_ms, LIVE_EMIT_MS + 150)
+            << "live chunks must be close to LIVE_EMIT_MS in length (got " << c.duration_ms << ")";
+    }
 }
