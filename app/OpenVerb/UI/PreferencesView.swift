@@ -2,26 +2,7 @@ import SwiftUI
 import AppKit
 
 // ---------------------------------------------------------------------------
-// PreferencesView — SwiftUI preferences panel for OpenVerb.
-//
-// Layout (TabView):
-//   General tab  — Hotkey (Change… + Reset to Default), Context, Language,
-//                  Sound & UI, Recording
-//   Backend tab  — Backend picker (calls restartWithBackend), Model directory,
-//                  Reset to Defaults
-//
-// Dependencies are injected:
-//   @ObservedObject var settings: AppSettings
-//   @ObservedObject var engineManager: EngineManager
-//
-// Window management:
-//   PreferencesWindowController.shared.open(engineManager:)
-//   — creates a standard, activatable NSWindow hosting this view.
-//   — should be called from the StatusBarItem "Preferences…" menu item.
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// PreferencesView
+// PreferencesView — warm glass preferences panel for OpenVerb.
 // ---------------------------------------------------------------------------
 
 struct PreferencesView: View {
@@ -32,180 +13,326 @@ struct PreferencesView: View {
     @ObservedObject var appState: AppState
 
     @State private var isSwitchingBackend = false
+    @State private var selectedSection: PreferenceSection = .general
+
+    private let deepGreen = Color(red: 0.102, green: 0.137, blue: 0.086)
+    private let ink = Color(red: 0.090, green: 0.129, blue: 0.075)
+    private let inkSoft = Color(red: 0.235, green: 0.318, blue: 0.216)
+    private let muted = Color(red: 0.427, green: 0.463, blue: 0.412)
+    private let moss = Color(red: 0.345, green: 0.463, blue: 0.259)
+    private let mossDark = Color(red: 0.192, green: 0.294, blue: 0.165)
+    private let amber = Color(red: 0.784, green: 0.533, blue: 0.239)
+    private let signalRed = Color(red: 0.722, green: 0.231, blue: 0.176)
 
     var body: some View {
-        TabView {
-            generalTab.tabItem { Label("General", systemImage: "gear") }
-            backendTab.tabItem { Label("Backend", systemImage: "cpu") }
+        HStack(spacing: 0) {
+            sidebar
+
+            Rectangle()
+                .fill(deepGreen.opacity(0.08))
+                .frame(width: 1)
+                .padding(.vertical, 16)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    heading
+                    selectedContent
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 16)
+            }
+            .scrollIndicators(.hidden)
         }
-        .frame(width: 450, height: 300)
-        .padding()
+        .frame(width: 680, height: 540)
+        .background(
+            LinearGradient(
+                colors: [
+                    Color.white.opacity(0.94),
+                    Color(red: 0.929, green: 0.965, blue: 0.910).opacity(0.82)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
+        .foregroundStyle(ink)
     }
 
-    // -- General tab --
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("OpenVerb")
+                .font(.system(size: 17, weight: .bold))
+                .foregroundStyle(ink)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 6)
 
-    private var generalTab: some View {
-        Form {
-            Section("Hotkey") {
+            ForEach(PreferenceSection.allCases) { section in
+                Button {
+                    selectedSection = section
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: section.symbol)
+                            .font(.system(size: 16, weight: .semibold))
+                            .frame(width: 22)
+                        Text(section.title)
+                            .font(.system(size: 13, weight: .semibold))
+                        Spacer()
+                    }
+                    .foregroundStyle(selectedSection == section ? mossDark : inkSoft)
+                    .padding(.horizontal, 10)
+                    .frame(height: 44)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(selectedSection == section ? moss.opacity(0.14) : Color.clear)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .strokeBorder(selectedSection == section ? moss.opacity(0.20) : Color.clear, lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+
+            Spacer()
+
+            EngineBadge(status: engineManager.status)
+        }
+        .padding(14)
+        .frame(width: 158)
+        .frame(maxHeight: .infinity)
+        .background(Color.white.opacity(0.18))
+    }
+
+    private var heading: some View {
+        HStack(alignment: .center) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(selectedSection.heading)
+                    .font(.system(size: 24, weight: .bold))
+                    .foregroundStyle(ink)
+                Text(selectedSection.subtitle)
+                    .font(.system(size: 12))
+                    .foregroundStyle(muted)
+            }
+
+            Spacer()
+
+            Button(role: .destructive) {
+                settings.reset()
+            } label: {
+                Image(systemName: "arrow.counterclockwise")
+                    .font(.system(size: 14, weight: .semibold))
+                    .frame(width: 32, height: 30)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(signalRed)
+            .background(signalRed.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .accessibilityLabel("Reset preferences")
+        }
+        .padding(.bottom, 2)
+    }
+
+    @ViewBuilder
+    private var selectedContent: some View {
+        switch selectedSection {
+        case .general:
+            generalSection
+        case .recording:
+            recordingSection
+        case .text:
+            textSection
+        case .backend:
+            backendSection
+        }
+    }
+
+    private var generalSection: some View {
+        VStack(spacing: 14) {
+            PreferenceGroup(title: "General") {
+                PreferenceRow(title: "Sound effects", subtitle: "Start, stop, and completion feedback.") {
+                    Toggle("", isOn: $settings.soundEffectsEnabled)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                }
+
+                PreferenceRow(title: "Clipboard context", subtitle: "Use nearby text to shape the final insert.") {
+                    Toggle("", isOn: $settings.includeClipboard)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                }
+            }
+
+            PreferenceGroup(title: "Shortcut") {
+                PreferenceRow(title: "Start or stop recording", subtitle: "Current: \(hotkeyDescription)") {
+                    ShortcutRecorderView(
+                        keyCode: $settings.hotkeyKeyCode,
+                        modifiers: Binding(
+                            get: { settings.hotkeyModifiers },
+                            set: { settings.hotkeyModifiers = $0 }
+                        )
+                    )
+                    .frame(width: 178, height: 30)
+                }
+
                 HStack {
-                    Text("Current:")
-                    Text(hotkeyDescription)
-                        .foregroundStyle(.secondary)
                     Spacer()
-                    Button("Reset to Default") {
+                    Button {
                         settings.hotkeyKeyCode = 0x31
                         settings.hotkeyModifiers = .maskAlternate
+                    } label: {
+                        Label("Reset shortcut", systemImage: "arrow.counterclockwise")
                     }
-                    .foregroundStyle(.secondary)
-                    .font(.caption)
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(mossDark)
+                    .padding(.horizontal, 11)
+                    .frame(height: 30)
+                    .background(moss.opacity(0.10))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 }
-                ShortcutRecorderView(
-                    keyCode: $settings.hotkeyKeyCode,
-                    modifiers: Binding(
-                        get: { settings.hotkeyModifiers },
-                        set: { settings.hotkeyModifiers = $0 }
-                    )
+                .padding(.top, -4)
+            }
+        }
+    }
+
+    private var recordingSection: some View {
+        PreferenceGroup(title: "Recording HUD") {
+            PreferenceRow(title: "Waveform", subtitle: "Show the compact live waveform in the recorder.") {
+                Toggle("", isOn: $settings.showWaveform)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+            }
+
+            PreferenceRow(title: "Live correction stream", subtitle: "Show draft words and polish changes inside the recorder.") {
+                Toggle("", isOn: $settings.showLiveTranscript)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+            }
+
+            PreferenceRow(title: "Max duration", subtitle: "Automatic stop for long captures.") {
+                Stepper(
+                    "\(settings.maxRecordingDuration) s",
+                    value: $settings.maxRecordingDuration,
+                    in: 1...300
                 )
-                .frame(height: 28)
+                .frame(width: 136)
             }
+        }
+    }
 
-            Section("Context") {
-                Toggle("Include clipboard in context", isOn: $settings.includeClipboard)
-            }
-
-            Section("Language") {
+    private var textSection: some View {
+        PreferenceGroup(title: "Transcription") {
+            PreferenceRow(title: "Output language", subtitle: "Language preference sent to the local engine.") {
                 Picker("Output language", selection: Binding(
                     get: { settings.language ?? "en" },
                     set: { settings.language = $0 }
                 )) {
                     if settings.backend == .whisperGemma {
-                        Text("Auto-detect (Whisper)").tag("auto")
+                        Text("Auto-detect").tag("auto")
                     }
                     Text("English").tag("en")
                     Text("Русский").tag("ru")
                     Text("Español").tag("es")
                     Text("Français").tag("fr")
                     Text("Deutsch").tag("de")
+                    Text("Italiano").tag("it")
+                    Text("Português").tag("pt")
                     Text("日本語").tag("ja")
                 }
+                .labelsHidden()
+                .frame(width: 180)
             }
 
-            Section("Sound & UI") {
-                Toggle("Sound Effects", isOn: $settings.soundEffectsEnabled)
-                Toggle("Show Waveform", isOn: $settings.showWaveform)
-            }
-
-            Section("Recording") {
-                LabeledContent("Max Duration") {
-                    Stepper(
-                        "\(settings.maxRecordingDuration) s",
-                        value: $settings.maxRecordingDuration,
-                        in: 1...300
-                    )
-                }
+            PreferenceRow(title: "Clipboard context", subtitle: "Reuse the target app selection and clipboard when available.") {
+                Toggle("", isOn: $settings.includeClipboard)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
             }
         }
     }
 
-    // -- Backend tab --
+    private var backendSection: some View {
+        let isNonEnglish = settings.language != "en"
+        let sessionActive = appState.state != .idle
 
-    private var backendTab: some View {
-        Form {
-            Section("Inference Backend") {
-                let isNonEnglish = settings.language != "en"
-
-                // Bug 25: switching backend kills the engine subprocess, so it
-                // must be blocked while a session is live.
-                let sessionActive = appState.state != .idle
-
-                Picker("Backend", selection: Binding<BackendType>(
-                    get: { settings.backend },
-                    set: { newValue in
-                        guard newValue != settings.backend else { return }
-                        guard appState.state == .idle else { return }
-                        isSwitchingBackend = true
-                        Task {
-                            // Bug 164: re-check appState.state == .idle inside
-                            // the Task body. The outer guard runs synchronously,
-                            // but a concurrent ⌥Space press can flip the state
-                            // to .preparing / .recording before this Task runs;
-                            // calling restartWithBackend() at that point would
-                            // silently kill a live recording.
-                            guard appState.state == .idle else {
+        return VStack(spacing: 14) {
+            PreferenceGroup(title: "Backend") {
+                PreferenceRow(title: "Inference backend", subtitle: sessionActive ? "Stop the current session before changing backend." : "Choose the local inference path.") {
+                    Picker("Backend", selection: Binding<BackendType>(
+                        get: { settings.backend },
+                        set: { newValue in
+                            guard newValue != settings.backend else { return }
+                            guard appState.state == .idle else { return }
+                            isSwitchingBackend = true
+                            Task {
+                                guard appState.state == .idle else {
+                                    isSwitchingBackend = false
+                                    return
+                                }
+                                settings.backend = newValue
+                                await engineManager.restartWithBackend(newValue)
                                 isSwitchingBackend = false
-                                return
                             }
-                            settings.backend = newValue
-                            await engineManager.restartWithBackend(newValue)
-                            isSwitchingBackend = false
                         }
+                    )) {
+                        Text("Gemma 4 E2B Audio").tag(BackendType.gemmaAudio)
+                        Text("Whisper + Gemma Text").tag(BackendType.whisperGemma)
                     }
-                )) {
-                    Text("Gemma 4 E2B Audio (recommended)")
-                        .tag(BackendType.gemmaAudio)
-                    Text("Whisper + Gemma Text (multilingual)")
-                        .tag(BackendType.whisperGemma)
-                }
-                .disabled(isSwitchingBackend || sessionActive)
-
-                if sessionActive {
-                    Text("Stop the current session to change the backend.")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
+                    .labelsHidden()
+                    .frame(width: 210)
+                    .disabled(isSwitchingBackend || sessionActive)
                 }
 
                 if isSwitchingBackend {
-                    HStack {
-                        ProgressView().controlSize(.small)
-                        Text("Switching backend...")
-                            .foregroundStyle(.secondary)
-                    }
+                    InlineStatus(kind: .working, text: "Switching backend...")
                 }
 
                 if isNonEnglish && settings.backend == .gemmaAudio {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Label("Path A supports English audio only.", systemImage: "exclamationmark.triangle")
-                            .foregroundStyle(.orange)
-                            .font(.caption)
-                        Button("Switch to Whisper (multilingual)") {
+                    InlineStatus(kind: .warning, text: "Gemma audio currently expects English input.")
+
+                    HStack {
+                        Spacer()
+                        Button {
                             guard appState.state == .idle else { return }
                             settings.backend = .whisperGemma
                             isSwitchingBackend = true
                             Task {
+                                guard appState.state == .idle else {
+                                    isSwitchingBackend = false
+                                    return
+                                }
                                 await engineManager.restartWithBackend(.whisperGemma)
                                 isSwitchingBackend = false
                             }
+                        } label: {
+                            Label("Use multilingual backend", systemImage: "arrow.triangle.2.circlepath")
                         }
-                        .font(.caption)
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(mossDark)
+                        .padding(.horizontal, 11)
+                        .frame(height: 30)
+                        .background(moss.opacity(0.10))
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                         .disabled(sessionActive)
                     }
                 }
             }
 
-            Section("Model") {
-                LabeledContent("Model directory") {
-                    HStack(spacing: 8) {
-                        Text(settings.modelDirectory)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .frame(maxWidth: 210, alignment: .leading)
-                        Button("Browse...") { browseModelDirectory() }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
+            PreferenceGroup(title: "Model") {
+                PreferenceRow(title: "Model directory", subtitle: settings.modelDirectory) {
+                    Button {
+                        browseModelDirectory()
+                    } label: {
+                        Label("Browse", systemImage: "folder")
                     }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(mossDark)
+                    .padding(.horizontal, 11)
+                    .frame(height: 30)
+                    .background(moss.opacity(0.10))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 }
-            }
-
-            HStack {
-                Spacer()
-                Button(role: .destructive) {
-                    settings.reset()
-                } label: {
-                    Text("Reset to Defaults")
-                }
-                .buttonStyle(.borderless)
-                .foregroundStyle(.red)
             }
         }
     }
@@ -246,12 +373,11 @@ struct PreferencesView: View {
 
     private func browseModelDirectory() {
         let panel = NSOpenPanel()
-        panel.title            = "Choose Model Directory"
-        panel.canChooseFiles        = false
-        panel.canChooseDirectories  = true
+        panel.title = "Choose Model Directory"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
-        panel.directoryURL = URL(fileURLWithPath: settings.modelDirectory,
-                                  isDirectory: true)
+        panel.directoryURL = URL(fileURLWithPath: settings.modelDirectory, isDirectory: true)
 
         if panel.runModal() == .OK, let url = panel.url {
             var path = url.path
@@ -261,32 +387,193 @@ struct PreferencesView: View {
     }
 }
 
+private enum PreferenceSection: String, CaseIterable, Identifiable {
+    case general
+    case recording
+    case text
+    case backend
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .general: return "General"
+        case .recording: return "Recording"
+        case .text: return "Text"
+        case .backend: return "Backend"
+        }
+    }
+
+    var heading: String {
+        switch self {
+        case .general: return "General"
+        case .recording: return "Recording HUD"
+        case .text: return "Transcription"
+        case .backend: return "Backend"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .general: return "Everyday controls for OpenVerb."
+        case .recording: return "The compact recorder and live correction stream."
+        case .text: return "Language and context for inserted text."
+        case .backend: return "Local engine and model settings."
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .general: return "leaf"
+        case .recording: return "waveform"
+        case .text: return "textformat"
+        case .backend: return "cpu"
+        }
+    }
+}
+
+private struct PreferenceGroup<Content: View>: View {
+    var title: String
+    @ViewBuilder var content: () -> Content
+
+    private let deepGreen = Color(red: 0.102, green: 0.137, blue: 0.086)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(title)
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(Color(red: 0.192, green: 0.294, blue: 0.165))
+                .padding(.horizontal, 16)
+                .padding(.top, 14)
+                .padding(.bottom, 8)
+
+            content()
+        }
+        .background(Color.white.opacity(0.46))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(deepGreen.opacity(0.08), lineWidth: 1)
+        )
+        .shadow(color: deepGreen.opacity(0.07), radius: 12, x: 0, y: 5)
+    }
+}
+
+private struct PreferenceRow<Control: View>: View {
+    var title: String
+    var subtitle: String
+    @ViewBuilder var control: () -> Control
+
+    private let deepGreen = Color(red: 0.102, green: 0.137, blue: 0.086)
+    private let ink = Color(red: 0.090, green: 0.129, blue: 0.075)
+    private let muted = Color(red: 0.427, green: 0.463, blue: 0.412)
+
+    var body: some View {
+        HStack(spacing: 16) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(ink)
+                Text(subtitle)
+                    .font(.system(size: 11))
+                    .foregroundStyle(muted)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+            }
+
+            Spacer(minLength: 14)
+
+            control()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 11)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(deepGreen.opacity(0.07))
+                .frame(height: 1)
+                .padding(.leading, 16)
+        }
+    }
+}
+
+private struct EngineBadge: View {
+    var status: EngineManager.EngineStatus
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Circle()
+                .fill(color)
+                .frame(width: 7, height: 7)
+                .shadow(color: color.opacity(0.55), radius: 5, x: 0, y: 0)
+            Text(label)
+                .font(.system(size: 11, weight: .bold))
+                .lineLimit(1)
+        }
+        .foregroundStyle(color)
+        .padding(.horizontal, 10)
+        .frame(height: 28)
+        .background(color.opacity(0.10))
+        .clipShape(Capsule())
+    }
+
+    private var label: String {
+        switch status {
+        case .running: return "Engine ready"
+        case .starting: return "Engine warming"
+        case .stopped: return "Engine stopped"
+        case .error: return "Engine error"
+        }
+    }
+
+    private var color: Color {
+        switch status {
+        case .running: return Color(red: 0.192, green: 0.294, blue: 0.165)
+        case .starting: return Color(red: 0.784, green: 0.533, blue: 0.239)
+        case .stopped: return Color(red: 0.427, green: 0.463, blue: 0.412)
+        case .error: return Color(red: 0.722, green: 0.231, blue: 0.176)
+        }
+    }
+}
+
+private struct InlineStatus: View {
+    enum Kind {
+        case warning
+        case working
+    }
+
+    var kind: Kind
+    var text: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if kind == .working {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            Text(text)
+                .font(.system(size: 12, weight: .semibold))
+            Spacer()
+        }
+        .foregroundStyle(kind == .working ? Color(red: 0.192, green: 0.294, blue: 0.165) : Color(red: 0.784, green: 0.533, blue: 0.239))
+        .padding(.horizontal, 16)
+        .padding(.vertical, 9)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // PreferencesWindowController — manages the Preferences NSWindow lifetime.
 //
 // Usage (from StatusBarItem menu action):
 //   PreferencesWindowController.shared.open(engineManager: engineManager)
-//
-// Design:
-//   • Regular activating NSWindow (not nonactivatingPanel) so the user can
-//     type in text fields.
-//   • .titled + .closable + .miniaturizable matches standard macOS prefs style.
-//   • Window is kept in memory after close and re-shown on repeated open()
-//     calls (standard macOS behaviour).
 // ---------------------------------------------------------------------------
 
 @MainActor
 final class PreferencesWindowController: NSObject, NSWindowDelegate {
 
-    // -----------------------------------------------------------------------
-    // Singleton
-    // -----------------------------------------------------------------------
-
     static let shared = PreferencesWindowController()
-
-    // -----------------------------------------------------------------------
-    // Private — window reference
-    // -----------------------------------------------------------------------
 
     private var window: NSWindow?
     private weak var engineManager: EngineManager?
@@ -294,20 +581,13 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
     /// state and gate the backend picker accordingly.
     private weak var appState: AppState?
 
-    // -----------------------------------------------------------------------
-    // open — bring the preferences window to front, creating it if needed.
-    // -----------------------------------------------------------------------
-
     func open(engineManager: EngineManager? = nil, appState: AppState) {
         if let em = engineManager { self.engineManager = em }
         self.appState = appState
         if window == nil {
             // Bug 24: do NOT fall back to `EngineManager()`. A fresh instance
             // registers duplicate sleep/wake observers and any backend restart
-            // it performs targets a phantom subprocess — the real engine
-            // managed by AppDelegate never sees the call. In DEBUG, crash
-            // loudly so the regression is caught; in RELEASE, refuse to open
-            // the window rather than silently corrupting engine state.
+            // it performs targets a phantom subprocess.
             guard let em = self.engineManager else {
                 assertionFailure("PreferencesWindowController.open() called without a live EngineManager")
                 return
@@ -318,8 +598,8 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
                     engineManager: em,
                     appState: appState))
             let win = NSWindow(contentViewController: hosting)
-            win.title           = "OpenVerb Preferences"
-            win.styleMask       = [.titled, .closable, .miniaturizable]
+            win.title = "OpenVerb Preferences"
+            win.styleMask = [.titled, .closable, .miniaturizable]
             win.isReleasedWhenClosed = false
             win.center()
             win.delegate = self
@@ -332,12 +612,7 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
         win.makeKeyAndOrderFront(nil)
     }
 
-    // -----------------------------------------------------------------------
-    // NSWindowDelegate — remove reference when window is closed via the × button.
-    // -----------------------------------------------------------------------
-
     func windowWillClose(_ notification: Notification) {
-        // Keep the window in memory so re-opening is instant (no re-create).
-        // Nothing to do; isReleasedWhenClosed = false handles lifetime.
+        // Keep the window in memory so re-opening is instant.
     }
 }

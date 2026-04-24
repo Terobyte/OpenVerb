@@ -1,0 +1,1795 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenVerb redesign mock</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #172113;
+      --ink-soft: #3c5137;
+      --muted: #6d7669;
+      --paper: rgba(251, 250, 244, 0.78);
+      --paper-strong: rgba(255, 255, 251, 0.9);
+      --line: rgba(48, 63, 43, 0.14);
+      --line-strong: rgba(48, 63, 43, 0.24);
+      --moss: #587642;
+      --moss-dark: #314b2a;
+      --sage: #dce9d5;
+      --red: #ef5a46;
+      --red-dark: #b83b2d;
+      --amber: #c8883d;
+      --blue: #5d718d;
+      --shadow: rgba(29, 41, 25, 0.2);
+      --radius-window: 22px;
+      --radius-control: 8px;
+      --font: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      min-height: 100%;
+    }
+
+    body {
+      margin: 0;
+      font-family: var(--font);
+      color: var(--ink);
+      background:
+        linear-gradient(135deg, #f3eee3 0%, #eef4eb 33%, #f7efe4 66%, #e9eef4 100%);
+      overflow-x: hidden;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image:
+        repeating-linear-gradient(90deg, rgba(26, 35, 22, 0.035) 0 1px, transparent 1px 92px),
+        repeating-linear-gradient(0deg, rgba(26, 35, 22, 0.025) 0 1px, transparent 1px 92px);
+      mask-image: linear-gradient(to bottom, transparent 0%, #000 18%, #000 82%, transparent 100%);
+    }
+
+    button,
+    select {
+      font: inherit;
+    }
+
+    button {
+      border: 0;
+      cursor: pointer;
+    }
+
+    .mock-shell {
+      min-height: 100vh;
+      padding: 28px;
+      display: grid;
+      grid-template-columns: minmax(680px, 1fr) 444px;
+      gap: 28px;
+      align-items: center;
+    }
+
+    .stage {
+      position: relative;
+      min-height: 700px;
+      height: calc(100vh - 56px);
+      max-height: 840px;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.58);
+      border-radius: 28px;
+      background:
+        linear-gradient(160deg, rgba(255, 255, 252, 0.54), rgba(234, 241, 229, 0.58)),
+        linear-gradient(20deg, rgba(239, 90, 70, 0.09), transparent 38%, rgba(93, 113, 141, 0.08));
+      box-shadow:
+        0 34px 70px rgba(44, 58, 38, 0.18),
+        inset 0 1px 0 rgba(255, 255, 255, 0.84);
+      backdrop-filter: blur(22px) saturate(1.15);
+    }
+
+    .desktop-grid {
+      position: absolute;
+      inset: 0;
+      opacity: 0.8;
+      background:
+        linear-gradient(90deg, transparent 0 47%, rgba(255, 255, 255, 0.24) 47% 53%, transparent 53% 100%),
+        linear-gradient(0deg, rgba(48, 63, 43, 0.06), transparent 48%);
+    }
+
+    .menu-strip {
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 0;
+      height: 34px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 20px;
+      font-size: 12px;
+      color: rgba(23, 33, 19, 0.55);
+      background: rgba(255, 255, 255, 0.28);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.34);
+    }
+
+    .menu-left,
+    .menu-right {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      white-space: nowrap;
+    }
+
+    .menu-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--red);
+      box-shadow: 0 0 0 4px rgba(239, 90, 70, 0.12), 0 0 14px rgba(239, 90, 70, 0.7);
+      animation: glow 1.2s ease-in-out infinite alternate;
+    }
+
+    [data-state="warming"] .menu-dot {
+      background: var(--amber);
+      box-shadow: 0 0 0 4px rgba(200, 136, 61, 0.12), 0 0 14px rgba(200, 136, 61, 0.72);
+    }
+
+    .target-app {
+      position: absolute;
+      left: 54px;
+      top: 82px;
+      width: min(670px, calc(100% - 108px));
+      height: 414px;
+      border-radius: 18px;
+      border: 1px solid rgba(255, 255, 255, 0.7);
+      background: rgba(249, 251, 246, 0.64);
+      box-shadow:
+        0 26px 58px rgba(35, 47, 30, 0.16),
+        inset 0 1px 0 rgba(255, 255, 255, 0.8);
+      backdrop-filter: blur(18px) saturate(1.16);
+      overflow: hidden;
+    }
+
+    .traffic {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .traffic span {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      box-shadow: inset 0 0 0 1px rgba(23, 33, 19, 0.12);
+    }
+
+    .traffic span:nth-child(1) {
+      background: #ff6a57;
+    }
+
+    .traffic span:nth-child(2) {
+      background: #f6bd45;
+    }
+
+    .traffic span:nth-child(3) {
+      background: #57c96e;
+    }
+
+    .target-titlebar {
+      height: 48px;
+      display: grid;
+      grid-template-columns: 96px 1fr 112px;
+      align-items: center;
+      padding: 0 16px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .target-title {
+      justify-self: center;
+      color: var(--ink-soft);
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .target-action {
+      justify-self: end;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: rgba(23, 33, 19, 0.52);
+      font-size: 12px;
+    }
+
+    .target-body {
+      height: calc(100% - 48px);
+      display: grid;
+      grid-template-columns: 170px 1fr;
+    }
+
+    .target-sidebar {
+      padding: 20px 14px;
+      border-right: 1px solid var(--line);
+      background: rgba(248, 250, 244, 0.34);
+    }
+
+    .side-line {
+      height: 9px;
+      border-radius: 999px;
+      background: rgba(49, 75, 42, 0.16);
+      margin-bottom: 14px;
+    }
+
+    .side-line:nth-child(2) {
+      width: 68%;
+    }
+
+    .side-line:nth-child(3) {
+      width: 84%;
+    }
+
+    .side-line:nth-child(4) {
+      width: 56%;
+    }
+
+    .side-card {
+      margin-top: 26px;
+      border-radius: var(--radius-control);
+      height: 98px;
+      background:
+        linear-gradient(180deg, rgba(88, 118, 66, 0.12), rgba(93, 113, 141, 0.08));
+      border: 1px solid rgba(49, 75, 42, 0.12);
+    }
+
+    .compose-area {
+      position: relative;
+      padding: 28px 34px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .compose-row {
+      height: 12px;
+      border-radius: 999px;
+      background: rgba(49, 75, 42, 0.12);
+    }
+
+    .compose-row:nth-child(1) {
+      width: 76%;
+    }
+
+    .compose-row:nth-child(2) {
+      width: 52%;
+    }
+
+    .compose-row:nth-child(3) {
+      width: 64%;
+    }
+
+    .insertion-field {
+      position: relative;
+      margin-top: auto;
+      min-height: 104px;
+      border-radius: 14px;
+      border: 1px solid rgba(49, 75, 42, 0.16);
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.56), rgba(250, 252, 247, 0.38));
+      padding: 18px 20px 20px;
+      color: var(--ink-soft);
+      font-size: 17px;
+      line-height: 1.45;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+      overflow: hidden;
+      isolation: isolate;
+    }
+
+    .insertion-field::after {
+      content: "";
+      position: absolute;
+      inset: auto 0 0;
+      height: 44px;
+      pointer-events: none;
+      background: linear-gradient(0deg, rgba(253, 252, 247, 0.78), transparent);
+      z-index: 3;
+    }
+
+    .live-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      height: 24px;
+      padding: 0 9px;
+      border-radius: 999px;
+      color: var(--red-dark);
+      background: rgba(239, 90, 70, 0.09);
+      border: 1px solid rgba(239, 90, 70, 0.16);
+      white-space: nowrap;
+    }
+
+    [data-state="warming"] .live-pill,
+    [data-state="processing"] .live-pill,
+    [data-state="polishing"] .live-pill {
+      color: #8b5b20;
+      background: rgba(200, 136, 61, 0.1);
+      border-color: rgba(200, 136, 61, 0.18);
+    }
+
+    [data-state="done"] .live-pill {
+      color: var(--moss-dark);
+      background: rgba(88, 118, 66, 0.12);
+      border-color: rgba(88, 118, 66, 0.18);
+    }
+
+    .mini-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 12px currentColor;
+    }
+
+    .inserted-text {
+      display: none;
+      opacity: 0;
+      transform: translateY(4px);
+      transition: opacity 0.32s ease, transform 0.32s ease;
+    }
+
+    [data-state="done"] .inserted-text {
+      display: inline;
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .caret {
+      display: none;
+      width: 2px;
+      height: 1.1em;
+      margin-left: 2px;
+      vertical-align: -0.16em;
+      background: var(--moss);
+      animation: blink 0.9s steps(2, start) infinite;
+    }
+
+    [data-state="done"] .caret {
+      display: inline-block;
+    }
+
+    .recorder-pod {
+      position: absolute;
+      right: 36px;
+      top: 56px;
+      width: 336px;
+      min-height: 92px;
+      padding: 13px 14px 12px;
+      border-radius: 18px;
+      border: 1px solid rgba(255, 255, 255, 0.72);
+      background:
+        linear-gradient(150deg, rgba(255, 255, 252, 0.88), rgba(237, 246, 232, 0.74));
+      box-shadow:
+        0 18px 42px rgba(35, 47, 30, 0.22),
+        inset 0 1px 0 rgba(255, 255, 255, 0.86);
+      backdrop-filter: blur(22px) saturate(1.2);
+      z-index: 8;
+      overflow: hidden;
+      transition: width 0.28s ease, min-height 0.34s ease, transform 0.28s ease;
+    }
+
+    .mock-shell.has-live .recorder-pod {
+      min-height: var(--pod-height, 206px);
+    }
+
+    .pod-top {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .pod-status {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--ink-soft);
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .record-light {
+      position: relative;
+      width: 10px;
+      height: 10px;
+      flex: 0 0 auto;
+      border-radius: 50%;
+      background: var(--red);
+      box-shadow: 0 0 0 4px rgba(239, 90, 70, 0.12), 0 0 16px rgba(239, 90, 70, 0.76);
+      animation: glow 1.1s ease-in-out infinite alternate;
+    }
+
+    [data-state="warming"] .record-light {
+      background: var(--amber);
+      box-shadow: 0 0 0 4px rgba(200, 136, 61, 0.12), 0 0 16px rgba(200, 136, 61, 0.72);
+      animation: glow 0.9s ease-in-out infinite alternate;
+    }
+
+    [data-state="warming"] .record-light::after {
+      content: "";
+      position: absolute;
+      inset: -6px;
+      border-radius: 50%;
+      border: 1.5px solid rgba(200, 136, 61, 0.2);
+      border-top-color: rgba(200, 136, 61, 0.9);
+      animation: spin 0.82s linear infinite;
+    }
+
+    [data-state="processing"] .record-light,
+    [data-state="polishing"] .record-light {
+      background: var(--amber);
+      box-shadow: 0 0 0 4px rgba(200, 136, 61, 0.12), 0 0 16px rgba(200, 136, 61, 0.64);
+    }
+
+    [data-state="done"] .record-light {
+      background: var(--moss);
+      box-shadow: 0 0 0 4px rgba(88, 118, 66, 0.12), 0 0 14px rgba(88, 118, 66, 0.54);
+      animation: none;
+    }
+
+    [data-state="error"] .record-light {
+      background: var(--red-dark);
+      box-shadow: 0 0 0 4px rgba(184, 59, 45, 0.12), 0 0 16px rgba(184, 59, 45, 0.72);
+      animation: shake 0.4s ease both;
+    }
+
+    .pod-time {
+      margin-left: auto;
+      color: rgba(23, 33, 19, 0.58);
+      font-variant-numeric: tabular-nums;
+      font-weight: 600;
+    }
+
+    .stop-button {
+      width: 34px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      border-radius: var(--radius-control);
+      color: white;
+      background: var(--red);
+      box-shadow: 0 8px 20px rgba(239, 90, 70, 0.26);
+      transition: transform 0.18s ease, background 0.18s ease, opacity 0.18s ease;
+    }
+
+    .stop-button:hover {
+      transform: translateY(-1px);
+      background: var(--red-dark);
+    }
+
+    .stop-icon {
+      width: 10px;
+      height: 10px;
+      border-radius: 2px;
+      background: currentColor;
+    }
+
+    [data-state="warming"] .stop-button,
+    [data-state="processing"] .stop-button,
+    [data-state="polishing"] .stop-button,
+    [data-state="done"] .stop-button {
+      opacity: 0.42;
+      pointer-events: none;
+      background: rgba(49, 75, 42, 0.32);
+      box-shadow: none;
+    }
+
+    .pod-wave {
+      height: 42px;
+      margin-top: 9px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0;
+      overflow: hidden;
+      padding-inline: 1px;
+      width: 100%;
+    }
+
+    .bar {
+      flex: 0 0 2px;
+      width: 2px;
+      height: var(--h, 12px);
+      min-height: 3px;
+      border-radius: 999px;
+      background: linear-gradient(180deg, #83a66b, var(--moss-dark));
+      transition: height 0.07s linear, opacity 0.18s ease, background 0.18s ease;
+    }
+
+    .bar:nth-last-child(-n + 9) {
+      background: linear-gradient(180deg, #ff7a62, var(--red-dark));
+    }
+
+    [data-state="warming"] .bar,
+    [data-state="processing"] .bar,
+    [data-state="polishing"] .bar {
+      opacity: 0.28;
+      background: linear-gradient(180deg, rgba(200, 136, 61, 0.72), rgba(200, 136, 61, 0.28));
+    }
+
+    .pod-progress {
+      position: absolute;
+      left: 14px;
+      right: 14px;
+      bottom: 10px;
+      height: 3px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: rgba(49, 75, 42, 0.1);
+      opacity: 0;
+      transition: opacity 0.24s ease;
+    }
+
+    .pod-progress span {
+      display: block;
+      width: var(--p, 0%);
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--moss), var(--blue));
+      transition: width 0.28s ease;
+    }
+
+    [data-state="warming"] .pod-progress span {
+      background: linear-gradient(90deg, var(--amber), var(--moss));
+    }
+
+    [data-state="warming"] .pod-progress,
+    [data-state="processing"] .pod-progress,
+    [data-state="polishing"] .pod-progress {
+      opacity: 1;
+    }
+
+    .pod-live {
+      margin-top: 0;
+      padding-top: 0;
+      max-height: 0;
+      opacity: 0;
+      overflow: hidden;
+      border-top: 1px solid rgba(49, 75, 42, 0);
+      transition:
+        max-height 0.36s ease,
+        opacity 0.2s ease,
+        margin-top 0.28s ease,
+        padding-top 0.28s ease,
+        border-color 0.28s ease;
+    }
+
+    .mock-shell.has-live .pod-live {
+      margin-top: 11px;
+      padding-top: 11px;
+      max-height: var(--pod-live-height, 96px);
+      opacity: 1;
+      border-top-color: rgba(49, 75, 42, 0.1);
+    }
+
+    .pod-live-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 9px;
+      color: rgba(23, 33, 19, 0.54);
+      font-size: 10px;
+      font-weight: 750;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .stream-viewport {
+      position: relative;
+      min-height: 44px;
+      max-height: var(--stream-height, 52px);
+      overflow: hidden;
+      color: var(--ink-soft);
+      background: rgba(255, 255, 255, 0.36);
+      border: 1px solid rgba(49, 75, 42, 0.08);
+      border-radius: 12px;
+      padding: 10px 11px;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.58);
+    }
+
+    .stream-viewport::after {
+      content: "";
+      position: absolute;
+      inset: auto 0 0;
+      height: 28px;
+      pointer-events: none;
+      background: linear-gradient(0deg, rgba(251, 250, 244, 0.94), transparent);
+    }
+
+    .stream-line {
+      white-space: normal;
+      font-size: 15px;
+      line-height: 1.44;
+      font-weight: 570;
+      letter-spacing: 0;
+      max-width: 100%;
+    }
+
+    .stream-line::after {
+      content: "";
+      display: inline-block;
+      width: 2px;
+      height: 1.15em;
+      margin-left: 3px;
+      vertical-align: -0.18em;
+      background: var(--red);
+      box-shadow: 0 0 10px rgba(239, 90, 70, 0.72);
+      animation: blink 0.85s steps(2, start) infinite;
+    }
+
+    [data-state="warming"] .stream-line::after {
+      background: var(--amber);
+      box-shadow: 0 0 10px rgba(200, 136, 61, 0.6);
+    }
+
+    [data-state="done"] .stream-line::after {
+      background: var(--moss);
+      box-shadow: 0 0 10px rgba(88, 118, 66, 0.54);
+    }
+
+    .word {
+      position: relative;
+      display: inline-block;
+      margin-right: 8px;
+      opacity: 0;
+      transform: translateY(10px);
+      animation: word-in 0.24s ease forwards;
+      transition:
+        color 0.18s ease,
+        opacity 0.22s ease,
+        transform 0.22s ease,
+        max-width 0.26s ease,
+        margin-right 0.26s ease;
+    }
+
+    .word.pending {
+      color: rgba(239, 90, 70, 0.9);
+    }
+
+    .word.is-wrong {
+      color: var(--red-dark);
+    }
+
+    .word.is-wrong::after {
+      content: "";
+      position: absolute;
+      left: -1px;
+      right: -1px;
+      top: 54%;
+      height: 2px;
+      border-radius: 999px;
+      background: var(--red);
+      transform: scaleX(0);
+      transform-origin: left center;
+      animation: strike-word 0.18s ease forwards;
+    }
+
+    .word.is-removed {
+      opacity: 0;
+      transform: translateY(-5px);
+      max-width: 0 !important;
+      margin-right: 0;
+      overflow: hidden;
+      white-space: nowrap;
+    }
+
+    .word.is-correction {
+      color: var(--moss-dark);
+      font-weight: 760;
+      animation: correction-in 0.2s ease forwards;
+    }
+
+    .word.is-polished {
+      color: var(--ink-soft);
+      font-weight: 650;
+    }
+
+    .line-break {
+      display: block;
+      height: 4px;
+    }
+
+    .loading-dots::after {
+      content: "";
+      display: inline-block;
+      width: 1.2em;
+      text-align: left;
+      animation: dots 1s steps(4, end) infinite;
+    }
+
+    .process-dock {
+      position: absolute;
+      left: 50%;
+      bottom: 36px;
+      transform: translateX(-50%);
+      width: min(820px, calc(100% - 86px));
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 8px;
+      padding: 8px;
+      border-radius: 16px;
+      border: 1px solid rgba(255, 255, 255, 0.62);
+      background: rgba(255, 255, 252, 0.56);
+      box-shadow: 0 16px 34px rgba(35, 47, 30, 0.12);
+      backdrop-filter: blur(16px) saturate(1.12);
+      z-index: 7;
+    }
+
+    .process-button {
+      height: 40px;
+      border-radius: var(--radius-control);
+      color: rgba(23, 33, 19, 0.62);
+      background: transparent;
+      font-size: 12px;
+      font-weight: 650;
+      transition: background 0.18s ease, color 0.18s ease, transform 0.18s ease;
+    }
+
+    .process-button:hover {
+      transform: translateY(-1px);
+      background: rgba(255, 255, 255, 0.56);
+    }
+
+    .process-button[aria-pressed="true"] {
+      color: var(--ink);
+      background: rgba(255, 255, 255, 0.82);
+      box-shadow: inset 0 0 0 1px rgba(49, 75, 42, 0.1), 0 8px 18px rgba(35, 47, 30, 0.1);
+    }
+
+    .pref-window {
+      position: relative;
+      height: min(790px, calc(100vh - 56px));
+      min-height: 700px;
+      border-radius: var(--radius-window);
+      border: 1px solid rgba(255, 255, 255, 0.76);
+      background:
+        linear-gradient(150deg, rgba(253, 252, 247, 0.88), rgba(236, 246, 231, 0.78));
+      box-shadow:
+        0 30px 70px rgba(35, 47, 30, 0.18),
+        inset 0 1px 0 rgba(255, 255, 255, 0.88);
+      backdrop-filter: blur(24px) saturate(1.18);
+      overflow: hidden;
+    }
+
+    .pref-titlebar {
+      height: 52px;
+      display: grid;
+      grid-template-columns: 82px 1fr 82px;
+      align-items: center;
+      padding: 0 16px;
+      border-bottom: 1px solid rgba(49, 75, 42, 0.1);
+    }
+
+    .pref-title {
+      justify-self: center;
+      font-size: 14px;
+      font-weight: 650;
+      color: var(--ink-soft);
+    }
+
+    .pref-body {
+      height: calc(100% - 52px);
+      display: grid;
+      grid-template-columns: 122px 1fr;
+    }
+
+    .pref-sidebar {
+      padding: 16px 12px;
+      border-right: 1px solid rgba(49, 75, 42, 0.1);
+      background: rgba(246, 249, 241, 0.34);
+    }
+
+    .pref-nav {
+      display: grid;
+      gap: 7px;
+    }
+
+    .nav-item {
+      display: grid;
+      grid-template-columns: 26px 1fr;
+      align-items: center;
+      gap: 8px;
+      min-height: 38px;
+      padding: 6px 8px;
+      border-radius: var(--radius-control);
+      color: rgba(23, 33, 19, 0.64);
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .nav-item.active {
+      color: var(--moss-dark);
+      background: rgba(220, 233, 213, 0.72);
+      box-shadow: inset 0 0 0 1px rgba(88, 118, 66, 0.16);
+    }
+
+    .nav-icon {
+      width: 24px;
+      height: 24px;
+      border-radius: 7px;
+      display: grid;
+      place-items: center;
+      color: currentColor;
+    }
+
+    .nav-icon svg {
+      width: 18px;
+      height: 18px;
+      display: block;
+    }
+
+    .pref-content {
+      padding: 18px;
+      overflow: auto;
+    }
+
+    .pref-heading {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+      padding: 0 2px;
+    }
+
+    .pref-heading h1 {
+      margin: 0;
+      font-size: 19px;
+      line-height: 1.2;
+      color: var(--ink);
+      letter-spacing: 0;
+    }
+
+    .pref-heading p {
+      margin: 3px 0 0;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .engine-badge {
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      height: 28px;
+      padding: 0 9px;
+      border-radius: 999px;
+      background: rgba(88, 118, 66, 0.11);
+      color: var(--moss-dark);
+      font-size: 11px;
+      font-weight: 650;
+      border: 1px solid rgba(88, 118, 66, 0.14);
+    }
+
+    .group {
+      margin-bottom: 13px;
+      border-radius: var(--radius-control);
+      border: 1px solid rgba(49, 75, 42, 0.12);
+      background: rgba(255, 255, 252, 0.52);
+      overflow: hidden;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+    }
+
+    .group-title {
+      padding: 11px 14px 7px;
+      color: var(--moss-dark);
+      font-size: 12px;
+      line-height: 1;
+      font-weight: 750;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .setting-row {
+      min-height: 42px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      padding: 9px 14px;
+      border-top: 1px solid rgba(49, 75, 42, 0.09);
+      color: var(--ink-soft);
+      font-size: 13px;
+    }
+
+    .setting-copy {
+      min-width: 0;
+    }
+
+    .setting-title {
+      color: var(--ink);
+      font-weight: 600;
+    }
+
+    .setting-subtitle {
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
+    .toggle {
+      position: relative;
+      width: 38px;
+      height: 22px;
+      border-radius: 999px;
+      background: rgba(49, 75, 42, 0.13);
+      box-shadow: inset 0 0 0 1px rgba(49, 75, 42, 0.1);
+      transition: background 0.18s ease;
+    }
+
+    .toggle::after {
+      content: "";
+      position: absolute;
+      top: 3px;
+      left: 3px;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: white;
+      box-shadow: 0 2px 7px rgba(35, 47, 30, 0.2);
+      transition: transform 0.18s ease;
+    }
+
+    .toggle.on {
+      background: var(--moss);
+    }
+
+    .toggle.on::after {
+      transform: translateX(16px);
+    }
+
+    .select,
+    .shortcut,
+    .small-stepper {
+      height: 30px;
+      border-radius: var(--radius-control);
+      border: 1px solid rgba(49, 75, 42, 0.12);
+      background: rgba(255, 255, 255, 0.54);
+      color: var(--ink-soft);
+      font-size: 12px;
+      font-weight: 600;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+    }
+
+    .select {
+      min-width: 132px;
+      padding: 0 28px 0 10px;
+    }
+
+    .shortcut {
+      min-width: 112px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 0 10px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .small-stepper {
+      display: inline-grid;
+      grid-template-columns: 28px 52px 28px;
+      align-items: center;
+      text-align: center;
+      overflow: hidden;
+    }
+
+    .small-stepper button {
+      height: 100%;
+      color: var(--ink-soft);
+      background: transparent;
+      font-weight: 800;
+    }
+
+    .small-stepper span {
+      border-left: 1px solid rgba(49, 75, 42, 0.1);
+      border-right: 1px solid rgba(49, 75, 42, 0.1);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .folder-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      height: 30px;
+      padding: 0 10px;
+      border-radius: var(--radius-control);
+      border: 1px solid rgba(49, 75, 42, 0.12);
+      background: rgba(255, 255, 255, 0.54);
+      color: var(--ink-soft);
+      font-size: 12px;
+      font-weight: 600;
+      max-width: 154px;
+    }
+
+    .folder-icon {
+      width: 15px;
+      height: 11px;
+      position: relative;
+      border-radius: 2px;
+      background: #719663;
+      flex: 0 0 auto;
+    }
+
+    .folder-icon::before {
+      content: "";
+      position: absolute;
+      left: 1px;
+      top: -4px;
+      width: 8px;
+      height: 5px;
+      border-radius: 2px 2px 0 0;
+      background: #719663;
+    }
+
+    .diagnostic {
+      margin-top: 14px;
+      padding: 12px 14px;
+      border-radius: var(--radius-control);
+      background: linear-gradient(135deg, rgba(93, 113, 141, 0.1), rgba(88, 118, 66, 0.09));
+      border: 1px solid rgba(93, 113, 141, 0.12);
+      color: var(--ink-soft);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    @keyframes glow {
+      from {
+        opacity: 0.72;
+        transform: scale(0.92);
+      }
+      to {
+        opacity: 1;
+        transform: scale(1);
+      }
+    }
+
+    @keyframes blink {
+      50% {
+        opacity: 0;
+      }
+    }
+
+    @keyframes word-in {
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @keyframes strike-word {
+      to {
+        transform: scaleX(1);
+      }
+    }
+
+    @keyframes correction-in {
+      from {
+        opacity: 0;
+        transform: translateY(7px) scale(0.98);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    @keyframes dots {
+      0% { content: ""; }
+      25% { content: "."; }
+      50% { content: ".."; }
+      75%, 100% { content: "..."; }
+    }
+
+    @keyframes shake {
+      20% { transform: translateX(-2px); }
+      40% { transform: translateX(2px); }
+      60% { transform: translateX(-1px); }
+      80% { transform: translateX(1px); }
+    }
+
+    @media (max-width: 1180px) {
+      .mock-shell {
+        grid-template-columns: 1fr;
+      }
+
+      .pref-window {
+        height: auto;
+        min-height: 720px;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .mock-shell {
+        padding: 14px;
+        gap: 14px;
+      }
+
+      .stage {
+        min-height: 760px;
+      }
+
+      .target-app {
+        left: 18px;
+        right: 18px;
+        width: auto;
+        top: 92px;
+      }
+
+      .target-body {
+        grid-template-columns: 1fr;
+      }
+
+      .target-sidebar {
+        display: none;
+      }
+
+      .recorder-pod {
+        right: 18px;
+        top: 50px;
+        width: calc(100% - 36px);
+        max-width: 336px;
+      }
+
+      .stream-line {
+        font-size: 14px;
+      }
+
+      .process-dock {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .pref-body {
+        grid-template-columns: 1fr;
+      }
+
+      .pref-sidebar {
+        border-right: 0;
+        border-bottom: 1px solid rgba(49, 75, 42, 0.1);
+      }
+
+      .pref-nav {
+        grid-template-columns: repeat(3, 1fr);
+      }
+
+      .nav-item {
+        grid-template-columns: 1fr;
+        justify-items: center;
+        text-align: center;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="mock-shell" data-state="warming">
+    <section class="stage" aria-label="OpenVerb live recording mock">
+      <div class="desktop-grid" aria-hidden="true"></div>
+      <div class="menu-strip">
+        <div class="menu-left">
+          <strong>OpenVerb</strong>
+          <span>File</span>
+          <span>Edit</span>
+          <span>Window</span>
+        </div>
+        <div class="menu-right">
+          <span class="menu-dot" aria-hidden="true"></span>
+          <span id="menubar-state">warming</span>
+        </div>
+      </div>
+
+      <article class="target-app" aria-label="Target app surface">
+        <div class="target-titlebar">
+          <div class="traffic" aria-hidden="true"><span></span><span></span><span></span></div>
+          <div class="target-title">Active App</div>
+          <div class="target-action"><span>Draft</span><span>Share</span></div>
+        </div>
+        <div class="target-body">
+          <aside class="target-sidebar" aria-hidden="true">
+            <div class="side-line"></div>
+            <div class="side-line"></div>
+            <div class="side-line"></div>
+            <div class="side-line"></div>
+            <div class="side-card"></div>
+          </aside>
+          <div class="compose-area">
+            <div class="compose-row"></div>
+            <div class="compose-row"></div>
+            <div class="compose-row"></div>
+            <div class="insertion-field">
+              <span class="inserted-text" id="insertedText">Today we aligned on launch timing, product risks, and customer interviews. The main risk is scope creep.</span><span class="caret"></span>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <article class="recorder-pod" aria-label="Recording mini HUD">
+        <div class="pod-top">
+          <div class="pod-status">
+            <span class="record-light" aria-hidden="true"></span>
+            <span id="podLabel">Warming engine</span>
+            <span class="pod-time" id="podTime">00:00</span>
+          </div>
+          <button class="stop-button" type="button" data-state-target="processing" aria-label="Stop recording">
+            <span class="stop-icon" aria-hidden="true"></span>
+          </button>
+        </div>
+        <div class="pod-wave" id="waveform" aria-hidden="true"></div>
+        <div class="pod-progress" aria-hidden="true"><span id="podProgress"></span></div>
+        <div class="pod-live" aria-label="Live recognition and correction stream">
+          <div class="pod-live-meta">
+            <span class="live-pill"><span class="mini-dot" aria-hidden="true"></span><span id="liveState">Live draft</span></span>
+            <span id="processHint">typing</span>
+          </div>
+          <div class="stream-viewport">
+            <div class="stream-line" id="streamLine"></div>
+          </div>
+        </div>
+      </article>
+
+      <nav class="process-dock" aria-label="Mock states">
+        <button class="process-button" type="button" data-state-target="warming" aria-pressed="true">Warmup</button>
+        <button class="process-button" type="button" data-state-target="recording" aria-pressed="false">Recording</button>
+        <button class="process-button" type="button" data-state-target="processing" aria-pressed="false">Processing</button>
+        <button class="process-button" type="button" data-state-target="polishing" aria-pressed="false">Polishing</button>
+        <button class="process-button" type="button" data-state-target="done" aria-pressed="false">Done</button>
+        <button class="process-button" type="button" data-state-target="error" aria-pressed="false">Error</button>
+      </nav>
+    </section>
+
+    <aside class="pref-window" aria-label="OpenVerb preferences mock">
+      <div class="pref-titlebar">
+        <div class="traffic" aria-hidden="true"><span></span><span></span><span></span></div>
+        <div class="pref-title">Preferences</div>
+        <div></div>
+      </div>
+      <div class="pref-body">
+        <aside class="pref-sidebar">
+          <nav class="pref-nav" aria-label="Preference sections">
+            <div class="nav-item active">
+              <span class="nav-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 13c0-5 4-8 13-9 0 9-4 14-9 14-2 0-4-2-4-5Z"/><path d="M9 18c1-4 4-7 8-9"/></svg>
+              </span>
+              <span>General</span>
+            </div>
+            <div class="nav-item">
+              <span class="nav-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 12h2M8 6v12M12 3v18M16 8v8M20 11v2"/></svg>
+              </span>
+              <span>Recording</span>
+            </div>
+            <div class="nav-item">
+              <span class="nav-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 5h12"/><path d="M12 5v14"/><path d="M9 19h6"/></svg>
+              </span>
+              <span>Text</span>
+            </div>
+            <div class="nav-item">
+              <span class="nav-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 12h2M9 8v8M13 4v16M17 9v6M21 11v2"/></svg>
+              </span>
+              <span>Audio</span>
+            </div>
+            <div class="nav-item">
+              <span class="nav-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="6" width="16" height="12" rx="2"/><path d="M7 10h2M11 10h2M15 10h2M7 14h10"/></svg>
+              </span>
+              <span>Shortcuts</span>
+            </div>
+            <div class="nav-item">
+              <span class="nav-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 4v16M4 12h16"/><path d="m7 7 10 10M17 7 7 17"/></svg>
+              </span>
+              <span>Backend</span>
+            </div>
+          </nav>
+        </aside>
+
+        <section class="pref-content">
+          <div class="pref-heading">
+            <div>
+              <h1>OpenVerb</h1>
+              <p>Quiet controls for recording, live text, and local inference.</p>
+            </div>
+            <span class="engine-badge"><span class="mini-dot" aria-hidden="true"></span> Engine ready</span>
+          </div>
+
+          <div class="group">
+            <div class="group-title">General</div>
+            <div class="setting-row">
+              <div class="setting-copy">
+                <div class="setting-title">Start at login</div>
+                <div class="setting-subtitle">Keep the menu bar recorder available after restart.</div>
+              </div>
+              <button class="toggle" type="button" aria-label="Start at login"></button>
+            </div>
+            <div class="setting-row">
+              <div class="setting-copy">
+                <div class="setting-title">Show menu bar icon</div>
+                <div class="setting-subtitle">Turns red while the microphone is capturing.</div>
+              </div>
+              <button class="toggle on" type="button" aria-label="Show menu bar icon"></button>
+            </div>
+          </div>
+
+          <div class="group">
+            <div class="group-title">Recording HUD</div>
+            <div class="setting-row">
+              <div class="setting-copy">
+                <div class="setting-title">Mini waveform corner</div>
+                <div class="setting-subtitle">Small waveform, red indicator, timer, and stop only.</div>
+              </div>
+              <button class="toggle on" type="button" aria-label="Mini waveform corner"></button>
+            </div>
+            <div class="setting-row">
+              <div class="setting-copy">
+                <div class="setting-title">Live correction stream</div>
+                <div class="setting-subtitle">The recording window expands and shows draft words, red strikeouts, and replacements.</div>
+              </div>
+              <button class="toggle on" type="button" aria-label="Live correction stream"></button>
+            </div>
+            <div class="setting-row">
+              <div class="setting-copy">
+                <div class="setting-title">Max duration</div>
+                <div class="setting-subtitle">Stops capture automatically before long sessions drift.</div>
+              </div>
+              <div class="small-stepper" role="group" aria-label="Max duration">
+                <button type="button" aria-label="Decrease">-</button>
+                <span>60 s</span>
+                <button type="button" aria-label="Increase">+</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="group">
+            <div class="group-title">Transcription</div>
+            <div class="setting-row">
+              <div class="setting-copy">
+                <div class="setting-title">Output language</div>
+                <div class="setting-subtitle">Auto can switch backend when multilingual audio is needed.</div>
+              </div>
+              <select class="select" aria-label="Output language">
+                <option>English</option>
+                <option>Auto detect</option>
+                <option>Russian</option>
+                <option>Spanish</option>
+              </select>
+            </div>
+            <div class="setting-row">
+              <div class="setting-copy">
+                <div class="setting-title">Auto punctuation</div>
+                <div class="setting-subtitle">Adds commas and sentence endings during polishing.</div>
+              </div>
+              <button class="toggle on" type="button" aria-label="Auto punctuation"></button>
+            </div>
+            <div class="setting-row">
+              <div class="setting-copy">
+                <div class="setting-title">Include clipboard context</div>
+                <div class="setting-subtitle">Uses the current target text to shape the final output.</div>
+              </div>
+              <button class="toggle on" type="button" aria-label="Include clipboard context"></button>
+            </div>
+          </div>
+
+          <div class="group">
+            <div class="group-title">Audio</div>
+            <div class="setting-row">
+              <div class="setting-copy">
+                <div class="setting-title">Microphone</div>
+                <div class="setting-subtitle">Input source for the floating recorder.</div>
+              </div>
+              <select class="select" aria-label="Microphone">
+                <option>MacBook Pro Mic</option>
+                <option>Studio Display Mic</option>
+              </select>
+            </div>
+            <div class="setting-row">
+              <div class="setting-copy">
+                <div class="setting-title">Noise reduction</div>
+                <div class="setting-subtitle">Keeps partial text calmer during live capture.</div>
+              </div>
+              <button class="toggle on" type="button" aria-label="Noise reduction"></button>
+            </div>
+          </div>
+
+          <div class="group">
+            <div class="group-title">Shortcuts and files</div>
+            <div class="setting-row">
+              <div class="setting-copy">
+                <div class="setting-title">Start or stop recording</div>
+                <div class="setting-subtitle">Global hotkey used from any app.</div>
+              </div>
+              <span class="shortcut">Option Space</span>
+            </div>
+            <div class="setting-row">
+              <div class="setting-copy">
+                <div class="setting-title">Save transcripts to</div>
+                <div class="setting-subtitle">Optional history for completed captures.</div>
+              </div>
+              <span class="folder-chip"><span class="folder-icon" aria-hidden="true"></span><span>Documents</span></span>
+            </div>
+          </div>
+
+          <div class="diagnostic">
+            Current design direction: Preferences and recording use the same warm glass material, while live text stays inside the expanding recorder until the final text is inserted.
+          </div>
+        </section>
+      </div>
+    </aside>
+  </main>
+
+  <script>
+    const shell = document.querySelector(".mock-shell");
+    const waveform = document.getElementById("waveform");
+    const streamLine = document.getElementById("streamLine");
+    const podLabel = document.getElementById("podLabel");
+    const podTime = document.getElementById("podTime");
+    const podProgress = document.getElementById("podProgress");
+    const liveState = document.getElementById("liveState");
+    const processHint = document.getElementById("processHint");
+    const menubarState = document.getElementById("menubar-state");
+    const buttons = Array.from(document.querySelectorAll(".process-button[data-state-target]"));
+    const toggles = Array.from(document.querySelectorAll(".toggle"));
+
+    const dictationTokens = [
+      { text: "Today" },
+      { text: "we" },
+      { text: "talked" },
+      { text: "about" },
+      { text: "lunch", correct: "launch" },
+      { text: "timing," },
+      { text: "product" },
+      { text: "ricks,", correct: "risks," },
+      { text: "and" },
+      { text: "costumer", correct: "customer" },
+      { text: "interviews." },
+      { break: true },
+      { text: "The" },
+      { text: "main" },
+      { text: "risc", correct: "risk" },
+      { text: "is" },
+      { text: "scope" },
+      { text: "creep." }
+    ];
+
+    const finalTokens = [
+      { text: "Today" },
+      { text: "we" },
+      { text: "aligned" },
+      { text: "on" },
+      { text: "launch" },
+      { text: "timing," },
+      { text: "product" },
+      { text: "risks," },
+      { text: "and" },
+      { text: "customer" },
+      { text: "interviews." },
+      { break: true },
+      { text: "The" },
+      { text: "main" },
+      { text: "risk" },
+      { text: "is" },
+      { text: "scope" },
+      { text: "creep." }
+    ];
+
+    let state = "recording";
+    let elapsed = 0;
+    let progress = 0;
+    let wordIndex = 0;
+    let tick = 0;
+    let autoStateIndex = 0;
+    let correctionTimers = [];
+    const autoOrder = ["warming", "recording", "processing", "polishing", "done", "warming"];
+
+    function makeWaveform() {
+      waveform.innerHTML = "";
+      for (let i = 0; i < 76; i += 1) {
+        const bar = document.createElement("span");
+        bar.className = "bar";
+        bar.style.setProperty("--h", `${5 + Math.random() * 28}px`);
+        waveform.appendChild(bar);
+      }
+    }
+
+    function updateWaveform() {
+      const bars = waveform.querySelectorAll(".bar");
+      bars.forEach((bar, index) => {
+        let base = 6;
+        let variance = 9;
+        if (state === "warming") {
+          base = 6 + Math.sin((tick / 5) + index * 0.28) * 3;
+          variance = Math.random() * 2.5;
+        } else if (state === "recording") {
+          const low = Math.sin((tick * 0.44) + index * 0.33) * 8;
+          const mid = Math.sin((tick * 0.9) + index * 0.82) * 5;
+          const high = Math.sin((tick * 1.7) + index * 1.9) * 3;
+          const random = Math.random() * 18;
+          base = 13 + low + mid + high;
+          variance = random;
+        } else if (state === "processing" || state === "polishing") {
+          base = 5 + Math.sin((tick / 4) + index * 0.42) * 2.5;
+          variance = Math.random() * 2;
+        } else if (state === "error") {
+          base = index % 2 ? 20 : 7;
+          variance = Math.random() * 5;
+        }
+        const height = Math.max(3, Math.min(40, base + variance));
+        bar.style.setProperty("--h", `${height}px`);
+      });
+      tick += 1;
+    }
+
+    function resetStream() {
+      correctionTimers.forEach((timer) => clearTimeout(timer));
+      correctionTimers = [];
+      streamLine.innerHTML = "";
+      shell.classList.remove("has-live");
+      shell.style.removeProperty("--pod-height");
+      shell.style.removeProperty("--pod-live-height");
+      shell.style.removeProperty("--stream-height");
+      wordIndex = 0;
+    }
+
+    function setPodExpansion() {
+      shell.classList.add("has-live");
+      const textHeight = Math.ceil(streamLine.scrollHeight || 24);
+      const streamHeight = Math.max(52, Math.min(136, textHeight + 18));
+      shell.style.setProperty("--stream-height", `${streamHeight}px`);
+      shell.style.setProperty("--pod-live-height", `${streamHeight + 54}px`);
+      shell.style.setProperty("--pod-height", `${streamHeight + 154}px`);
+      streamLine.parentElement.scrollTop = streamLine.parentElement.scrollHeight;
+    }
+
+    function appendBreak() {
+      const br = document.createElement("span");
+      br.className = "line-break";
+      streamLine.appendChild(br);
+    }
+
+    function makeWord(text, className = "") {
+      const span = document.createElement("span");
+      span.className = `word ${className}`.trim();
+      span.textContent = text;
+      span.style.maxWidth = `${Math.max(28, text.length * 9 + 8)}px`;
+      return span;
+    }
+
+    function pushWord(token) {
+      if (token.break) {
+        appendBreak();
+        return;
+      }
+
+      const span = makeWord(token.text, token.correct ? "pending" : "");
+      streamLine.appendChild(span);
+      setPodExpansion();
+
+      if (token.correct) {
+        correctionTimers.push(setTimeout(() => {
+          span.classList.add("is-wrong");
+          setPodExpansion();
+        }, 260));
+
+        correctionTimers.push(setTimeout(() => {
+          const fix = makeWord(token.correct, "is-correction");
+          span.after(fix);
+          setPodExpansion();
+        }, 520));
+
+        correctionTimers.push(setTimeout(() => {
+          span.classList.add("is-removed");
+          setPodExpansion();
+        }, 650));
+
+        correctionTimers.push(setTimeout(() => {
+          span.remove();
+          setPodExpansion();
+        }, 940));
+      }
+    }
+
+    function renderTokens(tokens, className = "", scrollToBottom = true) {
+      correctionTimers.forEach((timer) => clearTimeout(timer));
+      correctionTimers = [];
+      streamLine.innerHTML = "";
+      tokens.forEach((token) => {
+        if (token.break) {
+          appendBreak();
+          return;
+        }
+        streamLine.appendChild(makeWord(token.text, className));
+      });
+      setPodExpansion();
+      streamLine.parentElement.scrollTop = scrollToBottom ? streamLine.parentElement.scrollHeight : 0;
+    }
+
+    function renderProcessingSnapshot() {
+      correctionTimers.forEach((timer) => clearTimeout(timer));
+      correctionTimers = [];
+      streamLine.innerHTML = "";
+      [
+        { text: "Today" },
+        { text: "we" },
+        { text: "talked" },
+        { text: "about" },
+        { text: "lunch", wrong: true },
+        { text: "launch", correction: true },
+        { text: "timing," },
+        { text: "product" },
+        { text: "ricks,", wrong: true },
+        { text: "risks,", correction: true },
+        { text: "and" },
+        { text: "costumer", wrong: true },
+        { text: "customer", correction: true },
+        { text: "interviews." }
+      ].forEach((token) => {
+        const className = token.wrong ? "is-wrong" : token.correction ? "is-correction" : "";
+        streamLine.appendChild(makeWord(token.text, className));
+      });
+      setPodExpansion();
+    }
+
+    function renderWarmup() {
+      correctionTimers.forEach((timer) => clearTimeout(timer));
+      correctionTimers = [];
+      streamLine.innerHTML = "";
+      shell.classList.remove("has-live");
+      shell.style.removeProperty("--pod-height");
+      shell.style.removeProperty("--pod-live-height");
+      shell.style.removeProperty("--stream-height");
+    }
+
+    function updateText() {
+      if (state === "recording") {
+        if (wordIndex < dictationTokens.length) {
+          pushWord(dictationTokens[wordIndex]);
+          wordIndex += 1;
+        } else {
+          wordIndex = 0;
+          resetStream();
+        }
+      }
+    }
+
+    function setState(nextState) {
+      state = nextState;
+      shell.dataset.state = nextState;
+      menubarState.textContent = nextState;
+      buttons.forEach((button) => {
+        const pressed = button.dataset.stateTarget === nextState;
+        button.setAttribute("aria-pressed", pressed ? "true" : "false");
+      });
+
+      if (nextState === "warming") {
+        podLabel.textContent = "Warming engine";
+        liveState.textContent = "Engine";
+        processHint.textContent = "loading model";
+        elapsed = 0;
+        progress = 12;
+        podTime.textContent = "12%";
+        podProgress.style.setProperty("--p", "12%");
+        renderWarmup();
+      }
+
+      if (nextState === "recording") {
+        podLabel.textContent = "Recording";
+        liveState.textContent = "Live draft";
+        processHint.textContent = "typing";
+        elapsed = 0;
+        progress = 0;
+        podTime.textContent = "00:00";
+        podProgress.style.setProperty("--p", "0%");
+        resetStream();
+      }
+
+      if (nextState === "processing") {
+        podLabel.textContent = "Processing";
+        liveState.textContent = "Processing";
+        processHint.textContent = "checking";
+        progress = Math.max(progress, 22);
+        podProgress.style.setProperty("--p", `${progress}%`);
+        renderProcessingSnapshot();
+      }
+
+      if (nextState === "polishing") {
+        podLabel.textContent = "Polishing";
+        liveState.textContent = "Polishing";
+        processHint.textContent = "rewriting";
+        progress = Math.max(progress, 70);
+        podProgress.style.setProperty("--p", `${progress}%`);
+        renderTokens(finalTokens, "is-polished", false);
+      }
+
+      if (nextState === "done") {
+        podLabel.textContent = "Inserted";
+        liveState.textContent = "Inserted";
+        processHint.textContent = "done";
+        progress = 100;
+        podProgress.style.setProperty("--p", "100%");
+        renderTokens(finalTokens, "is-polished", false);
+      }
+
+      if (nextState === "error") {
+        podLabel.textContent = "Needs attention";
+        liveState.textContent = "Paused";
+        processHint.textContent = "microphone";
+        progress = 0;
+        podProgress.style.setProperty("--p", "0%");
+        renderTokens([
+          { text: "Microphone" },
+          { text: "permission" },
+          { text: "needs" },
+          { text: "attention." }
+        ], "pending");
+      }
+    }
+
+    function pulseProcess() {
+      if (state === "warming") {
+        progress = Math.min(92, progress + 8);
+        podTime.textContent = `${Math.round(progress)}%`;
+        podProgress.style.setProperty("--p", `${progress}%`);
+      }
+      if (state === "recording") {
+        elapsed += 1;
+        podTime.textContent = `00:${String(elapsed).padStart(2, "0")}`;
+      }
+      if (state === "processing" || state === "polishing") {
+        progress = Math.min(96, progress + (state === "processing" ? 7 : 5));
+        podProgress.style.setProperty("--p", `${progress}%`);
+      }
+      if (state === "done") {
+        podTime.textContent = "00:14";
+      }
+      if (state === "error") {
+        podTime.textContent = "--:--";
+      }
+    }
+
+    buttons.forEach((button) => {
+      button.addEventListener("click", () => {
+        setState(button.dataset.stateTarget);
+      });
+    });
+
+    toggles.forEach((toggle) => {
+      toggle.addEventListener("click", () => {
+        toggle.classList.toggle("on");
+      });
+    });
+
+    document.querySelector(".stop-button").addEventListener("click", () => setState("processing"));
+
+    makeWaveform();
+    setState("warming");
+    setInterval(updateWaveform, 70);
+    setInterval(updateText, 430);
+    setInterval(pulseProcess, 1000);
+    setInterval(() => {
+      autoStateIndex = (autoStateIndex + 1) % autoOrder.length;
+      setState(autoOrder[autoStateIndex]);
+    }, 9000);
+  </script>
+</body>
+</html>

@@ -65,14 +65,23 @@ struct WaveformView: View {
     @ObservedObject var viewModel: WaveformViewModel
 
     var body: some View {
-        HStack(alignment: .center, spacing: 2) {
-            ForEach(viewModel.bins.indices, id: \.self) { i in
-                Capsule()
-                    .fill(barGradient(for: i))
-                    .frame(width: 9, height: barHeight(viewModel.bins[i]))
+        GeometryReader { proxy in
+            let count = max(viewModel.bins.count, 1)
+            let barWidth = max(3, min(7, proxy.size.width / 52))
+            let spacing = count > 1
+                ? max(2, (proxy.size.width - barWidth * CGFloat(count)) / CGFloat(count - 1))
+                : 0
+
+            HStack(alignment: .center, spacing: spacing) {
+                ForEach(viewModel.bins.indices, id: \.self) { i in
+                    Capsule()
+                        .fill(barGradient(for: i))
+                        .frame(width: barWidth, height: barHeight(viewModel.bins[i]))
+                }
             }
+            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .center)
         }
-        .frame(height: 44)
+        .frame(maxWidth: .infinity, minHeight: 44, maxHeight: 44)
         .animation(.spring(response: 0.25, dampingFraction: 0.72), value: viewModel.bins)
     }
 

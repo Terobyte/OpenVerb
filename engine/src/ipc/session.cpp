@@ -163,6 +163,7 @@ void Session::run(int fd, Engine& engine, const SessionConfig& cfg) {
     RecvBuffer buf{};
     State state = State::IDLE;
     bool first_frame_seen = false;
+    bool connection_alive = true;
 
     auto elapsed_secs = [](auto since) {
         return std::chrono::duration_cast<std::chrono::seconds>(
@@ -197,6 +198,7 @@ void Session::run(int fd, Engine& engine, const SessionConfig& cfg) {
                     state = State::SHUTDOWN;
                 }
             } catch (const ConnectionClosed&) {
+                connection_alive = false;
                 state = State::DESTROYED;
             } catch (const std::runtime_error& e) {
                 if (std::string(e.what()) == "timeout") {
@@ -338,7 +340,8 @@ void Session::run(int fd, Engine& engine, const SessionConfig& cfg) {
                         }
 
                         std::string final_text = result->text;
-                        if (pipeline_active_.load(std::memory_order_relaxed)) {
+                        if (connection_alive &&
+                            !stop_requested_.load(std::memory_order_relaxed)) {
                             try {
                                 send_polish_started(fd);
                                 final_text = engine.polish_text(result->text, ctx);
@@ -380,6 +383,7 @@ void Session::run(int fd, Engine& engine, const SessionConfig& cfg) {
 
             } catch (const ConnectionClosed&) {
                 // Client dropped — clean up the pipeline.
+                connection_alive = false;
                 stop_requested_.store(true, std::memory_order_release);
                 pipeline_active_.store(false, std::memory_order_release);
                 chunk_queue_.shutdown();

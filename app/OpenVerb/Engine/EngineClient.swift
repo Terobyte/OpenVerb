@@ -74,6 +74,9 @@ final class EngineClient {
     /// (pending, inFlight, etaMs) — inFlight is true when the worker is actively processing a chunk.
     var onQueueStatus: ((Int, Bool, Int) -> Void)?
 
+    /// Called when the engine starts the LLM cleanup pass.
+    var onPolishStarted: (() -> Void)?
+
     /// Called when the engine's LLM polish pass has produced a cleaned transcript.
     /// The caller should replace the pending injected text with the polished version.
     var onPolishedResult: ((String) -> Void)?

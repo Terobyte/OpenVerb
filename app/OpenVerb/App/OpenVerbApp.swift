@@ -299,11 +299,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        // ---- Step 26d: Wire polish_started forwarding ----
+        engineManager.engineClient.onPolishStarted = { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self, self.appState.state == .inferring else { return }
+                self.processingVM.enterPolishing()
+            }
+        }
+
         // ---- Step 26d: Wire polished_result forwarding ----
         engineManager.engineClient.onPolishedResult = { [weak self] text in
             Task { @MainActor [weak self] in
-                guard let self else { return }
+                guard let self, self.appState.state == .inferring else { return }
                 self.appState.setPolishedText(text)
+                self.processingVM.exitPolishing()
             }
         }
 
@@ -552,7 +561,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         audioSession.setRingBuffer(nil, handle: nil)
         audioPipeline.endRecording(handle: handle)
         appState.transition(to: .inferring)
-        appState.livePartialText = ""
         playSound("Pop")
 
         Task { [weak self] in
@@ -658,10 +666,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else if let t = text, !t.isEmpty {
             if let target = appState.targetApp {
                 logger.info("handleResult: injecting \(t.count)ch into \(target.localizedName ?? "<?>")")
+                if appState.polishedText == nil {
+                    appState.setPolishedText(t)
+                }
+                processingVM.exitPolishing()
+                processingVM.resetEta()
+                try? await Task.sleep(for: .milliseconds(900))
                 await TextInjector.inject(
                     text: t, targetApp: target, window: recordingWindow)
             } else {
                 logger.warning("handleResult: text=\(t.count)ch but targetApp=nil — hiding window, nothing injected")
+                if appState.polishedText == nil {
+                    appState.setPolishedText(t)
+                }
+                processingVM.exitPolishing()
                 recordingWindow.hide()
             }
         } else {

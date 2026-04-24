@@ -34,6 +34,12 @@ import os
 
 private let pipelineLogger = Logger(subsystem: "io.openverb.app", category: "AudioPipeline")
 
+private enum StreamDrainResult {
+    case keepGoing
+    case finished(text: String?, command: Command?)
+    case failed
+}
+
 @MainActor
 final class AudioPipeline {
 
@@ -275,6 +281,84 @@ final class AudioPipeline {
         // --- Tail-follow consumer loop ---
         var streamSentFrames = 0
         var streamSentBytes = 0
+
+        func userMessage(forEngineError code: String, message: String) -> String {
+            switch code {
+            case "inference_failed":  return "Could not process — try again"
+            case "model_load_failed": return "Model error — check ~/.openverb/models/"
+            case "timeout":           return "Inference timed out"
+            case "duration_exceeded": return "Recording too long"
+            default:                  return message
+            }
+        }
+
+        func dispatchServerMessage(_ msg: ServerMessage,
+                                   allowFinalResult: Bool) async -> StreamDrainResult {
+            switch msg {
+            case .result(let text, let command):
+                guard allowFinalResult else {
+                    pipelineLogger.warning("AudioPipeline: result arrived before end-of-audio")
+                    return .keepGoing
+                }
+                return .finished(text: text, command: command)
+
+            case .error(let code, let message):
+                pipelineLogger.error("AudioPipeline: engine error \(code): \(message)")
+                let userMsg = userMessage(forEngineError: code, message: message)
+                await MainActor.run { [weak self] in
+                    self?.enterError(handle: handle, message: userMsg)
+                }
+                return .failed
+
+            case .partialResult(let text, let chunkId, let isFinal):
+                engineClient.onPartialResult?(text, chunkId, isFinal)
+                return .keepGoing
+
+            case .progress(let pct):
+                pipelineLogger.debug("AudioPipeline: progress \(pct)")
+                return .keepGoing
+
+            case .queueStatus(let pending, let inFlight, let etaMs):
+                engineClient.onQueueStatus?(pending, inFlight > 0, etaMs)
+                return .keepGoing
+
+            case .polishStarted:
+                engineClient.onPolishStarted?()
+                return .keepGoing
+
+            case .polishedResult(let text):
+                engineClient.onPolishedResult?(text)
+                if allowFinalResult {
+                    return .finished(text: text, command: nil)
+                }
+                return .keepGoing
+
+            case .warning(let code, let msg):
+                pipelineLogger.warning("AudioPipeline warning \(code): \(msg)")
+                return .keepGoing
+
+            default:
+                return .keepGoing
+            }
+        }
+
+        func drainAvailableServerMessages() async throws -> StreamDrainResult {
+            while true {
+                do {
+                    let msg = try await engineClient.receiveMessage(timeoutMs: 1)
+                    let result = await dispatchServerMessage(msg, allowFinalResult: false)
+                    switch result {
+                    case .keepGoing:
+                        continue
+                    case .finished, .failed:
+                        return result
+                    }
+                } catch EngineClientError.timeout {
+                    return .keepGoing
+                }
+            }
+        }
+
         do {
             // Check current pipeline state on MainActor each iteration to respect
             // cancel() and endRecording() transitions.
@@ -296,14 +380,25 @@ final class AudioPipeline {
                 if let (chunk, ts) = await ringBuffer.readNext(
                     handle: handle,
                     afterTimestamp: lastSentTimestamp,
-                    maxWait: .milliseconds(200)
+                    maxWait: .milliseconds(50)
                 ) {
                     engineClient.sendAudioFrame(chunk)
                     lastSentTimestamp = ts
                     streamSentFrames += 1
                     streamSentBytes += chunk.count
                 }
-                // If readNext timed out, loop again — state may have changed.
+                // The engine can emit partial_result while the user is still
+                // speaking. Drain any waiting JSON now so the HUD updates live
+                // instead of receiving a burst only after the end-of-audio sentinel.
+                switch try await drainAvailableServerMessages() {
+                case .keepGoing:
+                    break
+                case .finished:
+                    pipelineLogger.warning("AudioPipeline: ignoring early result during live stream")
+                case .failed:
+                    return
+                }
+                // If readNext timed out, loop again — state or server messages may have changed.
             }
 
             // --- Finalizing: drain tail then send sentinel ---
@@ -327,7 +422,8 @@ final class AudioPipeline {
                 engineClient.sendEndOfAudio()
 
                 // Wait for .result
-                var result: ServerMessage?
+                var finalText: String?
+                var finalCommand: Command?
                 drainLoop: while true {
                     let msg: ServerMessage
                     do {
@@ -335,46 +431,22 @@ final class AudioPipeline {
                     } catch {
                         throw error
                     }
-                    switch msg {
-                    case .result(let text, let command):
-                        result = .result(text: text, command: command)
+
+                    switch await dispatchServerMessage(msg, allowFinalResult: true) {
+                    case .finished(let text, let command):
+                        finalText = text
+                        finalCommand = command
                         break drainLoop
-                    case .error(let code, let message):
-                        pipelineLogger.error("AudioPipeline drainResult: engine error \(code): \(message)")
-                        let userMsg: String
-                        switch code {
-                        case "inference_failed":  userMsg = "Could not process — try again"
-                        case "model_load_failed": userMsg = "Model error — check ~/.openverb/models/"
-                        case "timeout":           userMsg = "Inference timed out"
-                        case "duration_exceeded": userMsg = "Recording too long"
-                        default:                  userMsg = message
-                        }
-                        await MainActor.run { [weak self] in
-                            self?.enterError(handle: handle, message: userMsg)
-                        }
+                    case .failed:
                         return
-                    case .partialResult(let text, let chunkId, let isFinal):
-                        engineClient.onPartialResult?(text, chunkId, isFinal)
-                    case .progress(let pct):
-                        pipelineLogger.debug("AudioPipeline: progress \(pct)")
-                    case .queueStatus(let pending, let inFlight, let etaMs):
-                        engineClient.onQueueStatus?(pending, inFlight > 0, etaMs)
-                    case .polishStarted:
-                        break
-                    case .polishedResult(let text):
-                        engineClient.onPolishedResult?(text)
-                    case .warning(let code, let msg):
-                        pipelineLogger.warning("AudioPipeline warning \(code): \(msg)")
-                    default:
-                        break
+                    case .keepGoing:
+                        continue
                     }
                 }
 
-                if case .result(let text, let command) = result {
-                    engineManager.disconnect()
-                    await MainActor.run { [weak self] in
-                        self?.finalize(handle: handle, text: text, command: command)
-                    }
+                engineManager.disconnect()
+                await MainActor.run { [weak self] in
+                    self?.finalize(handle: handle, text: finalText, command: finalCommand)
                 }
             }
 

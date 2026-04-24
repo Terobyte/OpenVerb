@@ -17,6 +17,7 @@
 		B3A1E2F3D4C5B6A7E8F9A067 /* BugsMDTDDTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9B056 /* BugsMDTDDTests.swift */; };
 		B3A1E2F3D4C5B6A7E8F9A07B /* openverb-engine in Copy Files */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9A07A /* openverb-engine */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		B3A1E2F3D4C5B6A7E8F9C001 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9A051 /* AppState.swift */; };
+		B3A1E2F3D4C5B6A7E8F9C031 /* LiveTranscriptRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9A087 /* LiveTranscriptRenderer.swift */; };
 		B3A1E2F3D4C5B6A7E8F9C002 /* Constants.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9A052 /* Constants.swift */; };
 		B3A1E2F3D4C5B6A7E8F9C003 /* EngineClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9A053 /* EngineClient.swift */; };
 		B3A1E2F3D4C5B6A7E8F9C004 /* EngineManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3A1E2F3D4C5B6A7E8F9A054 /* EngineManager.swift */; };
@@ -75,6 +76,7 @@
 		B3A1E2F3D4C5B6A7E8F9A021 /* OpenVerbTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = OpenVerbTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		B3A1E2F3D4C5B6A7E8F9A050 /* OpenVerbApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenVerbApp.swift; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9A051 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
+		B3A1E2F3D4C5B6A7E8F9A087 /* LiveTranscriptRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveTranscriptRenderer.swift; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9A052 /* Constants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Constants.swift; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9A053 /* EngineClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineClient.swift; sourceTree = "<group>"; };
 		B3A1E2F3D4C5B6A7E8F9A054 /* EngineManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineManager.swift; sourceTree = "<group>"; };
@@ -199,6 +201,7 @@
 			isa = PBXGroup;
 			children = (
 				B3A1E2F3D4C5B6A7E8F9A051 /* AppState.swift */,
+				B3A1E2F3D4C5B6A7E8F9A087 /* LiveTranscriptRenderer.swift */,
 			);
 			path = State;
 			sourceTree = "<group>";
@@ -408,6 +411,7 @@
 			files = (
 				B3A1E2F3D4C5B6A7E8F9A060 /* OpenVerbApp.swift in Sources */,
 				B3A1E2F3D4C5B6A7E8F9C001 /* AppState.swift in Sources */,
+				B3A1E2F3D4C5B6A7E8F9C031 /* LiveTranscriptRenderer.swift in Sources */,
 				B3A1E2F3D4C5B6A7E8F9C002 /* Constants.swift in Sources */,
 				B3A1E2F3D4C5B6A7E8F9C003 /* EngineClient.swift in Sources */,
 				B3A1E2F3D4C5B6A7E8F9C004 /* EngineManager.swift in Sources */,
