@@ -15,7 +15,6 @@
 #include <optional>
 #include <string>
 #include <thread>
-#include <vector>
 
 namespace openverb {
 
@@ -73,12 +72,6 @@ private:
 
     // Context JSON supplied by the session.start message (empty if omitted).
     std::string context_;
-
-    // Accumulated PCM of the entire session (every sample fed into chunker_).
-    // Used on end-of-audio to run ONE coherent inference over the full audio so
-    // the final transcript is not corrupted by mid-word inference boundaries
-    // introduced by per-chunk worker streaming.  Cleared on each session start.
-    std::vector<int16_t> full_pcm_buffer_;
 
     // Set by run() before launching worker_thread_ so the lambda only needs
     // to capture `this` rather than holding a lvalue-reference to run()'s
