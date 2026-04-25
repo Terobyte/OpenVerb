@@ -284,21 +284,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // partial_result, polish_started, polished_result handlers intentionally
-        // omitted: per-chunk streaming and the polish-started indicator created
-        // multiple post-stop "arrivals" in the HUD that the user perceives as
-        // fake-streaming.  The engine still emits these messages (kept for wire
-        // protocol stability and for debug logs in AudioPipeline), but the UI
-        // only reacts to the final `result` message — see audioPipeline.onResult
-        // / handleResult — which carries the polished text.
-        engineManager.engineClient.onPartialResult = { _, chunkId, _ in
-            logger.debug("onPartialResult ignored (chunk=\(chunkId))")
+        // ---- Step 26c: Wire partial_result forwarding ----
+        // onPartialResult fires from AudioPipeline's streamLive consumer loop
+        // during .inferring/.recording.
+        // Bug 99: guard on active session state before appending.
+        // Bug 110: capture chunkId and skip retransmits (same ID as last seen).
+        engineManager.engineClient.onPartialResult = { [weak self] text, chunkId, _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let state = self.appState.state
+                guard state == .inferring || state == .recording else {
+                    logger.info("onPartialResult dropped: state=\(String(describing: state)) chunk=\(chunkId) len=\(text.count)")
+                    return
+                }
+                guard chunkId != self.lastSeenPartialChunkId else {
+                    logger.info("onPartialResult dedup: chunk=\(chunkId)")
+                    return
+                }
+                self.lastSeenPartialChunkId = chunkId
+                self.appState.livePartialText += text
+                logger.info("onPartialResult applied: chunk=\(chunkId) appendLen=\(text.count) totalLen=\(self.appState.livePartialText.count)")
+            }
         }
-        engineManager.engineClient.onPolishStarted = {
-            logger.debug("onPolishStarted ignored")
+
+        // ---- Step 26d: Wire polish_started forwarding ----
+        engineManager.engineClient.onPolishStarted = { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self, self.appState.state == .inferring else { return }
+                self.processingVM.enterPolishing()
+            }
         }
-        engineManager.engineClient.onPolishedResult = { _ in
-            logger.debug("onPolishedResult ignored")
+
+        // ---- Step 26d: Wire polished_result forwarding ----
+        engineManager.engineClient.onPolishedResult = { [weak self] text in
+            Task { @MainActor [weak self] in
+                guard let self, self.appState.state == .inferring else { return }
+                self.appState.setPolishedText(text)
+                self.processingVM.exitPolishing()
+            }
         }
 
         // ---- Step 27: Create status bar item ----
@@ -656,6 +679,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 processingVM.exitPolishing()
                 processingVM.resetEta()
+                try? await Task.sleep(for: .milliseconds(900))
                 await TextInjector.inject(
                     text: t, targetApp: target, window: recordingWindow)
             } else {
