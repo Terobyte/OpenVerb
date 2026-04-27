@@ -49,13 +49,31 @@ int physical_cores() {
     return (n > 0) ? static_cast<int>(n) : 1;
 }
 
-/// Compute automatic thread count: max(1, min(4, physical_cores - 2)).
-/// Reserves 2 cores for the OS and UI; caps at 4 to avoid thrashing short
-/// audio inference jobs that are not deeply parallelisable.
+/// Return the number of performance CPU cores (P-cores).
+/// On Apple Silicon, P-cores are significantly faster than E-cores for
+/// llama.cpp's CPU-side work. Using E-cores can hurt throughput.
+/// Falls back to physical_cores() on non-Apple or if sysctl is unavailable.
+int performance_cores() {
+#if defined(__APPLE__)
+    int ncpu = 0;
+    size_t len = sizeof(ncpu);
+    // hw.perflevel0.physicalcpu = P-core count on Apple Silicon (M1/M2/M3/M4)
+    if (::sysctlbyname("hw.perflevel0.physicalcpu", &ncpu, &len, nullptr, 0) == 0 && ncpu > 0) {
+        return ncpu;
+    }
+#endif
+    return physical_cores();
+}
+
+/// Compute automatic thread count: max(1, min(P-cores, physical_cores - 2)).
+/// Uses only performance cores on Apple Silicon — E-cores are slower for
+/// llama.cpp batch work and can reduce throughput when mixed in.
 int auto_threads() {
+    int p = performance_cores();
     int t = physical_cores() - 2;
     if (t < 1) t = 1;
-    if (t > 4) t = 4;
+    // Cap at P-core count: no benefit from scheduling onto E-cores
+    if (t > p) t = p;
     return t;
 }
 

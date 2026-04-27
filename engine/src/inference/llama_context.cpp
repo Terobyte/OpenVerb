@@ -260,7 +260,7 @@ struct LlamaContext::Impl {
         // --- Create inference context ---
         llama_context_params cparams = llama_context_default_params();
         cparams.n_ctx            = static_cast<uint32_t>(ctx_size);
-        cparams.n_batch          = 512;
+        cparams.n_batch          = 2048;
         cparams.n_threads        = threads;
         cparams.n_threads_batch  = threads;
         cparams.flash_attn_type  = LLAMA_FLASH_ATTN_TYPE_ENABLED;  // Metal supports flash attention
@@ -462,7 +462,7 @@ std::string LlamaContext::infer(const std::string&         text_prompt,
         chunks,
         /*n_past=*/   n_past,
         /*seq_id=*/   0,
-        /*n_batch=*/  512,
+        /*n_batch=*/  2048,
         /*logits_last=*/ true,
         &n_past
     );
@@ -644,7 +644,7 @@ std::string LlamaContext::infer_text(const std::string&       text_prompt,
     // -----------------------------------------------------------------------
     // Step 4: Evaluate prompt tokens in batches of up to 512
     // -----------------------------------------------------------------------
-    constexpr int PROMPT_BATCH_CAP = 512;
+    constexpr int PROMPT_BATCH_CAP = 2048;
     llama_pos n_past = 0;
     {
         llama_batch pbatch = llama_batch_init(PROMPT_BATCH_CAP, 0, 1);
