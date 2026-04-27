@@ -65,44 +65,42 @@ If you find a regression, open an issue with the engine log from `~/Library/Logs
 
 ## Install
 
-> **There are no signed builds.** I don't have an Apple Developer account, and even if I did, I'd rather you build the thing yourself than trust a binary from the internet. It takes ~3 minutes.
+> **There are no signed builds.** I don't have an Apple Developer account, and even if I did, I'd rather you build the thing yourself than trust a binary from the internet. The installer below does it for you in ~5 minutes.
 
-### Option A — Build from source (recommended)
+### Option A — One line (recommended)
 
 ```bash
-git clone --recurse-submodules https://github.com/<your-fork>/OpenVerb.git
-cd OpenVerb
-
-# 1. Build the C++ engine (llama.cpp + audio pipeline)
-cd engine && cmake -B build-release -DCMAKE_BUILD_TYPE=Release && cmake --build build-release -j
-cd ..
-
-# 2. Pull down the Gemma 4 E2B weights (~5 GB, one-time)
-./scripts/download-model.sh
-
-# 3. (recommended) Set up a personal code-signing identity so macOS keeps
-#    your microphone / accessibility grants across rebuilds. No Apple Dev
-#    account needed, no sudo. One-time:
-./scripts/setup-signing-identity.sh
-
-# 4. Build a real .app bundle, signed with that identity
-./scripts/sign-build.sh
-open build/Build/Products/Release/OpenVerb.app
+curl -fsSL https://raw.githubusercontent.com/openverb/OpenVerb/main/scripts/install.sh | bash
 ```
 
-The first launch takes ~10 seconds while the model is mmap'd and the KV-cache is warmed up. macOS will ask for Microphone, Accessibility, and Input Monitoring — grant all three.
+That's it. The installer:
 
-> **Why the signing step?** macOS pins permissions to the code-signature hash. The default ad-hoc signing rotates that hash every rebuild, dropping your grants. The `setup-signing-identity.sh` script generates a free, stable, self-signed cert in your login keychain — no Apple Developer Program required.
+1. Clones the repo into `~/.openverb/source` (re-running updates instead of re-cloning).
+2. Builds the C++ engine.
+3. Downloads the Gemma 4 E2B weights (~5 GB, one-time, resumable).
+4. Creates a free, stable, self-signed code-signing identity in your **login keychain** so macOS keeps your Microphone / Accessibility / Input Monitoring grants across rebuilds — **no Apple Developer account, no sudo**.
+5. Builds a signed `OpenVerb.app` and copies it to `/Applications`.
 
-If you just want to poke at the code: `cd app && swift build -c release && ./.build/release/OpenVerb` works too, but `swift build` produces a raw binary, not a `.app` — Accessibility won't work on it. See [`BUILD.md`](BUILD.md) for the full story.
+Launch it once and grant the three permissions. Default hotkey is `⌥Space`.
 
-### Option B — Homebrew Cask (planned)
+> **Why the signing step?** macOS pins permissions to the code-signature hash. Apple's default ad-hoc signing rotates that hash every rebuild, dropping your grants. The installer generates a stable self-signed cert so your grants persist forever — same UX as a paid Developer ID, $99/year cheaper.
+
+> Don't trust `curl | bash`? Read [`scripts/install.sh`](scripts/install.sh) first — it's 90 lines, no obfuscation. Then run it locally:
+> ```bash
+> git clone --recurse-submodules https://github.com/openverb/OpenVerb.git && cd OpenVerb && ./scripts/install.sh
+> ```
+
+### Option B — Manual build
+
+If you want to control each step (custom model paths, different signing identity, building only the engine for hacking, etc.) the individual scripts are documented in [`BUILD.md`](BUILD.md).
+
+### Option C — Homebrew Cask (planned)
 
 ```bash
 brew install --cask openverb
 ```
 
-Will be a thin wrapper that runs the build steps above. Not yet published — see issue tracker.
+Will be a thin wrapper around the installer above. Not yet published — see the issue tracker.
 
 ## Usage
 

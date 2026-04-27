@@ -1,6 +1,8 @@
 # Building OpenVerb
 
-This is the long version of the install instructions in the [README](README.md). Read this if something failed, or if you want a redistributable `.app` bundle instead of just a binary.
+This is the long version of the install instructions in the [README](README.md). Read this if something failed in `scripts/install.sh`, or if you want to control each step manually (custom model paths, alternative signing identity, hacking on just the engine, etc.).
+
+> **TL;DR:** if you just want it working, run `./scripts/install.sh` and skip the rest of this doc.
 
 ## Prerequisites
 
