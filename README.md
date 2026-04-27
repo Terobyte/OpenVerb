@@ -10,6 +10,7 @@
 npm install -g openverb-app
 ```
 
+[![npm](https://img.shields.io/npm/v/openverb-app.svg?color=cb3837&logo=npm)](https://www.npmjs.com/package/openverb-app)
 [![License: MIT](https://img.shields.io/badge/License-MIT-19E2D7.svg)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-13+-black?logo=apple)]()
 [![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-arm64-7C5CFF)]()
