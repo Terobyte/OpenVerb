@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Build from source / advanced setup
+    url: https://github.com/Terobyte/OpenVerb/blob/main/BUILD.md
+    about: Building OpenVerb without npm — see BUILD.md
