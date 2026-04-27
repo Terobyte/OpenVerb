@@ -7,13 +7,12 @@
 **Press a hotkey, talk, get text — anywhere on macOS, fully offline.**
 
 ```bash
-npm install -g openverb
+npm install -g openverb-app
 ```
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-19E2D7.svg)](LICENSE)
 [![macOS](https://img.shields.io/badge/macOS-13+-black?logo=apple)]()
 [![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-arm64-7C5CFF)]()
-[![Status](https://img.shields.io/badge/status-alpha-orange)]()
 
 <img src="assets/screenshots/hud-processing.png" alt="OpenVerb HUD streaming a transcript" width="640" />
 

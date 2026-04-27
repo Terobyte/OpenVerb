@@ -4,7 +4,7 @@
 // ov — thin wrapper around scripts/install.sh, published to npm so users can
 // install OpenVerb with a single command:
 //
-//     npm install -g openverb
+//     npm install -g openverb-app
 //
 // After that, the `ov` command:
 //   ov              launch the app (installs first if not yet installed)
@@ -81,7 +81,7 @@ switch (action) {
     // npm postinstall hook — quietly skips when not global / wrong platform.
     case 'postinstall':
         if (process.env.npm_config_global !== 'true') {
-            console.log('OpenVerb is a global CLI tool. Install with: npm install -g openverb');
+            console.log('OpenVerb is a global CLI tool. Install with: npm install -g openverb-app');
             process.exit(0);
         }
         if (!platformOk(true)) {

@@ -1,5 +1,5 @@
 {
-  "name": "openverb",
+  "name": "openverb-app",
   "version": "0.1.0",
   "description": "Press a hotkey, talk, get text — anywhere on macOS, fully offline. Local Gemma 4 dictation, MIT.",
   "homepage": "https://github.com/Terobyte/OpenVerb",
