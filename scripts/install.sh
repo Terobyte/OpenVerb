@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-REPO_URL="${OPENVERB_REPO:-https://github.com/openverb/OpenVerb.git}"
+REPO_URL="${OPENVERB_REPO:-https://github.com/Terobyte/OpenVerb.git}"
 REF="${OPENVERB_REF:-main}"
 INSTALL_DIR="${OPENVERB_DIR:-$HOME/.openverb/source}"
 SIGN_IDENTITY="${SIGN_IDENTITY:-OpenVerb Dev}"

@@ -70,7 +70,7 @@ If you find a regression, open an issue with the engine log from `~/Library/Logs
 ### Option A — One line (recommended)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/openverb/OpenVerb/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Terobyte/OpenVerb/main/scripts/install.sh | bash
 ```
 
 That's it. The installer:
@@ -87,7 +87,7 @@ Launch it once and grant the three permissions. Default hotkey is `⌥Space`.
 
 > Don't trust `curl | bash`? Read [`scripts/install.sh`](scripts/install.sh) first — it's 90 lines, no obfuscation. Then run it locally:
 > ```bash
-> git clone --recurse-submodules https://github.com/openverb/OpenVerb.git && cd OpenVerb && ./scripts/install.sh
+> git clone --recurse-submodules https://github.com/Terobyte/OpenVerb.git && cd OpenVerb && ./scripts/install.sh
 > ```
 
 ### Option B — Manual build

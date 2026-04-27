@@ -49,3 +49,21 @@ __pycache__/
 # Per-session working artefacts (plan/summary scratch from agent runs)
 S0*-PLAN.md
 T0*-SUMMARY.md
+
+# Internal docs not meant for the public release
+# (everything under docs/architecture/ stays — README links to it)
+AGENTS.md
+CLAUDE.md
+bugs.md
+requirements.md
+docs/bugs.md
+docs/requirements.md
+docs/eloquent-analysis.md
+docs/DESIGN_SYSTEM_*.md
+docs/superpowers/
+validation/DECISION.md
+validation/README.md
+validation/audio/README.md
+validation/results/*.txt
+validation/results/*.gbnf
+validation/scripts/spike-*
