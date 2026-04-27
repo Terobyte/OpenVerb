@@ -1,0 +1,48 @@
+{
+  "name": "openverb",
+  "version": "0.1.0",
+  "description": "Press a hotkey, talk, get text — anywhere on macOS, fully offline. Local Gemma 4 dictation, MIT.",
+  "homepage": "https://github.com/Terobyte/OpenVerb",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Terobyte/OpenVerb.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Terobyte/OpenVerb/issues"
+  },
+  "author": "Temirlan Almabek",
+  "license": "MIT",
+  "bin": {
+    "ov": "bin/ov.js"
+  },
+  "scripts": {
+    "postinstall": "node bin/ov.js postinstall"
+  },
+  "files": [
+    "bin/",
+    "scripts/install.sh",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dictation",
+    "macos",
+    "speech-to-text",
+    "stt",
+    "voice",
+    "gemma",
+    "llama-cpp",
+    "offline",
+    "privacy",
+    "menu-bar"
+  ],
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=14"
+  }
+}

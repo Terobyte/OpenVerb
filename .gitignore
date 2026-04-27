@@ -39,6 +39,12 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
+# Node / npm
+node_modules/
+*.tgz
+.npm-debug.log
+package-lock.json
+
 # Local dev / scratchpads
 .superpowers/
 .g3/
