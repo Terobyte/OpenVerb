@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 304 80" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">OpenVerb</title>
+  <desc id="desc">OpenVerb wordmark with a voice waveform whose rounded bars form the silhouette of a leaf.</desc>
+
+  <defs>
+    <linearGradient id="lockupWaveLeaf" x1="17" y1="44" x2="63" y2="36" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#314B2A"/>
+      <stop offset="0.48" stop-color="#6F8A58"/>
+      <stop offset="1" stop-color="#D87445"/>
+    </linearGradient>
+    <linearGradient id="lockupVein" x1="19" y1="61" x2="61" y2="19" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#243B21" stop-opacity="0.9"/>
+      <stop offset="0.7" stop-color="#496C3A" stop-opacity="0.72"/>
+      <stop offset="1" stop-color="#D87445" stop-opacity="0.5"/>
+    </linearGradient>
+  </defs>
+
+  <g aria-hidden="true" transform="translate(8 8)">
+    <g transform="rotate(-38 32 32)" stroke-linecap="round">
+      <path d="M8.5 32H56" stroke="url(#lockupVein)" stroke-width="2"/>
+      <g stroke="url(#lockupWaveLeaf)" stroke-width="3.1">
+        <path d="M9 31V33"/>
+        <path d="M14 27V37"/>
+        <path d="M19 22V42"/>
+        <path d="M24 17V47"/>
+        <path d="M29 13V51"/>
+        <path d="M34 14V50"/>
+        <path d="M39 18V46"/>
+        <path d="M44 23V41"/>
+        <path d="M49 28V36"/>
+        <path d="M54 31V33"/>
+      </g>
+    </g>
+  </g>
+
+  <text x="92" y="51"
+        fill="#263A23"
+        font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Inter, sans-serif"
+        font-size="32"
+        font-weight="650">
+    Open<tspan fill="#D87445">Verb</tspan>
+  </text>
+</svg>

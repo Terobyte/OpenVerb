@@ -1,12 +1,22 @@
-.superpowers/
-.g3/
-.worktrees/
-validation/models/
-validation/deps/
-
+# macOS
 .DS_Store
-__pycache__/
+*.swp
+.idea/
 
+# Swift Package Manager / Xcode build artefacts
+**/.build/
+**/.swiftpm/
+app/Package.resolved
+client/Package.resolved
+**/DerivedData/
+**/*.xcuserdata/
+**/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist
+
+# C++ engine builds
 engine/build*/
 engine/.cache/
 engine/third_party/llama.cpp/
@@ -14,8 +24,28 @@ engine/third_party/whisper.cpp/
 engine/third_party/onnxruntime/
 engine/third_party/silero-vad/
 
+# Models, weights, validation runs
+validation/models/
+validation/deps/
 validation/results/mmproj-test.log
 validation/results/engine-*.log
 validation/results/latest.json
 validation/results/ov-bench-history.jsonl
 validation/results/smoke-status.json
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Local dev / scratchpads
+.superpowers/
+.g3/
+.worktrees/
+.sora/
+.claude/
+
+# Per-session working artefacts (plan/summary scratch from agent runs)
+S0*-PLAN.md
+T0*-SUMMARY.md

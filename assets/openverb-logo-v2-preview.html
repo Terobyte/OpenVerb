@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenVerb logo v2 preview</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #172113;
+      --muted: #5f6b5a;
+      --paper: #fbfaf4;
+      --line: rgba(38, 58, 35, 0.16);
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: #ecefe7;
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", sans-serif;
+    }
+
+    main {
+      width: min(860px, calc(100vw - 40px));
+      display: grid;
+      gap: 22px;
+    }
+
+    section {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--paper);
+      padding: 24px;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: 22px;
+      font-weight: 650;
+    }
+
+    p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 18px;
+      align-items: center;
+      margin-top: 20px;
+    }
+
+    .swatch {
+      display: grid;
+      place-items: center;
+      min-height: 116px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fffefa;
+    }
+
+    .dark {
+      background: #172113;
+    }
+
+    .warm {
+      background: #f1e7d8;
+    }
+
+    img {
+      display: block;
+      max-width: 100%;
+      height: auto;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section>
+      <h1>OpenVerb logo v2</h1>
+      <p>No filled leaf shape: the waveform itself creates a narrower leaf silhouette, with a subtle diagonal vein for direction.</p>
+      <div class="grid">
+        <div class="swatch"><img src="./openverb-logo-v2.svg" width="64" height="64" alt="OpenVerb logo"></div>
+        <div class="swatch"><img src="./openverb-logo-v2.svg" width="32" height="32" alt="OpenVerb logo small"></div>
+        <div class="swatch dark"><img src="./openverb-logo-v2.svg" width="64" height="64" alt="OpenVerb logo on dark"></div>
+        <div class="swatch warm"><img src="./openverb-logo-v2.svg" width="64" height="64" alt="OpenVerb logo on warm"></div>
+      </div>
+    </section>
+    <section>
+      <h1>Lockup</h1>
+      <p>Text remains editable in this pass; final production lockup should be outlined after typography is approved.</p>
+      <div class="grid" style="grid-template-columns: 1fr;">
+        <div class="swatch"><img src="./openverb-logo-lockup-v2.svg" width="304" height="80" alt="OpenVerb lockup"></div>
+      </div>
+    </section>
+    <section>
+      <h1>App icon</h1>
+      <p>A macOS-style icon surface using the same waveform-leaf mark.</p>
+      <div class="grid">
+        <div class="swatch"><img src="./openverb-app-icon-v2.svg" width="96" height="96" alt="OpenVerb app icon"></div>
+        <div class="swatch"><img src="./openverb-app-icon-v2.svg" width="64" height="64" alt="OpenVerb app icon medium"></div>
+        <div class="swatch"><img src="./openverb-app-icon-v2.svg" width="32" height="32" alt="OpenVerb app icon small"></div>
+        <div class="swatch dark"><img src="./openverb-app-icon-v2.svg" width="96" height="96" alt="OpenVerb app icon on dark"></div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
