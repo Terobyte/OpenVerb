@@ -1,6 +1,6 @@
 {
   "name": "openverb-app",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Press a hotkey, talk, get text — anywhere on macOS, fully offline. Local Gemma 4 dictation, MIT.",
   "homepage": "https://github.com/Terobyte/OpenVerb",
   "repository": {
@@ -10,7 +10,7 @@
   "bugs": {
     "url": "https://github.com/Terobyte/OpenVerb/issues"
   },
-  "author": "Temirlan Almabek",
+  "author": "Temirlan Jumabayev",
   "license": "MIT",
   "bin": {
     "ov": "bin/ov.js"
