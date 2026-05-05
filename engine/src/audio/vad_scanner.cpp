@@ -75,6 +75,8 @@ void VadScanner::push_frame(const int16_t* samples, int num_samples) {
 
 void VadScanner::flush() {
     std::unique_lock<std::mutex> lk(mu_);
+    // Note: MIN_CHUNK_MS does NOT gate flush — peak-fallback below allows
+    // sub-MIN_CHUNK_MS utterances when amplitude clears the noise floor.
     // Flush gating strategy:
     //
     // - If WebRTC VAD fired at any point (in_speech_), trust it and emit.
