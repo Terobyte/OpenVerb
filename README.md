@@ -82,7 +82,7 @@ The only network call ever made is the one‑time model download from Hugging Fa
 
 - [`llama.cpp`](https://github.com/ggml-org/llama.cpp) — the C++ inference engine
 - [Google Gemma](https://blog.google/technology/developers/gemma-3/) — the audio + text model family
-- [Silero VAD](https://github.com/snakers4/silero-vad) — voice activity detection
+- [WebRTC VAD](https://webrtc.org/) — voice activity detection
 
 ## License
 
