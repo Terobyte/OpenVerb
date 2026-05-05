@@ -1,9 +1,11 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 // ---------------------------------------------------------------------------
@@ -15,6 +17,14 @@
 //              is called once at 0.0 (start) and once at 1.0 (finish).
 // ---------------------------------------------------------------------------
 using ProgressCallback = std::function<void(float)>;
+
+// ---------------------------------------------------------------------------
+// TokenCallback — invoked once per UTF-8-safe piece of generated text during
+// infer_text().  Each call delivers a `string_view` containing a complete
+// UTF-8 sequence (never a partial multi-byte tail).  Used by the IPC layer to
+// stream polish_delta events to the client as the model generates tokens.
+// ---------------------------------------------------------------------------
+using TokenCallback = std::function<void(std::string_view piece)>;
 
 // ---------------------------------------------------------------------------
 // LlamaContext — PIMPL wrapper around the llama.cpp / mtmd C API.
@@ -86,15 +96,21 @@ public:
     //   generation_suffix  — optional suffix appended after the user turn.
     //   progress           — optional progress callback; nullptr = no-op.
     //   abort_flag         — when non-null, exits early if set to true.
+    //   token_cb           — when non-null, invoked once per UTF-8-safe piece
+    //                        of generated text as tokens are sampled.  Used to
+    //                        stream polish_delta events to the IPC client.
+    //                        The final returned string is still cleaned via
+    //                        strip_thinking_block + strip_gemma_control_tokens.
     //
     // Builds a Gemma 4 chat prompt without the <__media__> audio placeholder
     // and evaluates it using the standard llama tokenisation path.
     // Throws std::runtime_error on failure.
     // ------------------------------------------------------------------------
-    std::string infer_text(const std::string&      text_prompt,
-                            const std::string&      generation_suffix,
-                            ProgressCallback        progress   = nullptr,
-                            const std::atomic<bool>* abort_flag = nullptr);
+    std::string infer_text(const std::string&       text_prompt,
+                            const std::string&       generation_suffix,
+                            ProgressCallback         progress   = nullptr,
+                            const std::atomic<bool>* abort_flag = nullptr,
+                            TokenCallback            token_cb   = nullptr);
 
     // ------------------------------------------------------------------------
     // has_audio_support — true if the loaded mmproj supports audio input.

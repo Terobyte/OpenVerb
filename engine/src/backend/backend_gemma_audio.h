@@ -9,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <vector>
 
 class ProgressQueue;
@@ -75,8 +76,10 @@ public:
     void unload_model() override;
 
     InferenceResult process_text(
-        const std::string&         prompt,
-        std::function<void(float)> progress) override;
+        const std::string&                          prompt,
+        std::function<void(float)>                  progress,
+        std::function<void(std::string_view)>       token_cb   = nullptr,
+        const std::atomic<bool>*                    abort_flag = nullptr) override;
 
     InferenceResult process_stream(
         const std::vector<int16_t>&  audio_pcm,

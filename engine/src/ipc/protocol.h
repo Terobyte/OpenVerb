@@ -39,3 +39,4 @@ void                     send_partial_result(int fd, int chunk_id, const std::st
 void                     send_queue_status(int fd, int pending, int in_flight, int eta_ms);
 void                     send_polish_started(int fd);
 void                     send_polished_result(int fd, const std::string& text);
+void                     send_polish_delta(int fd, const std::string& text);

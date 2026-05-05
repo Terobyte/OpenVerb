@@ -145,13 +145,21 @@ void GemmaAudioBackend::unload_model()
 // ---------------------------------------------------------------------------
 
 InferenceResult GemmaAudioBackend::process_text(
-    const std::string&         prompt,
-    std::function<void(float)> progress)
+    const std::string&                          prompt,
+    std::function<void(float)>                  progress,
+    std::function<void(std::string_view)>       token_cb,
+    const std::atomic<bool>*                    abort_flag)
 {
+    // Match process_impl's lock discipline: hold backend_mutex_ for the full
+    // inference duration. Trade-off: unload_model() blocks during polish (~5–7
+    // s), but this matches the existing audio-inference contract — not a new
+    // regression.  Closes the same race fixed by Bug C2 in process_impl.
+    std::lock_guard<std::mutex> lk(backend_mutex_);
     if (!llama_) throw std::runtime_error("model not loaded");
     const auto t_start = std::chrono::steady_clock::now();
-    const std::string raw_output = llama_->infer_text(prompt, "", progress, nullptr);
-    const auto t_end   = std::chrono::steady_clock::now();
+    const std::string raw_output = llama_->infer_text(
+        prompt, "", progress, abort_flag, token_cb);
+    const auto t_end = std::chrono::steady_clock::now();
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         t_end - t_start);
     return InferenceResult{raw_output, "", elapsed.count()};

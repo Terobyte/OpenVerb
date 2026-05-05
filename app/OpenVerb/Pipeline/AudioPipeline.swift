@@ -334,6 +334,10 @@ final class AudioPipeline {
                 }
                 return .keepGoing
 
+            case .polishDelta(let text):
+                engineClient.onPolishDelta?(text)
+                return .keepGoing
+
             case .warning(let code, let msg):
                 pipelineLogger.warning("AudioPipeline warning \(code): \(msg)")
                 return .keepGoing

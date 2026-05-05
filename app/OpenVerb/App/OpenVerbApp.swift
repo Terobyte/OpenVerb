@@ -324,6 +324,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        // ---- Step 26e: Wire polish_delta forwarding ----
+        // Streams polish tokens during the LLM cleanup pass. Lifts polishedText
+        // from nil on first piece (so RecordingWindow's nil-check still gates
+        // the polish pod correctly) and appends thereafter. onPolishedResult
+        // later replaces the accumulated value with the cleaned final string.
+        engineManager.engineClient.onPolishDelta = { [weak self] text in
+            Task { @MainActor [weak self] in
+                guard let self, self.appState.state == .inferring else { return }
+                self.appState.appendPolishedText(text)
+            }
+        }
+
         // ---- Step 27: Create status bar item ----
         statusBar = StatusBarItem(appState: appState, engineManager: engineManager)
 

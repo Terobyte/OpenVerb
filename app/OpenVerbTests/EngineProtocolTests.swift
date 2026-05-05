@@ -121,6 +121,26 @@ final class EngineProtocolTests: XCTestCase {
         XCTAssertFalse(isFinal)
     }
 
+    func testDecodePolishDelta() throws {
+        let json = #"{"type":"polish_delta","text":"hello"}"# + "\n"
+        let msg = try ServerMessage.fromJSON(json.utf8Data)
+        guard case .polishDelta(let text) = msg else {
+            XCTFail("Expected .polishDelta, got \(msg)")
+            return
+        }
+        XCTAssertEqual(text, "hello")
+    }
+
+    func testDecodePolishDeltaEmptyText() throws {
+        let json = #"{"type":"polish_delta","text":""}"# + "\n"
+        let msg = try ServerMessage.fromJSON(json.utf8Data)
+        guard case .polishDelta(let text) = msg else {
+            XCTFail("Expected .polishDelta, got \(msg)")
+            return
+        }
+        XCTAssertEqual(text, "")
+    }
+
     func testDecodeQueueStatus() throws {
         let json = #"{"type":"queue_status","pending":3,"in_flight":1,"eta_ms":5000}"# + "\n"
         let msg = try ServerMessage.fromJSON(json.utf8Data)

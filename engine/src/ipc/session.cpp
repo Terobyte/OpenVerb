@@ -346,10 +346,34 @@ void Session::run(int fd, Engine& engine, const SessionConfig& cfg) {
                             !stop_requested_.load(std::memory_order_relaxed)) {
                             try {
                                 send_polish_started(fd);
-                                final_text = engine.polish_text(result->text, ctx);
+                                // Stream polish tokens as they're generated. The
+                                // lambda also acts as the cancellation gate: if
+                                // stop_requested_ flips mid-decode, deltas stop
+                                // emitting and abort_flag (passed below) breaks
+                                // the C++ decode loop too.
+                                auto on_token = [fd, this](std::string_view piece) {
+                                    if (this->stop_requested_.load(std::memory_order_relaxed)) return;
+                                    try {
+                                        send_polish_delta(fd, std::string(piece));
+                                    } catch (...) {
+                                        // Connection torn down during streaming —
+                                        // silently stop emitting; outer try will
+                                        // catch on the next send.
+                                    }
+                                };
+                                final_text = engine.polish_text(
+                                    result->text, ctx, on_token, &stop_requested_);
                                 send_polished_result(fd, final_text);
                             } catch (...) {
-                                // Polish failure is non-fatal; send the raw transcript.
+                                // Polish failure is non-fatal. Send a fallback
+                                // polished_result with the raw transcript so the
+                                // Swift HUD always exits the polishing state
+                                // (exitPolishing() is wired to onPolishedResult).
+                                try {
+                                    send_polished_result(fd, result->text);
+                                } catch (...) {
+                                    // Connection already dead — give up cleanly.
+                                }
                             }
                         }
 

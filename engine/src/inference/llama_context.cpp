@@ -101,6 +101,41 @@ static void maybe_warn_vram(const std::string& model_path,
     }
 }
 
+// Emit complete UTF-8 sequences from `buf` via cb; retain trailing incomplete
+// bytes for the next call. Walks back up to 4 bytes (max UTF-8 length) looking
+// for a multi-byte START byte (0b11xxxxxx). If buf ends mid-sequence, holds
+// the incomplete tail. If no start byte is found within the lookback window
+// (defensive: glitched or invalid UTF-8), retains everything until next call
+// or final flush.
+static void emit_utf8_safe(std::string& buf, const TokenCallback& cb) {
+    if (!cb || buf.empty()) return;
+    size_t safe_end = buf.size();
+    bool   found    = false;
+    for (size_t i = 1; i <= 4 && i <= buf.size(); ++i) {
+        unsigned char c = static_cast<unsigned char>(buf[buf.size() - i]);
+        if ((c & 0xC0) == 0xC0) {           // start of multi-byte sequence
+            int expected = 0;
+            if      ((c & 0xE0) == 0xC0) expected = 2;
+            else if ((c & 0xF0) == 0xE0) expected = 3;
+            else if ((c & 0xF8) == 0xF0) expected = 4;
+            if (i < static_cast<size_t>(expected)) {
+                safe_end = buf.size() - i;  // hold incomplete tail
+            }
+            found = true;
+            break;
+        }
+        if ((c & 0x80) == 0) {              // ASCII (single-byte) — clean break
+            found = true;
+            break;
+        }
+        // else: continuation byte (10xxxxxx) — keep walking back
+    }
+    if (!found) return;                     // no start in lookback — hold all
+    if (safe_end == 0) return;
+    cb(std::string_view(buf.data(), safe_end));
+    buf.erase(0, safe_end);
+}
+
 // Strip the Gemma 4 thinking block from model output.
 //
 // Gemma 4 (thinking mode) may prefix responses with a thinking block.
@@ -587,7 +622,8 @@ std::string LlamaContext::infer(const std::string&         text_prompt,
 std::string LlamaContext::infer_text(const std::string&       text_prompt,
                                       const std::string&       generation_suffix,
                                       ProgressCallback         progress,
-                                      const std::atomic<bool>* abort_flag) {
+                                      const std::atomic<bool>* abort_flag,
+                                      TokenCallback            token_cb) {
     const llama_vocab* vocab = llama_model_get_vocab(impl_->model);
 
     // -----------------------------------------------------------------------
@@ -690,6 +726,10 @@ std::string LlamaContext::infer_text(const std::string&       text_prompt,
 
     std::string output;
     output.reserve(512);
+    // Holds bytes that may be a partial UTF-8 sequence between iterations.
+    // emit_utf8_safe walks back from the end and only flushes bytes that lie
+    // on a UTF-8 boundary.  Must persist across token decodes.
+    std::string utf8_pending;
 
     auto last_progress_tp = std::chrono::steady_clock::now();
     if (progress) progress(0.0f);
@@ -714,10 +754,14 @@ std::string LlamaContext::infer_text(const std::string&       text_prompt,
             if (piece_len > 0) {
                 dyn[piece_len] = '\0';
                 output.append(dyn.data(), piece_len);
+                utf8_pending.append(dyn.data(), piece_len);
+                emit_utf8_safe(utf8_pending, token_cb);
             }
         } else if (piece_len > 0) {
             piece_buf[piece_len] = '\0';
             output.append(piece_buf, piece_len);
+            utf8_pending.append(piece_buf, piece_len);
+            emit_utf8_safe(utf8_pending, token_cb);
         }
 
         auto now = std::chrono::steady_clock::now();
@@ -740,6 +784,11 @@ std::string LlamaContext::infer_text(const std::string&       text_prompt,
             throw std::runtime_error(
                 "LlamaContext::infer_text: llama_decode failed at token " +
                 std::to_string(i) + " (rc=" + std::to_string(drc) + ")");
+    }
+
+    // Defensive: flush any held bytes (shouldn't happen with valid model output)
+    if (token_cb && !utf8_pending.empty()) {
+        token_cb(std::string_view(utf8_pending));
     }
 
     if (progress) progress(1.0f);

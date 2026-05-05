@@ -39,6 +39,9 @@ enum ServerMessage {
     case polishStarted
     /// The polished (cleaned) transcript text is ready.
     case polishedResult(text: String)
+    /// Streamed polish-token piece. Ephemeral; client appends to polishedText
+    /// for visual streaming. polishedResult arrives at end with cleaned final.
+    case polishDelta(text: String)
 }
 
 // ---------------------------------------------------------------------------
@@ -167,6 +170,11 @@ extension ServerMessage {
             struct Payload: Decodable { let text: String }
             let p = try decoder.decode(Payload.self, from: data)
             return .polishedResult(text: p.text)
+
+        case "polish_delta":
+            struct Payload: Decodable { let text: String }
+            let p = try decoder.decode(Payload.self, from: data)
+            return .polishDelta(text: p.text)
 
         default:
             throw EngineProtocolError.unknownType(probe.type)

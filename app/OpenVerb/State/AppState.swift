@@ -371,4 +371,11 @@ final class AppState: ObservableObject {
     func setPolishedText(_ text: String?) {
         polishedText = text
     }
+
+    /// Append a polish-token piece. Lifts polishedText from nil on first call.
+    /// Called from OpenVerbApp's onPolishDelta handler on @MainActor.
+    /// onPolishedResult later replaces the accumulated value with the cleaned final.
+    func appendPolishedText(_ piece: String) {
+        polishedText = (polishedText ?? "") + piece
+    }
 }

@@ -197,7 +197,9 @@ InferenceResult Engine::process_stream(
     return process_stream(pcm, sample_rate, j.dump(), abort_flag, progress_queue);
 }
 
-std::string Engine::polish_text(const std::string& raw, const Context& ctx) {
+std::string Engine::polish_text(const std::string& raw, const Context& ctx,
+                                std::function<void(std::string_view)> token_cb,
+                                const std::atomic<bool>*              abort_flag) {
     if (raw.empty()) return raw;
 
     // Build the polish prompt: system instruction + optional surrounding-text
@@ -206,7 +208,13 @@ std::string Engine::polish_text(const std::string& raw, const Context& ctx) {
     // The before/after excerpts give the model visibility into the surrounding
     // document so capitalization, punctuation, and tone match. Each side is
     // capped at EXCERPT_BYTES to keep the prompt within POLISH_CONTEXT_TOKENS.
-    std::string prompt = POLISH_SYSTEM_PROMPT "\n";
+    //
+    // /no_think prefix matches the audio path's build_gemma4_prompt — without
+    // it, Gemma 4 may emit [Start thinking]…[End thinking] blocks that leak
+    // into the streamed token feed before strip_thinking_block runs on the
+    // final output.
+    std::string prompt = "/no_think\n";
+    prompt += POLISH_SYSTEM_PROMPT "\n";
     const std::size_t EXCERPT_BYTES = 200;
     if (!ctx.text_before_cursor.empty()) {
         std::string before = ctx.text_before_cursor.size() > EXCERPT_BYTES
@@ -236,7 +244,7 @@ std::string Engine::polish_text(const std::string& raw, const Context& ctx) {
     }
 
     try {
-        InferenceResult result = be->process_text(prompt, nullptr);
+        InferenceResult result = be->process_text(prompt, nullptr, token_cb, abort_flag);
         if (!result.text.empty()) return result.text;
     } catch (const std::exception&) {
         // Polish failure is non-fatal — return raw transcript.
