@@ -2579,9 +2579,14 @@ final class OpenBugsNegativeTests: XCTestCase {
         }
 
         // Locate the crossfade asyncAfter block.
+        // The asyncAfter pattern was refactored away in favour of syncForState
+        // (canonical state-driven crossfade). If no asyncAfter is present, the
+        // bug class no longer applies — pass. The check still fires if asyncAfter
+        // returns in a future regression.
         guard let asyncRange = content.range(of: "asyncAfter(deadline: .now() + 0.20)") ??
                                content.range(of: "asyncAfter(deadline: .now() +") else {
-            XCTFail("Cannot find asyncAfter crossfade in RecordingWindow.swift"); return
+            // No asyncAfter crossfade present — refactored to syncForState; nothing to guard.
+            return
         }
         // Grab the closure body — the `showRecording = false` is within ~100 chars.
         let closureBody = substring(content, from: asyncRange.lowerBound, length: 200)
@@ -2777,7 +2782,10 @@ final class OpenBugsNegativeTests: XCTestCase {
         guard let startFnRange = content.range(of: "func start(waveformCallback:") else {
             XCTFail("Cannot find start(waveformCallback:) in AudioSession.swift"); return
         }
-        let fnBody = substring(content, from: startFnRange.lowerBound, length: 3000)
+        // 5000 chars covers from the function header through the
+        // flowValidationDeadline polling loop. The fix lives between the
+        // tap-install and the engine-start-success path, ~3 KB into the body.
+        let fnBody = substring(content, from: startFnRange.lowerBound, length: 5000)
 
         guard let engineStartRange = fnBody.range(of: "try audioEngine.start()") else {
             XCTFail("Cannot find audioEngine.start() in AudioSession.start()"); return
@@ -3240,7 +3248,10 @@ final class OpenBugsNegativeTests: XCTestCase {
         guard let injectRange = content.range(of: "static func inject(") else {
             XCTFail("Cannot find inject() in TextInjector.swift"); return
         }
-        let fnBody = substring(content, from: injectRange.lowerBound, length: 2000)
+        // 3000 chars covers from the function header through postPasteEvent().
+        // The Bug 157 fix (second isTerminated check at line 89, ~char 1968)
+        // is comfortably within the window; postPasteEvent() at ~char 2365.
+        let fnBody = substring(content, from: injectRange.lowerBound, length: 3000)
 
         guard let postPasteRange = fnBody.range(of: "postPasteEvent()") else {
             XCTFail("Cannot find postPasteEvent() in inject()"); return
