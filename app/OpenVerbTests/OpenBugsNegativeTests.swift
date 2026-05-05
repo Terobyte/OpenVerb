@@ -3858,4 +3858,1785 @@ final class OpenBugsNegativeTests: XCTestCase {
             "Fix: remove self.lock.lock/unlock from the async block; use only the already- " +
             "captured `sessionGen` constant for the generation comparison.")
     }
+
+    // =======================================================================
+    // Bug C3 — Integer overflow in RingBuffer::write
+    //
+    // `size_t free = BUF_SIZE - (w - r)` — when w/r monotonic counters wrap
+    // independently, the subtraction can underflow → free is huge positive,
+    // bypassing overflow guard and corrupting subsequent writes.
+    // =======================================================================
+
+    func testBugC3_ringBufferWriteIntegerOverflow() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/audio/ring_buffer.cpp"
+        guard let content = readSource("engine/src/audio/ring_buffer.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read ring_buffer.cpp"); return
+        }
+        guard let writeRange = content.range(of: "RingBuffer::write(") else {
+            XCTFail("Cannot find RingBuffer::write"); return
+        }
+        let body = substring(content, from: writeRange.lowerBound, length: 800)
+        // Fix should add a guard that w >= r OR clamp via modular arithmetic.
+        let hasWrapGuard = body.contains("w >= r")
+            || body.contains("(w - r) <= BUF_SIZE")
+            || body.contains("std::min<size_t>")
+            || body.contains("MASK")
+        XCTAssertTrue(hasWrapGuard,
+            "Bug C3 CONFIRMED: RingBuffer::write computes `BUF_SIZE - (w - r)` " +
+            "without a wrap-safe check. If indices ever underflow (w < r) the " +
+            "subtraction wraps to a huge size_t, the n=min(len,free) clamp " +
+            "no longer prevents writes past BUF_SIZE. " +
+            "Fix: guard `if (w < r) reset/abort` or compute free via modular arithmetic.")
+    }
+
+    // =======================================================================
+    // Bug C4 — Race condition in GemmaAudioBackend::process_text()
+    //
+    // process_text() must acquire backend_mutex_ before checking llama_.
+    // =======================================================================
+
+    func testBugC4_processTextLocksBackendMutex() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/backend/backend_gemma_audio.cpp"
+        guard let content = readSource("engine/src/backend/backend_gemma_audio.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read backend_gemma_audio.cpp"); return
+        }
+        guard let fnRange = content.range(of: "GemmaAudioBackend::process_text(") else {
+            XCTFail("Cannot find process_text"); return
+        }
+        let body = substring(content, from: fnRange.lowerBound, length: 600)
+        let lockBeforeNullCheck =
+            (body.range(of: "backend_mutex_")?.lowerBound)
+                .flatMap { lockIdx -> Bool? in
+                    guard let nullIdx = body.range(of: "if (!llama_")?.lowerBound else { return nil }
+                    return lockIdx < nullIdx
+                } ?? false
+        XCTAssertTrue(lockBeforeNullCheck,
+            "Bug C4 CONFIRMED: process_text() must acquire backend_mutex_ before " +
+            "checking !llama_; otherwise unload_model() can reset llama_ between " +
+            "the null-check and dereference, causing a nullptr crash. " +
+            "Fix: `std::lock_guard<std::mutex> lk(backend_mutex_);` as first line.")
+    }
+
+    // =======================================================================
+    // Bug C5 — Load thread detach with moved-from promise
+    //
+    // session.cpp wait_for + detach pattern leaves a detached thread which
+    // calls set_value on a destroyed promise. Fix replaces detach with a
+    // join (or shared abort flag).
+    // =======================================================================
+
+    func testBugC5_loadThreadDetachLeavesPromiseDangling() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/ipc/session.cpp"
+        guard let content = readSource("engine/src/ipc/session.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read session.cpp"); return
+        }
+        // Look in the load section (around the wait_for/load_thread block).
+        guard let waitRange = content.range(of: "wait_for(") else {
+            XCTFail("Cannot find wait_for in session.cpp"); return
+        }
+        let body = substring(content, from: waitRange.lowerBound, length: 600)
+        let detaches = body.contains("load_thread.detach()")
+            || body.contains(".detach();")
+        XCTAssertFalse(detaches,
+            "Bug C5 CONFIRMED: session.cpp detaches load_thread on timeout while " +
+            "the lambda still references the promise on the stack. The detached " +
+            "thread later calls set_value on a destroyed promise → UB. " +
+            "Fix: don't detach — join with a shared abort flag, or move the " +
+            "promise to heap-allocated shared_state owned by the lambda.")
+    }
+
+    // =======================================================================
+    // Bug C6 — Double mutex lock → deadlock in send_json
+    //
+    // protocol.cpp send_error() calls send_json() while holding the same
+    // static mutex → deadlock. Fix: recursive_mutex or restructure so only
+    // send_json acquires the lock.
+    // =======================================================================
+
+    func testBugC6_sendErrorDoesNotRecursivelyLockSendJson() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/ipc/protocol.cpp"
+        guard let content = readSource("engine/src/ipc/protocol.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read protocol.cpp"); return
+        }
+        let usesRecursive = content.contains("std::recursive_mutex")
+            || content.contains("recursive_mutex")
+        // OR: if non-recursive mutex used, send_error must NOT call send_json.
+        guard let errRange = content.range(of: "send_error(") else {
+            XCTFail("Cannot find send_error"); return
+        }
+        let errBody = substring(content, from: errRange.lowerBound, length: 600)
+        let errCallsSendJson = errBody.contains("send_json(")
+        XCTAssertTrue(usesRecursive || !errCallsSendJson,
+            "Bug C6 CONFIRMED: send_error() calls send_json() but the protocol " +
+            "uses a non-recursive mutex — the second lock attempt on the same " +
+            "thread deadlocks. " +
+            "Fix: switch to std::recursive_mutex, or have send_error build the " +
+            "error JSON and call the locked write path directly.")
+    }
+
+    // =======================================================================
+    // Bug C7 — TOCTOU race in memory pressure critical handler
+    //
+    // server.cpp checks pressure_critical_active_ + session_active_ then
+    // unloads model — a new session can start in the gap.
+    // =======================================================================
+
+    func testBugC7_memoryPressureCriticalHasAtomicGate() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/ipc/server.cpp"
+        guard let content = readSource("engine/src/ipc/server.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read server.cpp"); return
+        }
+        guard let prRange = content.range(of: "pressure_critical_active_") else {
+            XCTFail("Cannot find pressure_critical_active_ in server.cpp"); return
+        }
+        let body = substring(content, from: prRange.lowerBound, length: 800)
+        // Fix: surround the check + unload with mutex, or use compare_exchange
+        // to atomically claim the unload right.
+        let hasAtomicGate = body.contains("compare_exchange")
+            || body.contains("std::lock_guard")
+            || body.contains("session_mutex_")
+            || body.contains("unload_mutex_")
+        XCTAssertTrue(hasAtomicGate,
+            "Bug C7 CONFIRMED: memory-pressure critical handler checks " +
+            "pressure_critical_active_/session_active_ then calls unload_model " +
+            "without atomicity. A new session can start in the TOCTOU window " +
+            "and the unload races with active inference. " +
+            "Fix: cover the check + unload with a mutex, or use " +
+            "compare_exchange_strong to atomically claim the unload right.")
+    }
+
+    // =======================================================================
+    // Bug C10 — Force-unwrap crash in AudioRingBuffer timeout Task
+    //
+    // app/OpenVerb/Input/AudioRingBuffer.swift:242 — timeout Task accesses
+    // self.handleStates[handle]! without nil check after sleep.
+    // =======================================================================
+
+    func testBugC10_audioRingBufferTimeoutTaskForceUnwrap() {
+        guard let content = readSource("OpenVerb/Input/AudioRingBuffer.swift") else {
+            XCTFail("Cannot read AudioRingBuffer.swift"); return
+        }
+        // Look for the timeout Task body. Fix should use guard let / optional binding
+        // when accessing handleStates[handle] post-sleep.
+        guard let taskRange = content.range(of: "Task")
+            ?? content.range(of: "handleStates[") else {
+            XCTFail("Cannot find timeout Task / handleStates access"); return
+        }
+        let body = substring(content, from: taskRange.lowerBound, length: 1200)
+        // Bug pattern: handleStates[handle]! force unwrap.
+        let hasForceUnwrap = body.contains("handleStates[handle]!")
+            || body.contains("self.handleStates[handle]!")
+        XCTAssertFalse(hasForceUnwrap,
+            "Bug C10 CONFIRMED: AudioRingBuffer timeout Task force-unwraps " +
+            "self.handleStates[handle] after Task.sleep. If clear(handle:) " +
+            "is called during the sleep window, the entry is gone and the " +
+            "force-unwrap crashes. " +
+            "Fix: `guard let state = handleStates[handle] else { return }`.")
+    }
+
+    // =======================================================================
+    // Bug C11 — Use-after-stop in AudioSession diagnostic logging
+    //
+    // After stop() releases the lock, code reads _sessionPeak / _sessionSampleCount
+    // unsynchronised. The audio tap callback may still be writing them.
+    // =======================================================================
+
+    func testBugC11_audioSessionDiagnosticReadAfterUnlock() {
+        guard let content = readSource("OpenVerb/Input/AudioSession.swift") else {
+            XCTFail("Cannot read AudioSession.swift"); return
+        }
+        guard let stopRange = content.range(of: "func stop(") ?? content.range(of: "stop()") else {
+            XCTFail("Cannot find stop() in AudioSession.swift"); return
+        }
+        let body = substring(content, from: stopRange.lowerBound, length: 1200)
+        // The fix captures peak/count INSIDE the lock into local constants before unlock.
+        // Bug: _sessionPeak / _sessionSampleCount accessed AFTER lock.unlock() / defer release.
+        // Look for a "let peakCopy = _sessionPeak" or similar capture inside lock.
+        let hasLocalCapture = body.contains("let peakCopy")
+            || body.contains("let capturedPeak")
+            || body.contains("let snapshotPeak")
+            || body.contains("peakSnapshot")
+            || body.contains("sampleCountSnapshot")
+            // Or: peak/count not read at all after unlock.
+            || !(body.contains("_sessionPeak") && body.contains("unlock"))
+        XCTAssertTrue(hasLocalCapture,
+            "Bug C11 CONFIRMED: AudioSession.stop() reads _sessionPeak / " +
+            "_sessionSampleCount AFTER the audio lock is released, while the " +
+            "tap callback may still be modifying them. Data race on " +
+            "diagnostic counters → torn reads / wrong logs. " +
+            "Fix: copy into local constants inside the lock, log after unlock.")
+    }
+
+    // =======================================================================
+    // Bug C12 — Race condition during sleep/wake in EngineManager
+    //
+    // disconnect() races with concurrent ensureRunning() — socket closed
+    // while operations are pending.
+    // =======================================================================
+
+    func testBugC12_engineManagerDisconnectSerialisesWithEnsureRunning() {
+        guard let content = readSource("OpenVerb/Engine/EngineManager.swift") else {
+            XCTFail("Cannot read EngineManager.swift"); return
+        }
+        guard let disconnectRange = content.range(of: "func disconnect(") else {
+            XCTFail("Cannot find disconnect()"); return
+        }
+        let body = substring(content, from: disconnectRange.lowerBound, length: 800)
+        // Fix: disconnect() must run on ioQueue (the same queue as socket ops)
+        // — look for ioQueue.async / ioQueue.sync inside disconnect().
+        let serializesOnIoQueue = body.contains("ioQueue.async")
+            || body.contains("ioQueue.sync")
+            || body.contains("ioQueue.asyncAfter")
+        XCTAssertTrue(serializesOnIoQueue,
+            "Bug C12 CONFIRMED: EngineManager.disconnect() does not synchronise " +
+            "on ioQueue (the queue used by socket ops). On sleep/wake the OS " +
+            "fires didWake before disconnect() completes, causing ensureRunning() " +
+            "to race with the in-progress close — fd reused / write errors. " +
+            "Fix: dispatch the disconnect body onto ioQueue.")
+    }
+
+    // =======================================================================
+    // Bug C13 — Memory leak in TextInjector — clipboard restore skipped
+    //
+    // savedItems retains NSPasteboardItem with large data. Early returns
+    // (app terminated, activate fails) skip restore. Array never cleared.
+    // Fix: defer { savedItems.removeAll() } at start of inject().
+    // =======================================================================
+
+    func testBugC13_textInjectorSavedItemsLeak() {
+        guard let content = readSource("OpenVerb/Output/TextInjector.swift") else {
+            XCTFail("Cannot read TextInjector.swift"); return
+        }
+        guard let injectRange = content.range(of: "func inject(") else {
+            XCTFail("Cannot find inject() in TextInjector.swift"); return
+        }
+        let body = substring(content, from: injectRange.lowerBound, length: 1500)
+        // Fix: a defer that clears savedItems must appear early in inject().
+        let hasDeferClear = body.contains("defer { savedItems.removeAll()")
+            || body.contains("defer {\n            savedItems.removeAll")
+            || body.contains("defer { self.savedItems.removeAll")
+            || body.contains("savedItems.removeAll()")
+        XCTAssertTrue(hasDeferClear,
+            "Bug C13 CONFIRMED: TextInjector.inject() retains NSPasteboardItem " +
+            "objects in savedItems with potentially large data; early returns " +
+            "(app terminated, activate fails) skip the restore path so the " +
+            "array is never cleared. Memory leak grows per dictation. " +
+            "Fix: `defer { savedItems.removeAll() }` at the top of inject().")
+    }
+
+    // =======================================================================
+    // Bug C14 — TOCTOU on target app in TextInjector
+    //
+    // Double-check of targetApp.isTerminated still has a 50ms window where
+    // the target can quit and a different app can become focused — paste
+    // goes into the wrong app.
+    // =======================================================================
+
+    func testBugC14_textInjectorTargetAppToctou() {
+        guard let content = readSource("OpenVerb/Output/TextInjector.swift") else {
+            XCTFail("Cannot read TextInjector.swift"); return
+        }
+        // Fix should observe NSWorkspace.didDeactivateApplicationNotification
+        // OR check NSWorkspace.shared.frontmostApplication?.processIdentifier
+        // matches targetApp before the actual paste keystroke.
+        let hasFrontmostCheck = content.contains("frontmostApplication")
+            && content.contains("processIdentifier")
+        let hasNotificationObserver = content.contains("didDeactivateApplicationNotification")
+            || content.contains("didActivateApplicationNotification")
+        XCTAssertTrue(hasFrontmostCheck || hasNotificationObserver,
+            "Bug C14 CONFIRMED: TextInjector relies on a stale targetApp.isTerminated " +
+            "check; in the 50 ms window before the paste keystroke the user can " +
+            "Cmd-Tab to a different app, and the paste lands in the wrong target " +
+            "(privacy + correctness issue). " +
+            "Fix: re-check NSWorkspace.shared.frontmostApplication.processIdentifier " +
+            "matches targetApp.processIdentifier immediately before the paste, or " +
+            "observe didDeactivateApplicationNotification on targetApp and abort.")
+    }
+
+    // =======================================================================
+    // Bug C15 — Force-cast crash in AccessibilityReader
+    //
+    // `window as! AXUIElement` force-cast at AccessibilityReader.swift:45.
+    // Element can become invalid between type check and cast → crash.
+    // =======================================================================
+
+    func testBugC15_accessibilityReaderForceCastWindow() {
+        guard let content = readSource("OpenVerb/Context/AccessibilityReader.swift") else {
+            XCTFail("Cannot read AccessibilityReader.swift"); return
+        }
+        // Fix: replace `as!` with conditional `as?` or guard let ... else.
+        let hasForceCast = content.contains("as! AXUIElement")
+            || content.contains("window as! AXUIElement")
+        XCTAssertFalse(hasForceCast,
+            "Bug C15 CONFIRMED: AccessibilityReader uses `as! AXUIElement` " +
+            "force-cast on a window reference. The window can be invalidated " +
+            "between AXUIElement type-check and the cast (app quit, window " +
+            "closed) — force-cast on a now-invalid element crashes. " +
+            "Fix: `guard let win = window as? AXUIElement else { return nil }`.")
+    }
+
+    // =======================================================================
+    // Bug C16 — Force-unwrap crash in StatusBarItem.showPreferences()
+    //
+    // engineManager is `weak var` — force-unwrapped without guard. If nil
+    // while status bar item alive → crash.
+    // =======================================================================
+
+    func testBugC16_statusBarShowPreferencesForceUnwrapsEngineManager() {
+        guard let content = readSource("OpenVerb/UI/StatusBarItem.swift") else {
+            XCTFail("Cannot read StatusBarItem.swift"); return
+        }
+        guard let fnRange = content.range(of: "showPreferences") else {
+            XCTFail("Cannot find showPreferences in StatusBarItem.swift"); return
+        }
+        let body = substring(content, from: fnRange.lowerBound, length: 600)
+        // Bug pattern: engineManager! force unwrap.
+        let hasForceUnwrap = body.contains("engineManager!")
+        XCTAssertFalse(hasForceUnwrap,
+            "Bug C16 CONFIRMED: StatusBarItem.showPreferences() force-unwraps " +
+            "the weak `engineManager` reference. If the EngineManager is " +
+            "deallocated while the status bar item is still alive (e.g. during " +
+            "shutdown), the force-unwrap crashes the menu action handler. " +
+            "Fix: `guard let engineManager else { return }` at top of method.")
+    }
+
+    // =======================================================================
+    // Bug C17 — Unquoted variables in install-launchd.sh heredoc
+    //
+    // $PLIST_NAME, $ENGINE_BIN, $LOG_DIR unquoted inside heredoc → spaces in
+    // paths produce malformed plist.
+    // =======================================================================
+
+    func testBugC17_installLaunchdQuotesHeredocVariables() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/scripts/install-launchd.sh"
+        guard let content = (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read install-launchd.sh"); return
+        }
+        // Fix detection: the heredoc should use literal <<'EOF' OR all variables
+        // should be wrapped through envsubst with quoting OR explicit shell
+        // quoting. Simplest detection: look for quoted heredoc terminator,
+        // or for double-quoted variable interpolation.
+        let usesQuotedHeredoc = content.contains("<<'PLIST'")
+            || content.contains("<<\"PLIST\"")
+            || content.contains("<<'EOF'")
+            || content.contains("envsubst")
+        XCTAssertTrue(usesQuotedHeredoc,
+            "Bug C17 CONFIRMED: install-launchd.sh uses an unquoted heredoc to " +
+            "emit the launchd plist; $PLIST_NAME, $ENGINE_BIN and $LOG_DIR " +
+            "interpolate without escaping so paths containing spaces/special " +
+            "characters produce a malformed plist (failure to load engine). " +
+            "Fix: use a quoted heredoc terminator (<<'EOF') and emit values via " +
+            "envsubst, or hand-build the plist with proper XML escaping.")
+    }
+
+    // =======================================================================
+    // Bug C18 — Broken signing identity check (regex vs fixed string)
+    //
+    // sign-build.sh uses `grep -q` on the identity name — regex meta chars
+    // match unintended identities. "My.App" matches "MyXApp".
+    // =======================================================================
+
+    func testBugC18_signBuildUsesFixedStringGrep() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/scripts/sign-build.sh"
+        guard let content = (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read sign-build.sh"); return
+        }
+        // Fix: identity match must use grep -F (fixed string).
+        let usesFixedGrep = content.contains("grep -Fq")
+            || content.contains("grep -F ")
+            || content.contains("grep --fixed-strings")
+        XCTAssertTrue(usesFixedGrep,
+            "Bug C18 CONFIRMED: sign-build.sh greps for the signing identity " +
+            "without -F (fixed string) so regex metacharacters in the name " +
+            "(., *, ?) match unintended identities. Security regression: a " +
+            "malicious or mistyped identity could be accepted. " +
+            "Fix: use `grep -Fq` (or `grep --fixed-strings`).")
+    }
+
+    // =======================================================================
+    // Bug H2 — Null pointer dereference in Vad::is_speech
+    //
+    // WebRtcVad_Process(vad_, ...) without null check. After move or default
+    // construction → crash.
+    // =======================================================================
+
+    func testBugH2_vadIsSpeechNullCheck() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/audio/vad.cpp"
+        guard let content = readSource("engine/src/audio/vad.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read vad.cpp"); return
+        }
+        guard let fnRange = content.range(of: "Vad::is_speech(") else {
+            XCTFail("Cannot find Vad::is_speech"); return
+        }
+        let body = substring(content, from: fnRange.lowerBound, length: 400)
+        let hasNullGuard = body.contains("if (!vad_)")
+            || body.contains("if (vad_ == nullptr)")
+            || body.contains("assert(vad_)")
+        XCTAssertTrue(hasNullGuard,
+            "Bug H2 CONFIRMED: Vad::is_speech calls WebRtcVad_Process(vad_, …) " +
+            "without verifying vad_ is non-null. After a move-from or on a " +
+            "default-constructed Vad, vad_ is nullptr and WebRtc dereferences " +
+            "it → segfault. " +
+            "Fix: `if (!vad_) return false;` at function entry.")
+    }
+
+    // =======================================================================
+    // Bug H3 — Deadlock potential in VadScanner::push_frame
+    //
+    // If cb_() throws after mutex unlock, mutex never re-acquired → deadlock.
+    // =======================================================================
+
+    func testBugH3_vadScannerPushFrameCallbackExceptionSafety() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/audio/vad_scanner.cpp"
+        guard let content = readSource("engine/src/audio/vad_scanner.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read vad_scanner.cpp"); return
+        }
+        guard let fnRange = content.range(of: "push_frame") else {
+            XCTFail("Cannot find push_frame"); return
+        }
+        let body = substring(content, from: fnRange.lowerBound, length: 1200)
+        // Fix: try-catch around cb_(), or move cb_() out of the unlocked region,
+        // or use std::scoped_lock so unwinding is automatic.
+        let hasTryCatch = body.contains("try {")
+            && (body.contains("} catch") || body.contains("catch ("))
+        let usesScopedLock = body.contains("std::scoped_lock")
+            || body.contains("std::lock_guard")
+        XCTAssertTrue(hasTryCatch || !usesScopedLock,
+            "Bug H3 CONFIRMED: VadScanner::push_frame unlocks the internal " +
+            "mutex before calling cb_(); if cb_() throws, the mutex is never " +
+            "re-acquired and subsequent push_frame/flush calls deadlock. " +
+            "Fix: wrap cb_() in try/catch and rethrow after re-locking, or " +
+            "restructure to keep the lock held across cb_().")
+    }
+
+    // =======================================================================
+    // Bug H4 — Memory leak in Vad constructor exception handling
+    //
+    // If WebRtcVad_set_mode fails, vad_ is freed but not nullified.
+    // Destructor double-frees.
+    // =======================================================================
+
+    func testBugH4_vadConstructorClearsPointerOnFailure() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/audio/vad.cpp"
+        guard let content = readSource("engine/src/audio/vad.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read vad.cpp"); return
+        }
+        // Look for the constructor-failure path. After WebRtcVad_Free(vad_)
+        // there must be `vad_ = nullptr` to prevent double-free in dtor.
+        guard let freeRange = content.range(of: "WebRtcVad_Free") else {
+            XCTFail("Cannot find WebRtcVad_Free"); return
+        }
+        let body = substring(content, from: freeRange.lowerBound, length: 300)
+        let nullsAfterFree = body.contains("vad_ = nullptr")
+            || body.contains("vad_ = NULL")
+        XCTAssertTrue(nullsAfterFree,
+            "Bug H4 CONFIRMED: Vad constructor calls WebRtcVad_Free(vad_) on " +
+            "set_mode failure but does not assign vad_ = nullptr. Destructor " +
+            "calls WebRtcVad_Free(vad_) again → double-free. " +
+            "Fix: `vad_ = nullptr;` after every WebRtcVad_Free in error paths.")
+    }
+
+    // =======================================================================
+    // Bug H5 — Buffer overflow in resample_channel boundary
+    //
+    // i1 can be n_in-1, then i1+2 = n_in+1 — out-of-bounds read on boundary
+    // interpolation.
+    // =======================================================================
+
+    func testBugH5_resampleChannelBoundsCheck() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/audio/resampler.cpp"
+        guard let content = readSource("engine/src/audio/resampler.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read resampler.cpp"); return
+        }
+        guard let fnRange = content.range(of: "resample_channel") else {
+            XCTFail("Cannot find resample_channel"); return
+        }
+        let body = substring(content, from: fnRange.lowerBound, length: 1500)
+        // Fix: explicit guard on i1 + 2 < n_in or clamp before access.
+        let hasBoundsGuard = body.contains("i1 + 2 < n_in")
+            || body.contains("(i1 + 2) < n_in")
+            || body.contains("std::min<size_t>")
+            || body.contains("std::min<int>")
+            || body.contains("clamp")
+        XCTAssertTrue(hasBoundsGuard,
+            "Bug H5 CONFIRMED: resample_channel boundary interpolation reads " +
+            "in[i1+2] without checking i1+2 < n_in. When i1 == n_in-1, the " +
+            "read is out of bounds — UB / sanitizer trap. " +
+            "Fix: clamp i1+2 to n_in-1 (or special-case the last sample).")
+    }
+
+    // =======================================================================
+    // Bug H8 — Missing KV-cache overflow check in infer_text()
+    //
+    // infer_text() lacks the n_past >= ctx_size check that infer() has.
+    // Long polish prompt + generation → memory corruption.
+    // =======================================================================
+
+    func testBugH8_inferTextHasKvCacheBoundsCheck() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/inference/llama_context.cpp"
+        guard let content = readSource("engine/src/inference/llama_context.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read llama_context.cpp"); return
+        }
+        guard let fnRange = content.range(of: "infer_text(") else {
+            XCTFail("Cannot find infer_text"); return
+        }
+        let body = substring(content, from: fnRange.lowerBound, length: 4000)
+        // Fix: add n_past >= ctx_size check before llama_decode.
+        let hasBoundsCheck = body.contains("n_past >= ctx_size")
+            || body.contains("n_past + ")
+            || body.contains("ctx_size -")
+            || body.contains("llama_n_ctx(")
+            || body.contains("if (n_past")
+        XCTAssertTrue(hasBoundsCheck,
+            "Bug H8 CONFIRMED: infer_text() does not check n_past against the " +
+            "KV-cache context size before llama_decode(). A long polish prompt " +
+            "plus generation can exceed the context window — undefined behaviour " +
+            "/ memory corruption inside llama.cpp. " +
+            "Fix: mirror the bounds check in infer() (`if (n_past >= ctx_size) " +
+            "throw …`).")
+    }
+
+    // =======================================================================
+    // Bug H9 — Missing synchronization on inference_result_
+    //
+    // Worker writes inference_result_ under infer_mutex_; reader moves from
+    // it. Without acquire fence on the read side data race.
+    // =======================================================================
+
+    func testBugH9_inferenceResultReadUnderMutex() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/ipc/session.cpp"
+        guard let content = readSource("engine/src/ipc/session.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read session.cpp"); return
+        }
+        // The fix requires that every inference_result_ access occurs under
+        // infer_mutex_. Heuristic: count occurrences of inference_result_;
+        // for each, verify infer_mutex_ appears within ~200 chars before.
+        var lineNumber = 0
+        var unprotectedAccess = false
+        for line in content.split(separator: "\n") {
+            lineNumber += 1
+            if line.contains("inference_result_") {
+                // Look back ~30 lines for an infer_mutex_/lock_guard.
+                let lower = max(0, lineNumber - 30)
+                let prefix = content.split(separator: "\n").prefix(lineNumber).suffix(lineNumber - lower).joined(separator: "\n")
+                if !prefix.contains("infer_mutex_") &&
+                   !prefix.contains("lock_guard") &&
+                   !prefix.contains("scoped_lock") &&
+                   !prefix.contains("unique_lock") {
+                    unprotectedAccess = true
+                    break
+                }
+            }
+        }
+        XCTAssertFalse(unprotectedAccess,
+            "Bug H9 CONFIRMED: session.cpp accesses inference_result_ outside " +
+            "infer_mutex_ in at least one path. Without an acquire fence on " +
+            "the read side the worker's writes (string buffer, transcript) " +
+            "may not be visible to the reading thread → torn data / data race. " +
+            "Fix: every read/write of inference_result_ must hold infer_mutex_.")
+    }
+
+    // =======================================================================
+    // Bug H10 — Use-after-move on chunk_queue_ after worker exception
+    //
+    // Inference-worker exception breaks loop without storing transcript;
+    // sentinel reads empty inference_result_ → masks error.
+    // TODO: tighten — currently checks for a stored error state.
+    // =======================================================================
+
+    func testBugH10_workerExceptionStoresErrorState() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/ipc/session.cpp"
+        guard let content = readSource("engine/src/ipc/session.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read session.cpp"); return
+        }
+        // Look around the inference-worker catch block for some indication
+        // of error propagation (worker_error_, last_error_, set_error()).
+        guard let workerRange = content.range(of: "inference") ?? content.range(of: "worker_thread_") else {
+            XCTFail("Cannot find inference worker"); return
+        }
+        let body = substring(content, from: workerRange.lowerBound, length: 4000)
+        let storesErrorOnException = body.contains("worker_error_")
+            || body.contains("last_error_")
+            || body.contains("set_error(")
+            || body.contains("inference_error_")
+            || body.contains("error_message_")
+            || (body.contains("} catch") && body.contains("send_error"))
+        XCTAssertTrue(storesErrorOnException,
+            "Bug H10 CONFIRMED: when the inference worker throws, the loop " +
+            "breaks without storing any error state. The sentinel reading " +
+            "inference_result_ later sees an empty transcript and treats it as " +
+            "a successful empty result, masking the original error from the " +
+            "client. " +
+            "Fix: store the exception message (e.g. worker_error_) before " +
+            "breaking, and propagate it through the sentinel path.")
+    }
+
+    // =======================================================================
+    // Bug H11 — Use-after-free in GCD handler
+    //
+    // GCD handler captures self, accesses members. New event between
+    // dispatch_source_cancel and sync barrier → handler runs after
+    // mem_source_ freed.
+    // =======================================================================
+
+    func testBugH11_serverGcdHandlerNullifiesBeforeCancel() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/ipc/server.cpp"
+        guard let content = readSource("engine/src/ipc/server.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read server.cpp"); return
+        }
+        guard let memRange = content.range(of: "mem_source_") else {
+            XCTFail("Cannot find mem_source_ in server.cpp"); return
+        }
+        let body = substring(content, from: memRange.lowerBound, length: 4000)
+        // Fix: nullify mem_source_ before dispatch_source_cancel, OR
+        // use dispatch_release/dispatch_sync barrier to drain handler.
+        let nullsBeforeCancel = body.contains("mem_source_ = nullptr")
+            || body.contains("mem_source_ = NULL")
+            || body.contains("dispatch_sync(")
+            || body.contains("dispatch_block_wait")
+        XCTAssertTrue(nullsBeforeCancel,
+            "Bug H11 CONFIRMED: server.cpp cancels mem_source_ but the GCD " +
+            "handler may still execute after cancel returns (event already " +
+            "queued). The handler dereferences self/mem_source_ → use-after- " +
+            "free if the IpcServer is destroyed in that window. " +
+            "Fix: set mem_source_ = nullptr before cancel, then dispatch_sync " +
+            "an empty block to drain pending handlers.")
+    }
+
+    // =======================================================================
+    // Bug H12 — Use-after-move in build_prompt return
+    //
+    // `return {xml, std::string(gen_suffix)}` may not move xml correctly.
+    // =======================================================================
+
+    func testBugH12_buildPromptReturnsExplicitMove() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/context/prompt_builder.cpp"
+        guard let content = readSource("engine/src/context/prompt_builder.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read prompt_builder.cpp"); return
+        }
+        guard let fnRange = content.range(of: "build_prompt") else {
+            XCTFail("Cannot find build_prompt"); return
+        }
+        let body = substring(content, from: fnRange.lowerBound, length: 3000)
+        // Fix should use std::make_pair(std::move(xml), …) or std::move(xml).
+        let usesExplicitMove = body.contains("std::move(xml)")
+            || body.contains("std::make_pair(std::move")
+        XCTAssertTrue(usesExplicitMove,
+            "Bug H12 CONFIRMED: build_prompt returns `{xml, std::string(gen_suffix)}` " +
+            "which on some compilers copies xml rather than moving — large prompts " +
+            "trigger an unnecessary heap copy and mask intent. " +
+            "Fix: `return std::make_pair(std::move(xml), std::string(gen_suffix));`")
+    }
+
+    // =======================================================================
+    // Bug H13 — Missing UTF-8 bounds check in strip_trailing_punct
+    //
+    // String ending with incomplete UTF-8 multi-byte sequence — reads partial
+    // bytes as complete character.
+    // =======================================================================
+
+    func testBugH13_stripTrailingPunctValidatesUtf8() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/commands/parser.cpp"
+        guard let content = readSource("engine/src/commands/parser.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read parser.cpp"); return
+        }
+        guard let fnRange = content.range(of: "strip_trailing_punct") else {
+            XCTFail("Cannot find strip_trailing_punct"); return
+        }
+        let body = substring(content, from: fnRange.lowerBound, length: 1500)
+        // Fix: validate 3-byte sequence start byte (0xE0-0xEF) before consuming.
+        let validatesStartByte = body.contains("0xE0")
+            || body.contains("0xEF")
+            || body.contains("is_utf8_start")
+            || body.contains("is_continuation")
+            || body.contains("0xC0") // 2-byte start
+            || body.contains("0xF0") // 4-byte start
+        XCTAssertTrue(validatesStartByte,
+            "Bug H13 CONFIRMED: strip_trailing_punct walks back to find a " +
+            "multi-byte UTF-8 character but does not validate that the byte " +
+            "it lands on is a valid start byte (0xE0–0xEF for 3-byte). On " +
+            "truncated input it consumes continuation bytes as a 'character' " +
+            "and corrupts the trim boundary. " +
+            "Fix: explicitly check the start byte falls in the expected UTF-8 " +
+            "lead-byte range.")
+    }
+
+    // =======================================================================
+    // Bug H14 — File handle leak on failed reopen after log rotation
+    //
+    // log.cpp closes original file before fopen succeeds — if fopen fails,
+    // all logs go to stderr permanently.
+    // =======================================================================
+
+    func testBugH14_logRotationKeepsOldHandleUntilNewOpenSucceeds() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/config/log.cpp"
+        guard let content = readSource("engine/src/config/log.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read log.cpp"); return
+        }
+        // Fix: fopen new file FIRST, then on success swap and fclose old.
+        // Heuristic: the rotation block should contain `fopen` BEFORE the
+        // first fclose of the old handle. Look for a "new_file" or "tmp_fp"
+        // pattern that suggests two-stage rotation.
+        let usesTwoStage = content.contains("new_file")
+            || content.contains("tmp_fp")
+            || content.contains("FILE* new_")
+            || content.contains("FILE *new_")
+            || content.contains("FILE* fp_new")
+            || content.contains("if (new_fp)")
+        XCTAssertTrue(usesTwoStage,
+            "Bug H14 CONFIRMED: log.cpp rotation closes the original log file " +
+            "before attempting to fopen the rotated file. If the fopen fails " +
+            "(disk full, permissions, etc.) every subsequent log write falls " +
+            "back to stderr — the engine loses persistent diagnostics for the " +
+            "rest of its lifetime. " +
+            "Fix: fopen the new file first, swap on success, fclose the old " +
+            "handle — never close the original until the replacement is open.")
+    }
+
+    // =======================================================================
+    // Bug H15 — Missing <cerrno> include for strerror(errno)
+    //
+    // log.cpp uses errno without #include <cerrno>.
+    // =======================================================================
+
+    func testBugH15_logCppIncludesCerrno() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/config/log.cpp"
+        guard let content = readSource("engine/src/config/log.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read log.cpp"); return
+        }
+        // Only enforce if errno is referenced in the file.
+        if !content.contains("errno") {
+            return
+        }
+        let hasCerrno = content.contains("#include <cerrno>")
+            || content.contains("#include <errno.h>")
+        XCTAssertTrue(hasCerrno,
+            "Bug H15 CONFIRMED: log.cpp references errno / strerror(errno) but " +
+            "does not directly #include <cerrno>. Compilation today succeeds " +
+            "by transitive include luck; a stdlib refactor would break it. " +
+            "Fix: add `#include <cerrno>` near the other system headers.")
+    }
+
+    // =======================================================================
+    // Bug H16 — Race condition in AudioSession peak tracking
+    //
+    // _sessionPeak / _sessionSampleCount written without lock despite
+    // "guarded by lock" docs.
+    // =======================================================================
+
+    func testBugH16_audioSessionPeakWrittenInsideLock() {
+        guard let content = readSource("OpenVerb/Input/AudioSession.swift") else {
+            XCTFail("Cannot read AudioSession.swift"); return
+        }
+        // Heuristic: every write to _sessionPeak / _sessionSampleCount should
+        // be inside a `lock.lock()` ... `lock.unlock()` block. We approximate
+        // by ensuring a lock acquisition exists within ~10 lines preceding
+        // the write.
+        let lines = content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var unprotectedWrite = false
+        for (i, line) in lines.enumerated() {
+            if line.contains("_sessionPeak") || line.contains("_sessionSampleCount") {
+                if !line.contains("=") { continue }
+                let lower = max(0, i - 12)
+                let upper = i
+                let scope = lines[lower..<upper].joined(separator: "\n")
+                if !scope.contains("lock.lock()")
+                   && !scope.contains("self.lock.lock()")
+                   && !scope.contains("locked")
+                   && !scope.contains("withLock") {
+                    unprotectedWrite = true
+                    break
+                }
+            }
+        }
+        XCTAssertFalse(unprotectedWrite,
+            "Bug H16 CONFIRMED: AudioSession writes _sessionPeak / " +
+            "_sessionSampleCount outside `self.lock` despite the documented " +
+            "lock contract. Concurrent writes from the audio tap thread vs. " +
+            "the main thread tear the values and produce noisy peak logs. " +
+            "Fix: move every write inside a `lock.lock()` … `lock.unlock()` " +
+            "scope or use a withLock helper.")
+    }
+
+    // =======================================================================
+    // Bug H17 — Stale handle check after async wait in AudioPipeline
+    //
+    // After await MainActor.run, state may have changed — loop continues
+    // when it should exit, sending audio to disconnected engine.
+    // =======================================================================
+
+    func testBugH17_audioPipelineGuardsActiveAfterAwait() {
+        guard let content = readSource("OpenVerb/Pipeline/AudioPipeline.swift") else {
+            XCTFail("Cannot read AudioPipeline.swift"); return
+        }
+        // Look for "await MainActor.run" — the line(s) immediately after must
+        // re-check `isActive` / a handle / cancellation.
+        guard let awaitRange = content.range(of: "await MainActor.run") else {
+            XCTFail("Cannot find await MainActor.run"); return
+        }
+        let body = substring(content, from: awaitRange.lowerBound, length: 800)
+        let rechecksActive = body.contains("guard isActive")
+            || body.contains("guard self.isActive")
+            || body.contains("guard !Task.isCancelled")
+            || body.contains("if !isActive")
+            || body.contains("if Task.isCancelled")
+        XCTAssertTrue(rechecksActive,
+            "Bug H17 CONFIRMED: AudioPipeline does not re-check the isActive " +
+            "(or cancellation) flag immediately after `await MainActor.run`. " +
+            "If cancel() ran during the await window, the loop continues and " +
+            "tries to send audio frames to an engine that has already been " +
+            "disconnected. " +
+            "Fix: `guard isActive else { break }` (or Task.isCancelled check) " +
+            "as the first statement after the await.")
+    }
+
+    // =======================================================================
+    // Bug H18 — Double-drain race in AudioPipeline
+    //
+    // No handle validation inside drain loop — cancel() mid-drain → drain
+    // continues after cancellation.
+    // =======================================================================
+
+    func testBugH18_audioPipelineDrainLoopValidatesHandle() {
+        guard let content = readSource("OpenVerb/Pipeline/AudioPipeline.swift") else {
+            XCTFail("Cannot read AudioPipeline.swift"); return
+        }
+        // Find a drain-related function (drain*, drainResult, drainPending).
+        guard let drainRange = content.range(of: "drain")
+            ?? content.range(of: "while ") else {
+            XCTFail("Cannot find drain loop in AudioPipeline.swift"); return
+        }
+        let body = substring(content, from: drainRange.lowerBound, length: 1200)
+        let validatesHandle = body.contains("guard isActive")
+            || body.contains("guard handle ==")
+            || body.contains("guard self.activeHandle")
+            || body.contains("if !isActive")
+            || body.contains("if handle != activeHandle")
+        XCTAssertTrue(validatesHandle,
+            "Bug H18 CONFIRMED: AudioPipeline drain loop does not validate " +
+            "the handle inside the loop body. If cancel() runs mid-drain, " +
+            "the loop continues processing frames for a session that the " +
+            "rest of the system already considers cancelled — duplicate or " +
+            "stale audio reaches the engine. " +
+            "Fix: re-check `handle == activeHandle && isActive` at the top " +
+            "of every drain-loop iteration.")
+    }
+
+    // =======================================================================
+    // Bug H19 — Force-unwrap crash in EngineClient audio buffer
+    //
+    // outputBuffer.int16ChannelData![0] — force unwrap crashes if format
+    // mismatch.
+    // =======================================================================
+
+    func testBugH19_engineClientInt16ChannelDataNotForceUnwrapped() {
+        guard let content = readSource("OpenVerb/Engine/EngineClient.swift") else {
+            XCTFail("Cannot read EngineClient.swift"); return
+        }
+        let hasForceUnwrap = content.contains("int16ChannelData![0]")
+            || content.contains("int16ChannelData!")
+        XCTAssertFalse(hasForceUnwrap,
+            "Bug H19 CONFIRMED: EngineClient force-unwraps " +
+            "outputBuffer.int16ChannelData. If the AVAudioPCMBuffer format " +
+            "is anything other than int16 (e.g., a future format change or " +
+            "an unexpected hardware default), the force-unwrap crashes the " +
+            "audio dispatch path. " +
+            "Fix: `guard let data = outputBuffer.int16ChannelData else { ... }`.")
+    }
+
+    // =======================================================================
+    // Bug H20 — Deadlock potential in EngineClient fd property
+    //
+    // NSLock with defer in getter/setter — nested same-thread acquisition
+    // deadlocks.
+    // =======================================================================
+
+    func testBugH20_engineClientFdAvoidsNestedLock() {
+        guard let content = readSource("OpenVerb/Engine/EngineClient.swift") else {
+            XCTFail("Cannot read EngineClient.swift"); return
+        }
+        // Fix can be a NSRecursiveLock OR collapsing the property into a
+        // direct Atomic / DispatchQueue-protected accessor.
+        let usesRecursiveLock = content.contains("NSRecursiveLock")
+            || content.contains("recursive_mutex")
+        let usesQueue = content.contains("ioQueue.sync") && content.contains("var fd")
+        let avoidsLockedAccessor = !content.contains("var fd: Int32")
+            || usesRecursiveLock
+            || usesQueue
+        XCTAssertTrue(avoidsLockedAccessor,
+            "Bug H20 CONFIRMED: EngineClient.fd is a computed property guarded " +
+            "by an NSLock with defer-unlock. Any code path that re-enters the " +
+            "getter/setter while already holding the lock from the same thread " +
+            "deadlocks (NSLock is non-recursive). " +
+            "Fix: use NSRecursiveLock, or move fd into a serial DispatchQueue " +
+            "accessor that guarantees non-reentrant ownership.")
+    }
+
+    // =======================================================================
+    // Bug H21 — Force-unwrap in client AudioSession format
+    //
+    // AVAudioFormat(...)! — crashes if format params invalid.
+    // =======================================================================
+
+    func testBugH21_clientAudioFormatNotForceUnwrapped() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Sources/AudioSession.swift"
+        guard let content = (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read client/AudioSession.swift"); return
+        }
+        let hasForceUnwrap = content.contains("AVAudioFormat(") && content.contains(")!")
+        XCTAssertFalse(hasForceUnwrap,
+            "Bug H21 CONFIRMED: client AudioSession force-unwraps " +
+            "AVAudioFormat(...)!. If the supplied parameters are invalid " +
+            "(unsupported sample rate / channel count combination) the " +
+            "force-unwrap crashes the client process. " +
+            "Fix: `guard let format = AVAudioFormat(...) else { return ... }` " +
+            "with a fallback to a known-valid PCM format.")
+    }
+
+    // =======================================================================
+    // Bug H22 — Race condition in client Phase 2 error monitor
+    //
+    // Captures self.fd but read() uses self.fd again. Between guard and read,
+    // fd closed by another thread.
+    // =======================================================================
+
+    func testBugH22_clientPhase2MonitorCapturesFdAtomically() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/client/Sources/EngineClient.swift"
+        guard let content = (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read client/EngineClient.swift"); return
+        }
+        // Look for the Phase 2 monitor (around the error-detect read loop).
+        guard let monRange = content.range(of: "Phase 2")
+            ?? content.range(of: "errorMonitor")
+            ?? content.range(of: "error_monitor") else {
+            XCTFail("Cannot find Phase 2 monitor in client EngineClient.swift"); return
+        }
+        let body = substring(content, from: monRange.lowerBound, length: 1500)
+        // Fix: capture fd into a local constant under the lock once.
+        let usesLocalSnapshot = body.contains("let localFd")
+            || body.contains("let capturedFd")
+            || body.contains("let fdSnapshot")
+            || body.contains("let snapshot")
+        XCTAssertTrue(usesLocalSnapshot,
+            "Bug H22 CONFIRMED: client EngineClient Phase 2 error monitor " +
+            "guards on self.fd, then later calls read(self.fd, …). Between " +
+            "the guard and the read, another thread can close fd and the " +
+            "OS may reassign it — read() then targets an unrelated descriptor. " +
+            "Fix: capture fd into a local constant atomically (once, while " +
+            "holding the fd lock) and use that constant for all subsequent " +
+            "system calls in the monitor.")
+    }
+
+    // =======================================================================
+    // Bug H23 — Async gap in EngineManager shutdown
+    //
+    // sendShutdown() fire-and-forget on ioQueue. SIGTERM may kill process
+    // before shutdown processed.
+    // =======================================================================
+
+    func testBugH23_engineManagerShutdownWaitsForAck() {
+        guard let content = readSource("OpenVerb/Engine/EngineManager.swift") else {
+            XCTFail("Cannot read EngineManager.swift"); return
+        }
+        guard let fnRange = content.range(of: "sendShutdown") else {
+            XCTFail("Cannot find sendShutdown in EngineManager.swift"); return
+        }
+        let body = substring(content, from: fnRange.lowerBound, length: 1500)
+        // Fix should use ioQueue.sync, an XPC-style ack, or a bounded wait.
+        let synchronous = body.contains("ioQueue.sync")
+            || body.contains("DispatchSemaphore")
+            || body.contains("wait(timeout")
+            || body.contains("sendShutdownSync")
+            || body.contains("ack")
+        XCTAssertTrue(synchronous,
+            "Bug H23 CONFIRMED: EngineManager.sendShutdown() dispatches the " +
+            "shutdown JSON onto ioQueue asynchronously, then immediately " +
+            "issues SIGTERM. The OS can deliver SIGTERM before the engine " +
+            "ever reads the shutdown frame, leaving the model loaded with " +
+            "no graceful flush of in-flight inference. " +
+            "Fix: send the shutdown JSON synchronously, or wait on a bounded " +
+            "DispatchSemaphore for an ack before SIGTERM.")
+    }
+
+    // =======================================================================
+    // Bug H24 — Off-by-one in ContextBuilder grapheme boundary
+    //
+    // rangeOfComposedCharacterSequence(at:) can extend beyond cursor for
+    // emoji/surrogate pairs.
+    // =======================================================================
+
+    func testBugH24_contextBuilderClampsToRawCursorPos() {
+        guard let content = readSource("OpenVerb/Context/ContextBuilder.swift") else {
+            XCTFail("Cannot read ContextBuilder.swift"); return
+        }
+        guard let rangeRange = content.range(of: "rangeOfComposedCharacterSequence") else {
+            XCTFail("Cannot find rangeOfComposedCharacterSequence"); return
+        }
+        let body = substring(content, from: rangeRange.lowerBound, length: 600)
+        // Fix: clamp result.upperBound (or analogous) to rawCursorPos.
+        let clamps = body.contains("min(")
+            || body.contains("clamp")
+            || body.contains("rawCursorPos")
+            || body.contains("upperBound:")
+        XCTAssertTrue(clamps,
+            "Bug H24 CONFIRMED: ContextBuilder uses " +
+            "rangeOfComposedCharacterSequence(at:) without clamping the " +
+            "returned range to rawCursorPos. For emoji / surrogate-pair " +
+            "graphemes the range can extend past the cursor, so the 'before' " +
+            "string ends up containing characters that are AFTER the cursor — " +
+            "the engine receives a context that misrepresents what the user " +
+            "is about to type. " +
+            "Fix: `let clampedEnd = min(range.upperBound, rawCursorPos)` and " +
+            "slice with the clamped bound.")
+    }
+
+    // =======================================================================
+    // Bug H25 — Race condition in AccessibilityReader AX calls
+    //
+    // Multiple AX API calls without intermediate validation. App can quit
+    // between calls → stale AXUIElement → crash.
+    // =======================================================================
+
+    func testBugH25_accessibilityReaderValidatesAppRunningBetweenCalls() {
+        guard let content = readSource("OpenVerb/Context/AccessibilityReader.swift") else {
+            XCTFail("Cannot read AccessibilityReader.swift"); return
+        }
+        // Fix: guard `runningApplication.isTerminated` (or runningApplication != nil)
+        // between successive AXUIElementCopyAttributeValue calls.
+        let validatesBetweenCalls = content.contains("isTerminated")
+            && content.contains("AXUIElementCopyAttributeValue")
+        let usesPidGuard = content.contains("processIdentifier")
+            && content.contains("runningApplication")
+        XCTAssertTrue(validatesBetweenCalls || usesPidGuard,
+            "Bug H25 CONFIRMED: AccessibilityReader chains multiple AX API " +
+            "calls (focused window → focused element → selected text) without " +
+            "validating that the target application is still running between " +
+            "calls. If the user quits the app mid-read, AX returns stale " +
+            "element references and dereferencing them crashes. " +
+            "Fix: re-validate `runningApplication.isTerminated == false` " +
+            "before every AX call, abort early on quit.")
+    }
+
+    // =======================================================================
+    // Bug H26 — Silent failure in TextInjector key-down creation
+    //
+    // Key-down uses if let (silent fail), key-up uses guard let. If key-down
+    // fails, key-up still posts → V key stuck.
+    // =======================================================================
+
+    func testBugH26_textInjectorKeyDownUsesGuardLet() {
+        guard let content = readSource("OpenVerb/Output/TextInjector.swift") else {
+            XCTFail("Cannot read TextInjector.swift"); return
+        }
+        // Fix: replace `if let keyDown = CGEvent(keyboardEventSource:...)` with
+        // a `guard let keyDown ... else { return }` so a failed key-down
+        // aborts the paste sequence entirely.
+        let usesGuardForKeyDown = content.contains("guard let keyDown")
+            || content.contains("guard let down")
+            || content.contains("guard let cmdVDown")
+        XCTAssertTrue(usesGuardForKeyDown,
+            "Bug H26 CONFIRMED: TextInjector creates the Cmd-V key-down event " +
+            "with `if let` (silent failure on nil) but uses `guard let` for " +
+            "the key-up. If key-down creation fails (CGEvent budget exhausted), " +
+            "key-up still posts and the V key is stuck down — text injection " +
+            "into subsequent apps is corrupted. " +
+            "Fix: use `guard let keyDown … else { return }` to ensure both " +
+            "events are created or neither is posted.")
+    }
+
+    // =======================================================================
+    // Bug H27 — Regex metacharacters in signing identity grep
+    //
+    // setup-signing-identity.sh greps identity name as regex. Should use
+    // grep -F.
+    // =======================================================================
+
+    func testBugH27_setupSigningIdentityUsesFixedStringGrep() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/scripts/setup-signing-identity.sh"
+        guard let content = (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read setup-signing-identity.sh"); return
+        }
+        let usesFixedGrep = content.contains("grep -Fq")
+            || content.contains("grep -F ")
+            || content.contains("grep --fixed-strings")
+        XCTAssertTrue(usesFixedGrep,
+            "Bug H27 CONFIRMED: setup-signing-identity.sh greps for the " +
+            "identity name without -F. Identity strings can legally contain " +
+            "regex metacharacters (., *, ?, []) which then false-match other " +
+            "identities. Same root cause as Bug C18. " +
+            "Fix: use `grep -Fq` (fixed string mode).")
+    }
+
+    // =======================================================================
+    // Bug H28 — Flawed awk filter in setup-signing-identity.sh
+    //
+    // Includes header text and junk in output.
+    // =======================================================================
+
+    func testBugH28_setupSigningIdentityHasCleanIdentityFilter() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/scripts/setup-signing-identity.sh"
+        guard let content = (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read setup-signing-identity.sh"); return
+        }
+        // Fix: a filter that anchors on `[0-9A-F]{40}` SHA-1, or a sed/awk
+        // that reliably ignores headers / `valid identities found` lines.
+        let hasRobustFilter = content.contains("[A-F0-9]{40}")
+            || content.contains("[0-9A-F]{40}")
+            || content.contains("valid identities found")
+            || content.contains("grep -E '^ ?[0-9]+\\)")
+            || content.contains("awk '/[A-F0-9]{40}/")
+        XCTAssertTrue(hasRobustFilter,
+            "Bug H28 CONFIRMED: setup-signing-identity.sh uses a permissive " +
+            "awk pipeline that lets header text and trailing summary lines " +
+            "(e.g. 'N valid identities found') leak into the captured " +
+            "identity. The script can pick a non-identity string and pass " +
+            "it to codesign which fails opaquely. " +
+            "Fix: anchor the filter on the 40-char SHA-1 hash, or use " +
+            "`security find-identity` with the JSON-style output.")
+    }
+
+    // =======================================================================
+    // Bug H29 — Unquoted $QUICK_FLAG in ov_smoke.sh
+    //
+    // Word splitting if flag contains spaces.
+    // =======================================================================
+
+    func testBugH29_ovSmokeQuotesQuickFlag() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/scripts/ov_smoke.sh"
+        guard let content = (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read ov_smoke.sh"); return
+        }
+        // Look for an unquoted $QUICK_FLAG usage.
+        let lines = content.split(separator: "\n").map(String.init)
+        var unquoted = false
+        for line in lines {
+            // Bug pattern: bare `$QUICK_FLAG` (no surrounding quotes).
+            if line.contains("$QUICK_FLAG") {
+                if !line.contains("\"$QUICK_FLAG\"") &&
+                   !line.contains("\"${QUICK_FLAG}\"") {
+                    unquoted = true
+                    break
+                }
+            }
+        }
+        XCTAssertFalse(unquoted,
+            "Bug H29 CONFIRMED: ov_smoke.sh references $QUICK_FLAG without " +
+            "double quotes. Word splitting on a flag that legitimately " +
+            "contains spaces (e.g. `--mode quick --no-polish`) corrupts the " +
+            "engine command line. " +
+            "Fix: always reference as \"$QUICK_FLAG\" — or move multi-token " +
+            "values into a Bash array.")
+    }
+
+    // =======================================================================
+    // Bug H30 — download-model.sh missing numeric validation
+    //
+    // `[ "$lsize" -lt "$rsize" ] 2>/dev/null` suppresses non-numeric errors
+    // but continues silently with stale assumption.
+    // =======================================================================
+
+    func testBugH30_downloadModelValidatesSizesNumeric() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/scripts/download-model.sh"
+        guard let content = (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read download-model.sh"); return
+        }
+        // Fix: explicit numeric regex check before the -lt comparison.
+        let validatesNumeric = content.contains("[[:digit:]]")
+            || content.contains("=~ ^[0-9]+$")
+            || content.contains("=~ ^[[:digit:]]+$")
+            || content.contains("printf '%d'")
+        XCTAssertTrue(validatesNumeric,
+            "Bug H30 CONFIRMED: download-model.sh compares $lsize vs $rsize " +
+            "with `[ -lt ]` and suppresses errors via `2>/dev/null`. If either " +
+            "value is non-numeric (e.g. curl returned an HTML error page), " +
+            "the comparison silently fails and the script proceeds as if the " +
+            "model were up to date — user runs an outdated model. " +
+            "Fix: explicit numeric regex `[[ \"$lsize\" =~ ^[0-9]+$ ]]` before " +
+            "the comparison; bail out with an error otherwise.")
+    }
+
+    // =======================================================================
+    // Bug H31 — Uncaught exception in ov.js
+    //
+    // spawnSync can throw if bash missing. No try-catch.
+    // =======================================================================
+
+    func testBugH31_ovJsWrapsSpawnSyncInTryCatch() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/bin/ov.js"
+        guard let content = (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read bin/ov.js"); return
+        }
+        // Fix: spawnSync should be wrapped in try/catch so a missing bash or
+        // ENOENT yields a friendly error message instead of an uncaught
+        // exception stack trace.
+        let hasTryCatch = content.contains("try {") && content.contains("spawnSync")
+            && content.contains("catch")
+        XCTAssertTrue(hasTryCatch,
+            "Bug H31 CONFIRMED: bin/ov.js calls spawnSync without a try/catch. " +
+            "If /bin/bash is missing or unexecutable (rare but possible on " +
+            "minimal containers and forensically locked-down systems), Node " +
+            "throws and the user sees a stack trace instead of the actionable " +
+            "'bash not found, please install …' message. " +
+            "Fix: wrap spawnSync in try/catch, log a friendly error and exit 1.")
+    }
+
+    // =======================================================================
+    // Bug H32 — sed injection in build-release.sh
+    //
+    // SHA256/DMG_SHA interpolated into sed expression without escaping.
+    // Should use | or # delimiter.
+    // =======================================================================
+
+    func testBugH32_buildReleaseSedUsesSafeDelimiter() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/scripts/build-release.sh"
+        guard let content = (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read build-release.sh"); return
+        }
+        // Heuristic: any sed -e or `sed s/...` should NOT use `/` as the
+        // delimiter when SHA256/DMG_SHA is interpolated. Look for `sed ... s|`
+        // or `sed ... s#` style.
+        let usesAlternateDelim = content.contains("sed -i \"s|")
+            || content.contains("sed -i 's|")
+            || content.contains("sed -i \"s#")
+            || content.contains("sed -i 's#")
+            || content.contains("sed \"s|")
+            || content.contains("sed 's#")
+            || content.contains("printf -v") // alternative substitution path
+        XCTAssertTrue(usesAlternateDelim,
+            "Bug H32 CONFIRMED: build-release.sh interpolates $SHA256 / " +
+            "$DMG_SHA into a `sed s/.../.../` expression that uses `/` as " +
+            "the delimiter. While SHA hex usually has no `/`, any future " +
+            "value containing `/`, `\\`, or `&` would corrupt the Swift / " +
+            "Homebrew formula files. " +
+            "Fix: switch to `s|...|...|` or `s#...#...#` delimiters, or use " +
+            "`printf` based substitution.")
+    }
+
+    // =======================================================================
+    // Bug M1 — Incorrect frame size in Vad::filter
+    //
+    // Integer division `sample_rate * kFrameMs / 1000` gives wrong size for
+    // non-standard rates (e.g. 44100 Hz).
+    // =======================================================================
+
+    func testBugM1_vadFilterValidatesFrameSizeDivisor() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/audio/vad.cpp"
+        guard let content = readSource("engine/src/audio/vad.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read vad.cpp"); return
+        }
+        // Fix: validate (sample_rate * kFrameMs) % 1000 == 0 (or the
+        // equivalent assertion / sample_rate enumerated check).
+        let validates = content.contains("% 1000")
+            || content.contains("== 8000 || sample_rate == 16000")
+            || content.contains("kSupportedRates")
+            || content.contains("assert(sample_rate")
+        XCTAssertTrue(validates,
+            "Bug M1 CONFIRMED: Vad::filter computes the frame size as " +
+            "`sample_rate * kFrameMs / 1000` without validating that " +
+            "the multiplication is an exact multiple of 1000. For 44_100 Hz " +
+            "the result truncates and the resulting buffer has fewer samples " +
+            "than WebRtcVad expects → WebRtcVad rejects the frame. " +
+            "Fix: assert (sample_rate * kFrameMs) % 1000 == 0, or restrict " +
+            "the input rate to the WebRTC-supported set {8k, 16k, 32k, 48k}.")
+    }
+
+    // =======================================================================
+    // Bug M2 — Integer overflow in chunk_queue audio_ms_
+    //
+    // audio_ms_ += chunk.duration_ms — signed 32-bit overflows at ~24 days.
+    // =======================================================================
+
+    func testBugM2_chunkQueueAudioMsIs64Bit() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/audio/chunk_queue.cpp"
+        guard let content = readSource("engine/src/audio/chunk_queue.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read chunk_queue.cpp"); return
+        }
+        let absHeader = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/audio/chunk_queue.h"
+        let header = readSource("engine/src/audio/chunk_queue.h") ??
+            (try? String(contentsOfFile: absHeader, encoding: .utf8)) ?? ""
+        let combined = content + "\n" + header
+        // Fix: audio_ms_ declared as int64_t / uint64_t / std::atomic<int64_t>.
+        let is64Bit = combined.contains("int64_t audio_ms_")
+            || combined.contains("uint64_t audio_ms_")
+            || combined.contains("std::atomic<int64_t> audio_ms_")
+            || combined.contains("std::atomic<uint64_t> audio_ms_")
+            || combined.contains("long long audio_ms_")
+        XCTAssertTrue(is64Bit,
+            "Bug M2 CONFIRMED: chunk_queue audio_ms_ is signed 32-bit. " +
+            "Continuous recording for ~24 days overflows the counter and " +
+            "duration accounting for long sessions or always-on use is wrong. " +
+            "Fix: declare audio_ms_ as int64_t (or uint64_t).")
+    }
+
+    // =======================================================================
+    // Bug M3 — WAV parsing: no file size limit
+    //
+    // file_size / sizeof(int16_t) — 10 GB file → OOM.
+    // =======================================================================
+
+    func testBugM3_wavReaderEnforcesMaxFileSize() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/audio/reader.cpp"
+        guard let content = readSource("engine/src/audio/reader.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read reader.cpp"); return
+        }
+        // Fix: an explicit MAX_WAV_SIZE / kMaxFileSize constant + comparison.
+        let hasSizeCap = content.contains("kMaxFileSize")
+            || content.contains("MAX_WAV_SIZE")
+            || content.contains("max_file_size")
+            || content.contains("file_size > ")
+            || content.contains("file_size >=")
+        XCTAssertTrue(hasSizeCap,
+            "Bug M3 CONFIRMED: WAV reader allocates `file_size / sizeof(int16_t)` " +
+            "samples without a max-file-size guard. A 10 GB WAV (or a malicious " +
+            "input) causes a 5 GB heap allocation and OOM-kills the engine. " +
+            "Fix: define a kMaxFileSize constant (e.g. 256 MB) and reject " +
+            "larger files with a clear error.")
+    }
+
+    // =======================================================================
+    // Bug M4 — Race condition in AudioCapture::start
+    //
+    // TOCTOU on `capturing` flag between check and audio queue start.
+    // =======================================================================
+
+    func testBugM4_audioCaptureStartUsesAtomicCAS() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/audio/capture.cpp"
+        guard let content = readSource("engine/src/audio/capture.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read capture.cpp"); return
+        }
+        guard let fnRange = content.range(of: "AudioCapture::start") else {
+            XCTFail("Cannot find AudioCapture::start"); return
+        }
+        let body = substring(content, from: fnRange.lowerBound, length: 800)
+        // Fix: compare_exchange_strong on `capturing`, OR a start_mutex_.
+        let usesAtomicGate = body.contains("compare_exchange")
+            || body.contains("start_mutex_")
+            || body.contains("std::lock_guard")
+            || body.contains("std::scoped_lock")
+        XCTAssertTrue(usesAtomicGate,
+            "Bug M4 CONFIRMED: AudioCapture::start checks `capturing` then " +
+            "starts the audio queue. Concurrent start() calls both pass the " +
+            "check and both start the queue — duplicate callbacks fire on " +
+            "the same data, corrupting the ring buffer. " +
+            "Fix: `capturing.compare_exchange_strong(expected=false, true)` " +
+            "to atomically claim the start, or guard with a mutex.")
+    }
+
+    // =======================================================================
+    // Bug M5 — Potential deadlock in AudioCapture::stop
+    //
+    // AudioQueueStop synchronous waits for callback. Callback blocked on
+    // mutex held by stopper → deadlock.
+    // =======================================================================
+
+    func testBugM5_audioCaptureStopAvoidsCallbackMutexDeadlock() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/audio/capture.cpp"
+        guard let content = readSource("engine/src/audio/capture.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read capture.cpp"); return
+        }
+        guard let fnRange = content.range(of: "AudioCapture::stop") else {
+            XCTFail("Cannot find AudioCapture::stop"); return
+        }
+        let body = substring(content, from: fnRange.lowerBound, length: 800)
+        // Fix: AudioQueueStop with `false` (async stop) OR explicit unlock
+        // before calling AudioQueueStop, OR a clear note that no mutex is
+        // held while AudioQueueStop runs.
+        let asyncStop = body.contains("AudioQueueStop(impl_->queue, false)")
+            || body.contains("AudioQueueStop(queue_, false)")
+        let unlocksFirst = body.contains(".unlock()")
+            || body.contains("// no mutex held")
+        XCTAssertTrue(asyncStop || unlocksFirst,
+            "Bug M5 CONFIRMED: AudioCapture::stop calls AudioQueueStop(…, true) " +
+            "(synchronous) while the callback is still running. If the " +
+            "callback blocks on a mutex held by the stopper thread, the " +
+            "system deadlocks (synchronous stop waits for callback to return; " +
+            "callback waits for mutex). " +
+            "Fix: pass `false` for async stop, or release any mutex before " +
+            "calling AudioQueueStop.")
+    }
+
+    // =======================================================================
+    // Bug M6 — Potential infinite loop in recv_json with malformed data
+    //
+    // Malicious client sends partial lines indefinitely → server never times
+    // out.
+    // =======================================================================
+
+    func testBugM6_recvJsonEnforcesDeadlineOnSkip() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/ipc/protocol.cpp"
+        guard let content = readSource("engine/src/ipc/protocol.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read protocol.cpp"); return
+        }
+        guard let fnRange = content.range(of: "recv_json") else {
+            XCTFail("Cannot find recv_json"); return
+        }
+        let body = substring(content, from: fnRange.lowerBound, length: 3000)
+        // Fix: deadline / counter / timestamp inside the skip loop.
+        let hasDeadline = body.contains("deadline")
+            || body.contains("steady_clock::now")
+            || body.contains("max_skip")
+            || body.contains("skip_count")
+            || body.contains("invalid_count")
+            || body.contains("max_invalid")
+        XCTAssertTrue(hasDeadline,
+            "Bug M6 CONFIRMED: recv_json's malformed-line skip loop has no " +
+            "deadline or counter. A malicious client can stream partial " +
+            "lines indefinitely and the server skips forever, blocking the " +
+            "session thread. " +
+            "Fix: track a steady_clock deadline (or a max_invalid counter) " +
+            "and abort the connection when exceeded.")
+    }
+
+    // =======================================================================
+    // Bug M7 — Missing bounds check in frame_len calculation
+    //
+    // Byte shifting without masking. Potential overflow on shift.
+    // =======================================================================
+
+    func testBugM7_protocolFrameLenUsesMaskedShift() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/ipc/protocol.cpp"
+        guard let content = readSource("engine/src/ipc/protocol.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read protocol.cpp"); return
+        }
+        // Fix: header bytes cast to uint32_t and masked with 0xFF before shift.
+        let usesMaskedShift = content.contains("static_cast<uint32_t>")
+            && content.contains("& 0xFF")
+        let usesUint8t = content.contains("uint8_t header_buf")
+            || content.contains("uint8_t buf[")
+        XCTAssertTrue(usesMaskedShift || usesUint8t,
+            "Bug M7 CONFIRMED: frame_len calculation shifts header bytes without " +
+            "explicit masking; integer-promotion rules can sign-extend a high-bit " +
+            "byte during the left shift, yielding a negative or huge frame_len. " +
+            "Fix: cast every header byte to uint32_t and mask with 0xFF before " +
+            "shifting.")
+    }
+
+    // =======================================================================
+    // Bug M8 — Data race on last_inference_sec_
+    //
+    // Stores+loads with memory_order_relaxed → idle timeout triggers
+    // early/late.
+    // =======================================================================
+
+    func testBugM8_lastInferenceSecUsesAcquireRelease() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/ipc/server.cpp"
+        guard let content = readSource("engine/src/ipc/server.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read server.cpp"); return
+        }
+        // Fix: any store of last_inference_sec_ uses memory_order_release;
+        // any load uses memory_order_acquire (or seq_cst).
+        let usesRelease = content.contains("last_inference_sec_.store")
+            && (content.contains("memory_order_release")
+                || content.contains("memory_order_seq_cst"))
+        let usesAcquire = content.contains("last_inference_sec_.load")
+            && (content.contains("memory_order_acquire")
+                || content.contains("memory_order_seq_cst"))
+        XCTAssertTrue(usesRelease && usesAcquire,
+            "Bug M8 CONFIRMED: server.cpp stores/loads last_inference_sec_ " +
+            "with memory_order_relaxed. The idle-timeout watcher can read a " +
+            "stale value and trigger early or late, causing wrong-time model " +
+            "unloads. " +
+            "Fix: use memory_order_release on stores, memory_order_acquire on " +
+            "loads (or seq_cst for both).")
+    }
+
+    // =======================================================================
+    // Bug M9 — Double shutdown of chunk_queue_
+    //
+    // shutdown() called in multiple error paths. Must be idempotent.
+    // =======================================================================
+
+    func testBugM9_chunkQueueShutdownIsIdempotent() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/audio/chunk_queue.cpp"
+        guard let content = readSource("engine/src/audio/chunk_queue.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read chunk_queue.cpp"); return
+        }
+        guard let fnRange = content.range(of: "ChunkQueue::shutdown") else {
+            XCTFail("Cannot find ChunkQueue::shutdown"); return
+        }
+        let body = substring(content, from: fnRange.lowerBound, length: 600)
+        // Fix: idempotent guard via early-return on already-shut, or the
+        // function should be safe to call multiple times via atomic flag.
+        let isIdempotent = body.contains("if (shut_")
+            || body.contains("if (shut_.exchange")
+            || body.contains("if (shut_.load")
+            || body.contains("if (already_shut")
+        XCTAssertTrue(isIdempotent,
+            "Bug M9 CONFIRMED: ChunkQueue::shutdown is invoked from multiple " +
+            "error paths in session.cpp. Without an idempotency guard, the " +
+            "second call notifies waiters again on an already-empty queue and " +
+            "depending on the predicate path may double-flush state. " +
+            "Fix: early-return on `if (shut_.load(...)) return;` (or use " +
+            "`exchange(true)` and skip the body when the previous value was " +
+            "already true).")
+    }
+
+    // =======================================================================
+    // Bug M10 — Potential leak of load_thread on exception
+    //
+    // Exception between thread construction and join → thread detached,
+    // never cleaned up.
+    // =======================================================================
+
+    func testBugM10_loadThreadJoinedInAllExceptionPaths() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/ipc/session.cpp"
+        guard let content = readSource("engine/src/ipc/session.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read session.cpp"); return
+        }
+        // Fix: load_thread is RAII (e.g. jthread, or wrapped in unique_ptr
+        // with custom deleter) OR a try/catch around the load region with
+        // explicit join in catch.
+        let usesJthread = content.contains("std::jthread")
+            || content.contains("jthread load_thread")
+        let hasTryCatchJoin = content.contains("} catch")
+            && content.contains("load_thread")
+            && content.contains(".join()")
+        let usesScopeGuard = content.contains("scope_guard")
+            || content.contains("ScopeExit")
+            || content.contains("at_scope_exit")
+        XCTAssertTrue(usesJthread || hasTryCatchJoin || usesScopeGuard,
+            "Bug M10 CONFIRMED: load_thread is constructed but exceptions " +
+            "between the construction and explicit join leave the thread as " +
+            "joinable. Its destructor calls std::terminate(). " +
+            "Fix: use std::jthread, wrap load_thread with RAII, or add a " +
+            "try/catch that explicitly joins the thread on exception.")
+    }
+
+    // =======================================================================
+    // Bug M11 — Missing error handling in send_json write loop
+    //
+    // write() returning 0 not handled → infinite spin.
+    // =======================================================================
+
+    func testBugM11_sendJsonHandlesWriteReturnZero() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/ipc/protocol.cpp"
+        guard let content = readSource("engine/src/ipc/protocol.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read protocol.cpp"); return
+        }
+        guard let fnRange = content.range(of: "send_json") else {
+            XCTFail("Cannot find send_json"); return
+        }
+        let body = substring(content, from: fnRange.lowerBound, length: 1200)
+        // Fix: explicit `if (n == 0) ... break/return error`.
+        let handlesZero = body.contains("n == 0")
+            || body.contains("== 0)")
+            || body.contains("if (written == 0")
+            || body.contains("ssize_t n = ::write")
+        XCTAssertTrue(handlesZero,
+            "Bug M11 CONFIRMED: send_json's write loop treats only n<0 as an " +
+            "error. write() returning 0 (an unusual but legal POSIX outcome) " +
+            "is silently retried, busy-spinning the CPU. " +
+            "Fix: treat `n == 0` as a fatal short-write — break the loop and " +
+            "return an error.")
+    }
+
+    // =======================================================================
+    // Bug M12 — Silent JSON parsing failure for whitespace-only input
+    //
+    // parse("") and parse("   ") both throw, empty-string guard doesn't
+    // catch whitespace-only.
+    // =======================================================================
+
+    func testBugM12_promptBuilderHandlesWhitespaceOnlyContext() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/context/prompt_builder.cpp"
+        guard let content = readSource("engine/src/context/prompt_builder.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read prompt_builder.cpp"); return
+        }
+        // Fix: parse_context_json must trim/check whitespace-only input
+        // before calling json::parse(). Look for a trim or whitespace guard.
+        let trimsBeforeParse = content.contains("isspace")
+            || content.contains("std::all_of")
+            || content.contains("find_first_not_of")
+            || content.contains("find_last_not_of")
+            || content.contains(".empty() ||")
+            || content.contains("trim(")
+        XCTAssertTrue(trimsBeforeParse,
+            "Bug M12 CONFIRMED: parse_context_json treats only `\"\"` as " +
+            "the empty-context case but accepts `\"   \"` (whitespace-only) " +
+            "into json::parse(), which throws and propagates a misleading " +
+            "JSON syntax error to the user. " +
+            "Fix: trim leading/trailing whitespace and treat the result as " +
+            "empty if it is empty-after-trim.")
+    }
+
+    // =======================================================================
+    // Bug M13 — Integer overflow in xml_escape reserve
+    //
+    // reserve(s.size() + 16) overflows for huge strings (UB).
+    // =======================================================================
+
+    func testBugM13_xmlEscapeReserveOverflowGuarded() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/context/prompt_builder.cpp"
+        guard let content = readSource("engine/src/context/prompt_builder.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read prompt_builder.cpp"); return
+        }
+        guard let fnRange = content.range(of: "xml_escape") else {
+            XCTFail("Cannot find xml_escape"); return
+        }
+        let body = substring(content, from: fnRange.lowerBound, length: 600)
+        // Fix: bound check before reserve, or a max-input-size guard.
+        let hasOverflowGuard = body.contains("max_size")
+            || body.contains("std::numeric_limits<size_t>")
+            || body.contains("kMaxXmlInput")
+            || body.contains("size() > ")
+        XCTAssertTrue(hasOverflowGuard,
+            "Bug M13 CONFIRMED: xml_escape calls `reserve(s.size() + 16)` " +
+            "without checking that s.size() + 16 doesn't overflow size_t. " +
+            "On a near-SIZE_MAX input (theoretical, but UB by spec) the " +
+            "addition wraps and reserve receives a tiny value, causing " +
+            "later writes to over-run the buffer. " +
+            "Fix: clamp / refuse inputs above a sane maximum before reserving.")
+    }
+
+    // =======================================================================
+    // Bug M14 — Unchecked filesystem::weakly_canonical
+    //
+    // Can throw filesystem_error on invalid path/permissions. Propagates
+    // to main() → unclean exit.
+    // =======================================================================
+
+    func testBugM14_configWeaklyCanonicalWrappedInTryCatch() {
+        let absPath = "/Users/terobyte/Desktop/Projects/Active/scripts/OpenVerb/engine/src/config/config.cpp"
+        guard let content = readSource("engine/src/config/config.cpp") ??
+            (try? String(contentsOfFile: absPath, encoding: .utf8)) else {
+            XCTFail("Cannot read config.cpp"); return
+        }
+        guard let callRange = content.range(of: "weakly_canonical") else {
+            XCTFail("Cannot find weakly_canonical"); return
+        }
+        // Look for a try {} catch (filesystem_error) ... within ~30 lines.
+        let body = substring(content, from: callRange.lowerBound, length: 1500)
+        let hasTryCatch = body.contains("try {") && body.contains("catch")
+        let usesNoThrow = body.contains("std::error_code")
+            || body.contains("ec)")
+        XCTAssertTrue(hasTryCatch || usesNoThrow,
+            "Bug M14 CONFIRMED: config.cpp calls std::filesystem::weakly_canonical " +
+            "without a try/catch and without the std::error_code overload. The " +
+            "filesystem_error propagates out of main() with an opaque what() " +
+            "string. " +
+            "Fix: wrap the call in try/catch with a friendly error message, " +
+            "or use the std::error_code overload.")
+    }
+
+    // =======================================================================
+    // Bug M15 — Insufficient buffer bounds in FFTProcessor
+    //
+    // Validates lo but not hi before vDSP_sve. Corrupted band edge → OOB.
+    // =======================================================================
+
+    func testBugM15_fftProcessorValidatesHiBound() {
+        guard let content = readSource("OpenVerb/Input/FFTProcessor.swift") else {
+            XCTFail("Cannot read FFTProcessor.swift"); return
+        }
+        guard let svRange = content.range(of: "vDSP_sve") else {
+            XCTFail("Cannot find vDSP_sve"); return
+        }
+        let body = substring(content, from: svRange.lowerBound, length: 600)
+        // Fix: explicit `hi` bound check (`hi <= fftSize / 2` or `hi >= lo`).
+        let validatesHi = body.contains("hi <=")
+            || body.contains("hi >=")
+            || body.contains("hi < ")
+            || body.contains("guard hi")
+        XCTAssertTrue(validatesHi,
+            "Bug M15 CONFIRMED: FFTProcessor validates `lo` against the FFT " +
+            "buffer bounds but not `hi`. A corrupted bandEdges array (or a " +
+            "future config with overlapping bands) yields hi > fftSize/2 — " +
+            "vDSP_sve reads past the buffer. " +
+            "Fix: `guard lo < hi && hi <= fftSize / 2 else { return 0 }`.")
+    }
+
+    // =======================================================================
+    // Bug M16 — Esc timestamp dedup misses rapid double-presses
+    //
+    // Two Escape events in same event loop iteration both pass the
+    // ts != lastEscapeTimestamp check.
+    // =======================================================================
+
+    func testBugM16_escapeDedupHandlesSameTimestamp() {
+        guard let content = readSource("OpenVerb/Input/HotkeyManager.swift") else {
+            XCTFail("Cannot read HotkeyManager.swift"); return
+        }
+        guard let escRange = content.range(of: "lastEscapeTimestamp")
+            ?? content.range(of: "Escape") else {
+            XCTFail("Cannot find Escape dedup logic in HotkeyManager"); return
+        }
+        let body = substring(content, from: escRange.lowerBound, length: 1500)
+        // Fix: time-window dedup, or set/queue based dedup, or eventID-based.
+        let hasWindowDedup = body.contains("0.05") // 50ms window
+            || body.contains("0.1")  // 100ms window
+            || body.contains("CFAbsoluteTimeGetCurrent")
+                && body.contains("- last")
+            || body.contains("eventID")
+            || body.contains("Set<")
+            || body.contains("kEscapeDebounce")
+        XCTAssertTrue(hasWindowDedup,
+            "Bug M16 CONFIRMED: HotkeyManager dedups Escape via " +
+            "`ts != lastEscapeTimestamp`. Two CGEvent Escape events fired in " +
+            "the same event-loop iteration share a timestamp; the second " +
+            "passes the inequality check and the cancel handler fires twice " +
+            "— double cancel can race recording state machine. " +
+            "Fix: use a time-window debounce (`now - lastEscapeAt > 0.05s`) " +
+            "or compare event IDs instead of timestamps.")
+    }
+
+    // =======================================================================
+    // Bug M17 — O(n) linear search on hot path
+    //
+    // AudioRingBuffer filters all entries + finds min timestamp on every
+    // write — O(n) on audio thread.
+    // =======================================================================
+
+    func testBugM17_audioRingBufferOnHotPathHasOptimisedScan() {
+        guard let content = readSource("OpenVerb/Input/AudioRingBuffer.swift") else {
+            XCTFail("Cannot read AudioRingBuffer.swift"); return
+        }
+        // Fix: a sorted-insertion array, an indexed pointer, a min-heap, or
+        // an explicit "earliest eligible" cursor.
+        let usesOptimisedDS = content.contains("earliestEligible")
+            || content.contains("oldestPointer")
+            || content.contains("minTimestampCursor")
+            || content.contains("sortedDeque")
+            || content.contains("CFBinaryHeap")
+            || content.contains("priorityQueue")
+        // OR: the filter call has been removed from the audio-thread write path.
+        let stillScansEveryWrite = content.contains(".filter {") &&
+            content.contains("min(by:")
+        XCTAssertTrue(usesOptimisedDS || !stillScansEveryWrite,
+            "Bug M17 CONFIRMED: AudioRingBuffer filters all entries + finds " +
+            "the min timestamp on every write — O(n) where n can reach " +
+            "2343 entries. Running this on the audio thread pessimises real- " +
+            "time performance and can cause priority inversion under load. " +
+            "Fix: maintain an `earliestEligible` cursor or a sorted insertion " +
+            "structure so the min lookup is O(1).")
+    }
 }
