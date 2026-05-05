@@ -256,10 +256,3 @@ void send_polished_result(int fd, const std::string& text) {
     msg["text"] = text;
     send_json(fd, msg);
 }
-
-void send_polish_delta(int fd, const std::string& text) {
-    nlohmann::json msg;
-    msg["type"] = "polish_delta";
-    msg["text"] = text;
-    send_json(fd, msg);
-}

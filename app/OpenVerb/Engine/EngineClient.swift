@@ -81,11 +81,6 @@ final class EngineClient {
     /// The caller should replace the pending injected text with the polished version.
     var onPolishedResult: ((String) -> Void)?
 
-    /// Called once per polish-token piece as the engine streams the polish pass.
-    /// Caller appends to polishedText for live diff animation. Final cleanup
-    /// arrives via onPolishedResult, which replaces the accumulated value.
-    var onPolishDelta: ((String) -> Void)?
-
     // -----------------------------------------------------------------------
     // RecvAccumulator — buffers partial reads across receiveMessage() calls.
     // -----------------------------------------------------------------------

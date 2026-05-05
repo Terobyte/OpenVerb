@@ -42,10 +42,8 @@ public:
     void unload_model() override {}
 
     InferenceResult process_text(
-        const std::string&                          prompt,
-        std::function<void(float)>,
-        std::function<void(std::string_view)>       /*token_cb*/   = nullptr,
-        const std::atomic<bool>*                    /*abort_flag*/ = nullptr) override
+        const std::string& prompt,
+        std::function<void(float)>) override
     {
         last_prompt = prompt;
         return InferenceResult{output, "", 5};

@@ -26,7 +26,6 @@
 #include <mutex>
 #include <shared_mutex>
 #include <string>
-#include <string_view>
 #include <vector>
 
 namespace openverb {
@@ -74,20 +73,9 @@ public:
     // punctuation.  Uses the same llama.cpp inference path as process_stream but
     // with a text-only prompt (no audio tokens).
     //
-    //   raw        — raw transcript to polish.
-    //   ctx        — surrounding-text context (before/after cursor) for tone match.
-    //   token_cb   — when non-null, invoked once per UTF-8-safe piece as the
-    //                model generates tokens. The IPC layer uses this to stream
-    //                polish_delta events to the client. The returned final
-    //                string is still cleaned via strip_thinking_block + control
-    //                token stripping.
-    //   abort_flag — when non-null, exits the decode loop early if set.
-    //
     // Returns the polished transcript, or raw (unchanged) on error.
     // ---------------------------------------------------------------------------
-    std::string polish_text(const std::string& raw, const Context& ctx,
-                            std::function<void(std::string_view)> token_cb   = nullptr,
-                            const std::atomic<bool>*              abort_flag = nullptr);
+    std::string polish_text(const std::string& raw, const Context& ctx);
 
 private:
     Config                   cfg_;

@@ -5,7 +5,6 @@
 #include <functional>
 #include <memory>
 #include <string>
-#include <string_view>
 #include <vector>
 
 class ProgressQueue;
@@ -69,26 +68,17 @@ public:
     // -----------------------------------------------------------------------
     // process_text — run text-only inference (no audio input).
     //
-    //   prompt     — full text prompt; passed directly to the model without
-    //                audio tokenisation.
-    //   progress   — optional progress callback; nullptr = no-op.
-    //   token_cb   — optional per-token streaming callback; invoked once per
-    //                UTF-8-safe piece of generated text. Used by Engine::
-    //                polish_text() to stream polish_delta IPC events.
-    //   abort_flag — when non-null, exits early if set to true.
+    //   prompt   — full text prompt; passed directly to the model without
+    //              audio tokenisation.
+    //   progress — optional progress callback; nullptr = no-op.
     //
     // Used by Engine::polish_text() which is a text-only operation.
     // Default implementation returns an empty result (safe no-op for mocks
     // and backends that do not support text-only inference).
     // -----------------------------------------------------------------------
     virtual InferenceResult process_text(
-        const std::string&                          prompt,
-        std::function<void(float)>                  progress,
-        std::function<void(std::string_view)>       token_cb   = nullptr,
-        const std::atomic<bool>*                    abort_flag = nullptr) {
-        (void)prompt; (void)progress; (void)token_cb; (void)abort_flag;
-        return InferenceResult{};
-    }
+        const std::string&         prompt,
+        std::function<void(float)> progress) { (void)prompt; (void)progress; return InferenceResult{}; }
 
     // -----------------------------------------------------------------------
     // warmup — run a single throwaway inference to compile compute graphs and
